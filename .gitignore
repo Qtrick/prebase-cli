@@ -1,0 +1,23 @@
+# Source archives and local migration references
+/.reference/
+
+# Rust build outputs
+target/
+
+# Node / Frontend build outputs
+node_modules/
+dist/
+build/
+.cache/
+
+# Environment / Secret files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# OS files
+.DS_Store
+Thumbs.db
+

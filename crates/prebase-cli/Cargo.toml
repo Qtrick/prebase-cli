@@ -1,0 +1,25 @@
+[package]
+name = "prebase-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prebase"
+path = "src/main.rs"
+
+[dependencies]
+prebase-core = { path = "../prebase-core" }
+prebase-parser = { path = "../prebase-parser" }
+prebase-server = { path = "../prebase-server" }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+open = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = { workspace = true }
+

@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CanonicalGraphSnapshot",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository_id",
+    "revision",
+    "nodes",
+    "edges",
+    "coverage",
+    "issues"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "repository_id": { "type": "string" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/FileNode" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/DependencyEdge" }
+    },
+    "coverage": { "$ref": "#/definitions/AnalysisCoverage" },
+    "issues": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/AnalysisIssue" }
+    }
+  },
+  "definitions": {
+    "FileNode": {
+      "type": "object",
+      "required": ["id", "relative_path", "filename", "language", "analysis_status"],
+      "properties": {
+        "id": { "type": "string" },
+        "relative_path": { "type": "string" },
+        "filename": { "type": "string" },
+        "language": { "type": "string" },
+        "size_bytes": { "type": "integer" },
+        "file_kind": { "type": "string" },
+        "analysis_status": {
+          "type": "string",
+          "enum": ["Pending", "Analyzed", "Excluded", "Failed"]
+        },
+        "direct_dependency_count": { "type": "integer" },
+        "direct_dependent_count": { "type": "integer" }
+      }
+    },
+    "DependencyEdge": {
+      "type": "object",
+      "required": ["id", "source_file_id", "target_file_id", "relationship_kind", "resolution_status", "evidence"],
+      "properties": {
+        "id": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "target_file_id": { "type": "string" },
+        "relationship_kind": {
+          "type": "string",
+          "enum": ["Import", "Export", "DynamicImport", "TypeOnly"]
+        },
+        "resolution_status": {
+          "type": "string",
+          "enum": ["ResolvedInternal", "ExternalPackage", "Unresolved", "Unsupported"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DependencyEvidence" }
+        }
+      }
+    },
+    "DependencyEvidence": {
+      "type": "object",
+      "required": ["source_file_id", "import_specifier", "line", "column", "relationship_kind"],
+      "properties": {
+        "source_file_id": { "type": "string" },
+        "import_specifier": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "relationship_kind": { "type": "string" },
+        "is_type_only": { "type": "boolean" }
+      }
+    },
+    "AnalysisCoverage": {
+      "type": "object",
+      "required": ["total_discovered", "total_analyzed", "total_excluded", "total_issues", "is_complete"],
+      "properties": {
+        "total_discovered": { "type": "integer" },
+        "total_analyzed": { "type": "integer" },
+        "total_excluded": { "type": "integer" },
+        "total_issues": { "type": "integer" },
+        "is_complete": { "type": "boolean" }
+      }
+    },
+    "AnalysisIssue": {
+      "type": "object",
+      "required": ["file_path", "issue_kind", "message"],
+      "properties": {
+        "file_path": { "type": "string" },
+        "issue_kind": { "type": "string" },
+        "message": { "type": "string" },
+        "line": { "type": ["integer", "null"] },
+        "column": { "type": ["integer", "null"] }
+      }
+    }
+  }
+}
+
