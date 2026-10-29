@@ -12,6 +12,8 @@ interface NetworkCanvasProps {
   onSelectNode: (node: FileNode | null) => void;
   onSelectEdge: (edge: DependencyEdge | null) => void;
   focusedNodeId: string | null;
+  fitViewTrigger?: number;
+  resetViewTrigger?: number;
 }
 
 export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
@@ -21,6 +23,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   onSelectNode,
   onSelectEdge,
   focusedNodeId,
+  fitViewTrigger,
+  resetViewTrigger,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,16 +56,35 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       target: e.target_file_id,
     }));
 
+    const isFirstRun = positions.size === 0;
     const computed = layoutOrganic(layoutNodes, layoutLinks);
     setPositions(computed);
 
-    // Initial fit view
-    if (containerRef.current) {
+    // Initial fit view ONLY on first load (preserve viewport on live updates!)
+    if (isFirstRun && containerRef.current) {
       const width = containerRef.current.clientWidth || 800;
       const height = containerRef.current.clientHeight || 600;
       fitViewToPoints(computed, width, height);
     }
   }, [snapshot]);
+
+  // Handle external fit view trigger
+  useEffect(() => {
+    if (fitViewTrigger && fitViewTrigger > 0 && containerRef.current && positions.size > 0) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      fitViewToPoints(positions, width, height);
+    }
+  }, [fitViewTrigger, positions]);
+
+  // Handle external reset view trigger
+  useEffect(() => {
+    if (resetViewTrigger && resetViewTrigger > 0 && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      setTransform({ x: width / 2, y: height / 2, k: 1 });
+    }
+  }, [resetViewTrigger]);
 
   // Neighbor map for highlighting
   const neighborMap = useMemo(() => {

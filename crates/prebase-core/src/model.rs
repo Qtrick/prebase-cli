@@ -122,4 +122,3 @@ pub struct GraphSnapshot {
     pub coverage: AnalysisCoverage,
     pub issues: Vec<AnalysisIssue>,
 }
-

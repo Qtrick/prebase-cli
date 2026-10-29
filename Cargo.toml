@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/prebase-core",
     "crates/prebase-parser",
+    "crates/prebase-git",
     "crates/prebase-server",
     "crates/prebase-cli",
 ]
@@ -35,4 +36,7 @@ rust-embed = "8.5"
 mime_guess = "2.0"
 rand = "0.8"
 tempfile = "3.10"
+notify = "6.1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 

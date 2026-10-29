@@ -10,6 +10,7 @@ use crate::auth::{generate_session_token, host_and_auth_middleware, security_hea
 use crate::routes::*;
 use crate::state::AppState;
 use crate::static_assets::serve_static_asset;
+use crate::watcher::{start_repo_watcher, RepoWatcherHandle};
 
 pub struct RunningServer {
     pub port: u16,
@@ -17,6 +18,7 @@ pub struct RunningServer {
     pub state: Arc<AppState>,
     pub shutdown_tx: oneshot::Sender<()>,
     pub server_handle: tokio::task::JoinHandle<()>,
+    pub watcher_handle: Option<RepoWatcherHandle>,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -28,7 +30,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/files", get(handle_search_files))
         .route("/files/*file_id", get(handle_inspect_file))
         .route("/edges/*edge_id", get(handle_inspect_edge))
-        .route("/source/*file_path", get(handle_get_source));
+        .route("/source/*file_path", get(handle_get_source))
+        .route("/history", get(handle_history))
+        .route("/commits/*hash", get(handle_commit_details))
+        .route("/file-history", get(handle_file_history))
+        .route("/git/status", get(handle_git_status))
+        .route("/events", get(handle_events));
 
     Router::new()
         .nest("/api/v1", api_router)
@@ -48,10 +55,11 @@ pub async fn start_server(
     repo_name: String,
     repo_id: String,
     port: Option<u16>,
+    watch_filesystem: bool,
 ) -> Result<RunningServer, Box<dyn std::error::Error + Send + Sync>> {
     let session_token = generate_session_token();
     let state = Arc::new(AppState::new(
-        root_path,
+        root_path.clone(),
         repo_name,
         repo_id,
         session_token.clone(),
@@ -77,11 +85,27 @@ pub async fn start_server(
             .unwrap_or_else(|e| tracing::error!("Server error: {e}"));
     });
 
+    let watcher_handle = if watch_filesystem {
+        match start_repo_watcher(state.clone()) {
+            Ok(handle) => {
+                info!("Filesystem watcher active for {}", root_path.display());
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize filesystem watcher: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(RunningServer {
         port: allocated_port,
         session_token,
         state,
         shutdown_tx,
         server_handle,
+        watcher_handle,
     })
 }

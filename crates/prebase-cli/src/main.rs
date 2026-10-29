@@ -13,8 +13,8 @@ use prebase_server::start_server;
     name = "prebase",
     author = "PreBase Contributors",
     version = "0.1.0",
-    about = "PreBase CLI — Local-first Codebase Intelligence & Interactive Network Graph",
-    long_about = "PreBase is a local-first codebase intelligence application that analyzes repository\nstructure and renders an interactive, dependency-aware Network Graph in your local browser."
+    about = "PreBase CLI — Local-first Codebase Intelligence & Interactive Network/Temporal Graphs",
+    long_about = "PreBase is a local-first codebase intelligence application that analyzes repository\nstructure and Git history, rendering interactive Network and Temporal graphs in your local browser."
 )]
 pub struct CliArgs {
     /// Target repository path to analyze (defaults to current directory)
@@ -29,6 +29,10 @@ pub struct CliArgs {
     #[arg(long, global = true)]
     pub no_open: bool,
 
+    /// Disable live filesystem watching and incremental graph synchronization
+    #[arg(long, global = true)]
+    pub no_watch: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -40,7 +44,7 @@ pub enum Commands {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Inspect Git history and historical changes (Temporal Graph — Planned for Phase 2)
+    /// Inspect Git commit history, ancestry DAG, and changed files (Temporal Graph)
     History {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
@@ -56,20 +60,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let args = CliArgs::parse();
 
+    let is_history_command = matches!(args.command, Some(Commands::History { .. }));
+
     let target_path = match &args.command {
         Some(Commands::Map { path: Some(p) }) => p.clone(),
-        Some(Commands::History { path: Some(p) }) => {
-            println!("\x1b[33mNote:\x1b[0m Temporal Graph is scheduled for Prompt 2. Launching PreBase Network view.\n");
-            p.clone()
-        }
+        Some(Commands::History { path: Some(p) }) => p.clone(),
         Some(Commands::History { path: None }) => {
-            println!("\x1b[33mNote:\x1b[0m Temporal Graph is scheduled for Prompt 2. Launching PreBase Network view.\n");
             args.path.clone().unwrap_or_else(|| PathBuf::from("."))
         }
         _ => args.path.clone().unwrap_or_else(|| PathBuf::from(".")),
     };
 
-    println!("\x1b[1;36mPreBase CLI v0.1.0\x1b[0m — Codebase Intelligence");
+    println!("\x1b[1;36mPreBase CLI v0.1.0\x1b[0m — Codebase Intelligence & Temporal Analysis");
 
     // 1. Repository discovery
     let canonical_root = match RepositoryScanner::discover_root(&target_path) {
@@ -99,24 +101,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         canonical_root.display()
     );
 
-    // 2. Start local Axum server
+    // 2. Start local Axum server with optional filesystem watching
+    let watch_filesystem = !args.no_watch;
     let server = start_server(
         canonical_root.clone(),
         repo_name.clone(),
         repo_id.clone(),
         args.port,
+        watch_filesystem,
     )
     .await?;
 
+    let default_view = if is_history_command {
+        "temporal"
+    } else {
+        "network"
+    };
+
     let url = format!(
-        "http://127.0.0.1:{}/?token={}",
-        server.port, server.session_token
+        "http://127.0.0.1:{}/?token={}&view={}",
+        server.port, server.session_token, default_view
     );
 
     println!(
         "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34m{}\x1b[0m",
         url
     );
+
+    if watch_filesystem {
+        println!("  \x1b[36mℹ\x1b[0m Live filesystem monitoring enabled (SSE stream active)");
+    }
 
     // 3. Launch browser if not --no-open
     if !args.no_open {
@@ -139,13 +153,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match tokio::task::spawn_blocking(move || analyzer.analyze_path(&root_clone)).await {
             Ok(Ok(result)) => {
                 let duration = start.elapsed().as_millis();
+                let node_count = result.snapshot.nodes.len();
+                let edge_count = result.snapshot.edges.len();
                 println!(
                     "\x1b[32m✔\x1b[0m Indexed \x1b[1m{}\x1b[0m files with \x1b[1m{}\x1b[0m confirmed relationships in {}ms",
-                    result.snapshot.nodes.len(),
-                    result.snapshot.edges.len(),
+                    node_count,
+                    edge_count,
                     duration
                 );
-                state_clone.set_ready(result.snapshot, result.index);
+                let _ = state_clone.publish_network(result.snapshot, result.index, vec![], None);
             }
             Ok(Err(err)) => {
                 error!("Repository analysis failed: {err}");

@@ -1,9 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo } from '../types/graph';
+import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api } from '../transport/api';
 import { NetworkCanvas } from '../graphs/network/NetworkCanvas';
+import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
 import { Inspector } from '../inspector/Inspector';
+import { CommitInspector } from '../inspector/CommitInspector';
 import {
   Share2,
   Clock,
@@ -14,10 +17,22 @@ import {
   AlertCircle,
   FolderGit2,
   Layers,
+  GitBranch,
+  X,
+  Radio,
 } from 'lucide-react';
 import './App.css';
 
 export const App: React.FC = () => {
+  // Read initial view from URL (?view=temporal or ?view=network)
+  const initialView = (() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('view') === 'temporal' ? 'temporal' : 'network';
+  })();
+
+  const [activeTab, setActiveTab] = useState<'network' | 'temporal'>(initialView);
+
+  // Network state
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
   const [status, setStatus] = useState<string>('Scanning');
@@ -26,9 +41,23 @@ export const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<FileNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'network' | 'temporal'>('network');
 
-  // Load initial repository info and poll status until ready
+  // Temporal state
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [commits, setCommits] = useState<CommitSummary[]>([]);
+  const [selectedCommit, setSelectedCommit] = useState<CommitSummary | null>(null);
+  const [temporalLoading, setTemporalLoading] = useState(false);
+  const [temporalFilterPath, setTemporalFilterPath] = useState<string | null>(null);
+
+  // Live SSE sync state
+  const [liveRevision, setLiveRevision] = useState<number>(0);
+  const [liveNotice, setLiveNotice] = useState<string | null>(null);
+
+  // View triggers (true bounding box fit view & reset view)
+  const [fitViewCounter, setFitViewCounter] = useState(0);
+  const [resetViewCounter, setResetViewCounter] = useState(0);
+
+  // 1. Initial repository info & polling until ready
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -36,6 +65,7 @@ export const App: React.FC = () => {
       try {
         const repo = await api.getRepository();
         setRepoInfo(repo);
+        setLiveRevision(repo.analysis_revision);
 
         const st = await api.getStatus();
         setStatus(st.indexing_status);
@@ -43,10 +73,11 @@ export const App: React.FC = () => {
         if (st.indexing_status === 'Ready') {
           const snap = await api.getNetwork();
           setSnapshot(snap);
+          setLiveRevision(snap.revision);
         } else if (st.indexing_status === 'Failed') {
           setError('Repository analysis failed. Please check CLI terminal output.');
         } else {
-          timer = setTimeout(checkStatus, 800);
+          timer = setTimeout(checkStatus, 700);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -56,9 +87,82 @@ export const App: React.FC = () => {
 
     checkStatus();
 
+    // Also fetch git status initially
+    api.getGitStatus().then(setGitStatus).catch(() => {});
+
     return () => clearTimeout(timer);
   }, []);
 
+  // 2. Fetch Git commit history (full or filtered by file)
+  const loadCommits = useCallback(async (filterPath?: string | null) => {
+    setTemporalLoading(true);
+    try {
+      if (filterPath) {
+        const res = await api.getFileHistory(filterPath, 100);
+        setCommits(res.commits);
+      } else {
+        const res = await api.getHistory(150);
+        setCommits(res.commits);
+      }
+    } catch (e) {
+      // Git might not be initialized or history empty
+      setCommits([]);
+    } finally {
+      setTemporalLoading(false);
+    }
+  }, []);
+
+  // Load commits when active tab is temporal or filter changes
+  useEffect(() => {
+    if (activeTab === 'temporal') {
+      loadCommits(temporalFilterPath);
+    }
+  }, [activeTab, temporalFilterPath, loadCommits]);
+
+  // 3. Authenticated Server-Sent Events (SSE) for Live Updates
+  useEffect(() => {
+    const unsubscribe = api.subscribeToEvents((event: ServerEvent) => {
+      if (event.type === 'network.updated') {
+        const { revision, changed_files } = event.data;
+        setLiveRevision(revision);
+
+        // Fetch latest network snapshot without full page reload
+        api
+          .getNetwork()
+          .then((newSnap) => {
+            setSnapshot(newSnap);
+            setStatus('Ready');
+
+            // Flash subtle live-update toast
+            const fileNotice =
+              changed_files.length > 0
+                ? `${changed_files.length} file(s) updated`
+                : 'Graph reanalyzed';
+            setLiveNotice(`Live update: ${fileNotice} (rev ${revision})`);
+            setTimeout(() => setLiveNotice(null), 3500);
+
+            // Re-sync selected node if still exists in the new snapshot
+            setSelectedNode((prev) => {
+              if (!prev) return null;
+              return newSnap.nodes.find((n) => n.id === prev.id) || null;
+            });
+          })
+          .catch(() => {});
+      } else if (event.type === 'git.updated') {
+        // Git branch or head commit changed
+        api.getGitStatus().then(setGitStatus).catch(() => {});
+        if (activeTab === 'temporal') {
+          loadCommits(temporalFilterPath);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [activeTab, temporalFilterPath, loadCommits]);
+
+  // Selection handlers
   const handleSelectNode = useCallback((node: FileNode | null) => {
     setSelectedNode(node);
     setSelectedEdge(null);
@@ -70,6 +174,23 @@ export const App: React.FC = () => {
   const handleSelectEdge = useCallback((edge: DependencyEdge | null) => {
     setSelectedEdge(edge);
     setSelectedNode(null);
+  }, []);
+
+  // Cross-Graph: Switch from Network Inspector to Temporal with file history filter
+  const handleViewFileHistory = useCallback((filePath: string) => {
+    setTemporalFilterPath(filePath);
+    setActiveTab('temporal');
+    setSelectedNode(null);
+    setSelectedEdge(null);
+  }, []);
+
+  // Cross-Graph: Switch from Temporal Commit Inspector to Network Graph focused on file
+  const handleNavigateToNetwork = useCallback((node: FileNode) => {
+    setActiveTab('network');
+    setSelectedCommit(null);
+    setSelectedNode(node);
+    setSelectedEdge(null);
+    setFocusedNodeId(node.id);
   }, []);
 
   return (
@@ -92,6 +213,14 @@ export const App: React.FC = () => {
           </div>
         </div>
 
+        {gitStatus?.branch && (
+          <div className="git-branch-badge">
+            <GitBranch size={13} color="#818cf8" />
+            <span className="mono">{gitStatus.branch}</span>
+            {gitStatus.is_dirty && <span className="dirty-dot" title="Working tree has uncommitted changes" />}
+          </div>
+        )}
+
         <nav className="nav-menu">
           <button
             className={`nav-item ${activeTab === 'network' ? 'active' : ''}`}
@@ -106,7 +235,6 @@ export const App: React.FC = () => {
           >
             <Clock size={16} />
             <span>Temporal Graph</span>
-            <span className="pill-badge">Prompt 2</span>
           </button>
         </nav>
 
@@ -115,7 +243,7 @@ export const App: React.FC = () => {
             {status === 'Ready' ? (
               <>
                 <CheckCircle2 size={15} color="#2dd4bf" />
-                <span>Index Ready</span>
+                <span>Index Ready (r{liveRevision})</span>
               </>
             ) : status === 'Failed' ? (
               <>
@@ -129,6 +257,12 @@ export const App: React.FC = () => {
               </>
             )}
           </div>
+
+          <div className="live-watcher-badge">
+            <Radio size={12} className="pulse-icon" color="#2dd4bf" />
+            <span>Live Watcher Active</span>
+          </div>
+
           {snapshot && (
             <div className="stats-summary">
               <span className="stat-line">
@@ -146,21 +280,24 @@ export const App: React.FC = () => {
       <main className="main-content">
         {/* Top Floating Control Bar */}
         <header className="workspace-header">
-          <SearchBox
-            files={snapshot?.nodes || []}
-            onSelectNode={(node) => handleSelectNode(node)}
-          />
+          {activeTab === 'network' ? (
+            <SearchBox
+              files={snapshot?.nodes || []}
+              onSelectNode={(node) => handleSelectNode(node)}
+            />
+          ) : (
+            <div className="temporal-header-info">
+              <Clock size={15} color="#38bdf8" />
+              <span>Git Commit History & Ancestry DAG</span>
+              {commits.length > 0 && <span className="dim">({commits.length} commits)</span>}
+            </div>
+          )}
 
           <div className="view-controls">
             <button
               className="ctrl-btn"
-              onClick={() => {
-                // Trigger fit view by dispatching custom event or focusing center
-                if (snapshot?.nodes[0]) {
-                  setFocusedNodeId(snapshot.nodes[0].id);
-                }
-              }}
-              title="Fit View"
+              onClick={() => setFitViewCounter((c) => c + 1)}
+              title="Fit View to All Nodes"
             >
               <Maximize2 size={15} />
               <span>Fit View</span>
@@ -170,15 +307,42 @@ export const App: React.FC = () => {
               onClick={() => {
                 setSelectedNode(null);
                 setSelectedEdge(null);
+                setSelectedCommit(null);
                 setFocusedNodeId(null);
+                setResetViewCounter((c) => c + 1);
               }}
-              title="Reset View"
+              title="Reset Camera View"
             >
               <RotateCcw size={15} />
               <span>Reset</span>
             </button>
           </div>
         </header>
+
+        {/* Live sync toast notification */}
+        {liveNotice && (
+          <div className="live-toast">
+            <Radio size={14} color="#2dd4bf" />
+            <span>{liveNotice}</span>
+          </div>
+        )}
+
+        {/* Active Filter Banner in Temporal View */}
+        {activeTab === 'temporal' && temporalFilterPath && (
+          <div className="temporal-filter-bar">
+            <span>
+              Showing commit history for: <strong className="mono">{temporalFilterPath}</strong>
+            </span>
+            <button
+              className="clear-filter-btn"
+              onClick={() => setTemporalFilterPath(null)}
+              title="Clear file filter"
+            >
+              <X size={13} />
+              <span>Show All History</span>
+            </button>
+          </div>
+        )}
 
         {/* View Content */}
         {activeTab === 'network' ? (
@@ -208,34 +372,68 @@ export const App: React.FC = () => {
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
                 focusedNodeId={focusedNodeId}
+                fitViewTrigger={fitViewCounter}
+                resetViewTrigger={resetViewCounter}
               />
             )}
           </div>
         ) : (
-          <div className="temporal-placeholder">
-            <Clock size={48} color="#38bdf8" />
-            <h2>Temporal Graph</h2>
-            <p>
-              Git commit history analysis, lineage tracking, and structural snapshots are scheduled for <strong>Prompt 2</strong>.
-            </p>
-            <button className="primary-btn" onClick={() => setActiveTab('network')}>
-              Return to Network Graph
-            </button>
+          <div className="graph-container">
+            {temporalLoading ? (
+              <div className="loading-overlay">
+                <Loader2 size={36} className="spinner" color="#38bdf8" />
+                <h3>Loading Git ancestry DAG...</h3>
+                <p>Reading commit topology and lane allocations.</p>
+              </div>
+            ) : commits.length === 0 ? (
+              <div className="empty-overlay">
+                <Clock size={36} color="#64748b" />
+                <h3>No Git commit history available</h3>
+                <p>
+                  {temporalFilterPath
+                    ? `No commits found touching "${temporalFilterPath}".`
+                    : 'The target directory is not a Git repository or has 0 commits.'}
+                </p>
+                {temporalFilterPath && (
+                  <button className="primary-btn" onClick={() => setTemporalFilterPath(null)}>
+                    Clear File Filter
+                  </button>
+                )}
+              </div>
+            ) : (
+              <TemporalCanvas
+                commits={commits}
+                selectedCommitHash={selectedCommit?.hash || null}
+                onSelectCommit={setSelectedCommit}
+                fitViewTrigger={fitViewCounter}
+                resetViewTrigger={resetViewCounter}
+              />
+            )}
           </div>
         )}
       </main>
 
-      {/* 3. Right Inspector */}
-      <Inspector
-        selectedNode={selectedNode}
-        selectedEdge={selectedEdge}
-        snapshot={snapshot}
-        onSelectNode={handleSelectNode}
-        onClose={() => {
-          setSelectedNode(null);
-          setSelectedEdge(null);
-        }}
-      />
+      {/* 3. Right Inspector (Network Inspector or Temporal Commit Inspector) */}
+      {activeTab === 'temporal' && selectedCommit ? (
+        <CommitInspector
+          selectedCommit={selectedCommit}
+          snapshot={snapshot}
+          onClose={() => setSelectedCommit(null)}
+          onNavigateToNetwork={handleNavigateToNetwork}
+        />
+      ) : (
+        <Inspector
+          selectedNode={selectedNode}
+          selectedEdge={selectedEdge}
+          snapshot={snapshot}
+          onSelectNode={handleSelectNode}
+          onClose={() => {
+            setSelectedNode(null);
+            setSelectedEdge(null);
+          }}
+          onViewFileHistory={handleViewFileHistory}
+        />
+      )}
     </div>
   );
 };

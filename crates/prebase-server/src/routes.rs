@@ -1,17 +1,25 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     Json,
 };
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tracing::warn;
 
 use prebase_core::model::{
     DependencyEdge, FileNode, GraphSnapshot, IndexingStatus, RepositoryInfo,
 };
 use prebase_core::scanner::RepositoryScanner;
+use prebase_git::{CommitDetails, FileHistoryResult, GitStatus, HistoryPage};
 
 use crate::state::AppState;
 
@@ -33,6 +41,18 @@ pub struct SearchQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FileHistoryQuery {
+    pub path: String,
+    pub limit: Option<usize>,
+}
+
 pub async fn handle_health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -42,7 +62,7 @@ pub async fn handle_health() -> Json<HealthResponse> {
 
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let status = state.get_status();
-    let revision = state.repo_info.read().unwrap().analysis_revision;
+    let revision = state.get_current_revision();
     Json(StatusResponse {
         indexing_status: status,
         revision,
@@ -52,16 +72,14 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRes
 pub async fn handle_repository(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RepositoryInfo>, (StatusCode, &'static str)> {
-    let info = state.repo_info.read().unwrap().clone();
-    Ok(Json(info))
+    Ok(Json(state.get_repository_info()))
 }
 
 pub async fn handle_network(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<GraphSnapshot>, (StatusCode, &'static str)> {
-    let snap_guard = state.snapshot.read().unwrap();
-    match snap_guard.as_ref() {
-        Some(snapshot) => Ok(Json(snapshot.clone())),
+    match state.get_published() {
+        Some(published) => Ok(Json((*published.snapshot).clone())),
         None => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Repository indexing not ready yet",
@@ -73,9 +91,8 @@ pub async fn handle_search_files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<FileNode>>, (StatusCode, &'static str)> {
-    let index_guard = state.index.read().unwrap();
-    let index = match index_guard.as_ref() {
-        Some(idx) => idx,
+    let published = match state.get_published() {
+        Some(p) => p,
         None => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -87,7 +104,7 @@ pub async fn handle_search_files(
     let q = query.q.as_deref().unwrap_or("");
     let limit = query.limit.unwrap_or(50).min(200);
 
-    let results = index.search_files(q, limit);
+    let results = published.index.search_files(q, limit);
     Ok(Json(results))
 }
 
@@ -95,9 +112,8 @@ pub async fn handle_inspect_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
-    let index_guard = state.index.read().unwrap();
-    let index = match index_guard.as_ref() {
-        Some(idx) => idx,
+    let published = match state.get_published() {
+        Some(p) => p,
         None => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -106,7 +122,7 @@ pub async fn handle_inspect_file(
         }
     };
 
-    match index.inspect_file(&file_id) {
+    match published.index.inspect_file(&file_id) {
         Some(inspection) => Ok(Json(inspection)),
         None => Err((StatusCode::NOT_FOUND, "File node not found")),
     }
@@ -116,9 +132,8 @@ pub async fn handle_inspect_edge(
     State(state): State<Arc<AppState>>,
     Path(edge_id): Path<String>,
 ) -> Result<Json<DependencyEdge>, (StatusCode, &'static str)> {
-    let index_guard = state.index.read().unwrap();
-    let index = match index_guard.as_ref() {
-        Some(idx) => idx,
+    let published = match state.get_published() {
+        Some(p) => p,
         None => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -127,7 +142,7 @@ pub async fn handle_inspect_edge(
         }
     };
 
-    match index.get_edge(&edge_id) {
+    match published.index.get_edge(&edge_id) {
         Some(edge) => Ok(Json(edge.clone())),
         None => Err((StatusCode::NOT_FOUND, "Edge not found")),
     }
@@ -183,4 +198,87 @@ pub async fn handle_get_source(
             "Failed to read source file",
         )),
     }
+}
+
+// -------------------------------------------------------------
+// Temporal & Git Routes
+// -------------------------------------------------------------
+
+pub async fn handle_history(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryPage>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let git = state.git_engine.clone();
+    let cursor = query.cursor;
+
+    tokio::task::spawn_blocking(move || git.get_history(limit, cursor.as_deref()))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn handle_commit_details(
+    State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+) -> Result<Json<CommitDetails>, (StatusCode, String)> {
+    let git = state.git_engine.clone();
+    tokio::task::spawn_blocking(move || git.get_commit_details(&hash))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| match e {
+            prebase_git::GitError::CommitNotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })
+}
+
+pub async fn handle_file_history(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FileHistoryQuery>,
+) -> Result<Json<FileHistoryResult>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(50).min(100);
+    let git = state.git_engine.clone();
+    let path = query.path;
+
+    tokio::task::spawn_blocking(move || git.get_file_history(&path, limit))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn handle_git_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<GitStatus>, (StatusCode, String)> {
+    let git = state.git_engine.clone();
+    tokio::task::spawn_blocking(move || git.get_status())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+// -------------------------------------------------------------
+// Live Events Route (SSE)
+// -------------------------------------------------------------
+
+pub async fn handle_events(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = state.event_sender.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(evt) => {
+            let data = serde_json::to_string(&evt).unwrap_or_default();
+            Some(Ok(Event::default().data(data)))
+        }
+        Err(_) => None,
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("heartbeat"),
+    )
 }

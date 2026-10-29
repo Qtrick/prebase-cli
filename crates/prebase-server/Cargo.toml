@@ -8,7 +8,11 @@ license.workspace = true
 [dependencies]
 prebase-core = { path = "../prebase-core" }
 prebase-parser = { path = "../prebase-parser" }
+prebase-git = { path = "../prebase-git" }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = "0.3"
+notify = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

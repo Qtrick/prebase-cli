@@ -1,8 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { DependencyEdge, FileInspection, FileNode, GraphSnapshot } from '../types/graph';
 import { api } from '../transport/api';
 import { getFileTypeColor } from '../graphs/network/fileTypeColors';
-import { X, ArrowRight, FileCode, Layers, ShieldCheck, AlertTriangle, ExternalLink } from 'lucide-react';
+import {
+  X,
+  ArrowRight,
+  FileCode,
+  Layers,
+  ShieldCheck,
+  AlertTriangle,
+  ExternalLink,
+  Clock,
+} from 'lucide-react';
 
 interface InspectorProps {
   selectedNode: FileNode | null;
@@ -10,6 +19,7 @@ interface InspectorProps {
   snapshot: GraphSnapshot | null;
   onSelectNode: (node: FileNode) => void;
   onClose: () => void;
+  onViewFileHistory?: (filePath: string) => void;
 }
 
 export const Inspector: React.FC<InspectorProps> = ({
@@ -18,29 +28,52 @@ export const Inspector: React.FC<InspectorProps> = ({
   snapshot,
   onSelectNode,
   onClose,
+  onViewFileHistory,
 }) => {
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
 
+  const requestTokenRef = useRef(0);
+
   useEffect(() => {
     if (selectedNode) {
+      const currentToken = ++requestTokenRef.current;
+      const abortController = new AbortController();
+
       setLoading(true);
       api
-        .inspectFile(selectedNode.id)
+        .inspectFile(selectedNode.id, abortController.signal)
         .then((res) => {
-          setInspection(res);
-          setLoading(false);
+          if (currentToken === requestTokenRef.current) {
+            setInspection(res);
+            setLoading(false);
+          }
         })
-        .catch(() => {
-          setLoading(false);
+        .catch((err) => {
+          if (currentToken === requestTokenRef.current) {
+            if (err instanceof Error && err.name === 'AbortError') return;
+            setLoading(false);
+          }
         });
 
-      // Optionally fetch snippet
+      // Fetch source snippet
       api
-        .getSource(selectedNode.relative_path)
-        .then((res) => setSourcePreview(res.content))
-        .catch(() => setSourcePreview(null));
+        .getSource(selectedNode.relative_path, abortController.signal)
+        .then((res) => {
+          if (currentToken === requestTokenRef.current) {
+            setSourcePreview(res.content);
+          }
+        })
+        .catch(() => {
+          if (currentToken === requestTokenRef.current) {
+            setSourcePreview(null);
+          }
+        });
+
+      return () => {
+        abortController.abort();
+      };
     } else {
       setInspection(null);
       setSourcePreview(null);
@@ -98,7 +131,10 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
           )}
           <div className="guide-box">
-            <p>💡 Click any node in the graph to inspect its direct dependencies and dependents, or search for files above.</p>
+            <h4>Network Explorer</h4>
+            <p>Click on any file node to inspect its internal dependencies and dependents.</p>
+            <p>Click any dependency relationship line to inspect its import evidence.</p>
+            <p className="mono hint">Shortcut: press "/" to quickly search files.</p>
           </div>
         </div>
       </aside>
@@ -110,11 +146,15 @@ export const Inspector: React.FC<InspectorProps> = ({
     return (
       <aside className="inspector-panel">
         <div className="inspector-header">
-          <div className="header-badge edge-badge">Relationship</div>
+          <div className="node-title-group">
+            <Layers size={16} color="#2dd4bf" />
+            <h3 className="file-name">Dependency Relationship</h3>
+          </div>
           <button className="close-btn" onClick={onClose} title="Close inspector">
             <X size={16} />
           </button>
         </div>
+
         <div className="inspector-content">
           <div className="relationship-card">
             <div
@@ -188,6 +228,18 @@ export const Inspector: React.FC<InspectorProps> = ({
           </span>
           <span className="tag status-tag">{selectedNode?.analysis_status}</span>
         </div>
+
+        {/* View File History Button */}
+        {selectedNode && onViewFileHistory && (
+          <button
+            className="view-history-btn"
+            onClick={() => onViewFileHistory(selectedNode.relative_path)}
+            title="Inspect historical Git commits for this file"
+          >
+            <Clock size={14} />
+            <span>View File History</span>
+          </button>
+        )}
 
         {loading ? (
           <div className="loading-state">Analyzing relationships...</div>
@@ -267,4 +319,3 @@ export const Inspector: React.FC<InspectorProps> = ({
     </aside>
   );
 };
-

@@ -115,11 +115,14 @@ async fn test_sample_monorepo_analysis_and_server() {
         "sample-monorepo".into(),
         "repo-sample".into(),
         None,
+        false,
     )
     .await
     .unwrap();
 
-    server.state.set_ready(snapshot.clone(), result.index);
+    let _ = server
+        .state
+        .publish_network(snapshot.clone(), result.index, vec![], None);
 
     let client = reqwest::Client::new();
     let base_url = format!("http://127.0.0.1:{}", server.port);
@@ -179,7 +182,16 @@ async fn test_sample_monorepo_analysis_and_server() {
         .unwrap();
     assert_eq!(edge_resp.status(), 200);
 
-    // 9. Test Static HTML serving
+    // 9. Test Git status endpoint
+    let git_resp = client
+        .get(format!("{base_url}/api/v1/git/status"))
+        .header("x-prebase-session", &server.session_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(git_resp.status(), 200);
+
+    // 10. Test Static HTML serving
     let static_resp = client.get(format!("{base_url}/")).send().await.unwrap();
     assert_eq!(static_resp.status(), 200);
     let html = static_resp.text().await.unwrap();
