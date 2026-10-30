@@ -44,7 +44,11 @@ pub enum FileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeAnalysisStatus {
     Pending,
+    Recognized,
+    Parsed,
     Analyzed,
+    PartiallyAnalyzed,
+    Unsupported,
     Excluded,
     Failed,
 }
@@ -68,6 +72,11 @@ pub enum RelationshipKind {
     Export,
     DynamicImport,
     TypeOnly,
+    Include,
+    ModuleDeclaration,
+    Require,
+    PackageImport,
+    ProjectReference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

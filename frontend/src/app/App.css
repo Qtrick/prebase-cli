@@ -1048,4 +1048,50 @@ body, html, #root {
   gap: 8px;
 }
 
+.language-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  scrollbar-width: thin;
+}
+
+.lang-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.lang-pill:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.lang-pill.active {
+  background: rgba(45, 212, 191, 0.15);
+  color: var(--accent-teal);
+  border-color: var(--accent-teal);
+  font-weight: 600;
+}
+
+.lang-pill .lang-count {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+
 

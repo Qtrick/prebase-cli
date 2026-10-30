@@ -44,7 +44,8 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
       .filter(
         (f) =>
           f.filename.toLowerCase().includes(q) ||
-          f.relative_path.toLowerCase().includes(q)
+          f.relative_path.toLowerCase().includes(q) ||
+          f.language.toLowerCase().includes(q)
       )
       .slice(0, 10);
 
@@ -129,10 +130,23 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
               >
                 <div
                   className="search-color-dot"
-                  style={{ backgroundColor: getFileTypeColor(node.relative_path) }}
+                  style={{ backgroundColor: getFileTypeColor(node.relative_path, node.language) }}
                 />
                 <div className="search-item-info">
-                  <span className="search-item-name">{node.filename}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span className="search-item-name">{node.filename}</span>
+                    <span
+                      style={{
+                        fontSize: '10px',
+                        padding: '1px 5px',
+                        borderRadius: '3px',
+                        background: 'rgba(255,255,255,0.08)',
+                        color: getFileTypeColor(node.relative_path, node.language),
+                      }}
+                    >
+                      {node.language}
+                    </span>
+                  </div>
                   <span className="search-item-path mono">{node.relative_path}</span>
                 </div>
                 <span className="search-item-degree">

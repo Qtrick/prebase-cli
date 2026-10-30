@@ -287,7 +287,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       // Node Body
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = node.id === snapshot.nodes[0]?.id ? ENTRY_NODE_COLOR : getFileTypeColor(node.relative_path);
+      ctx.fillStyle = node.id === snapshot.nodes[0]?.id ? ENTRY_NODE_COLOR : getFileTypeColor(node.relative_path, node.language);
       ctx.fill();
 
       ctx.strokeStyle = isSelected ? '#2dd4bf' : (isHovered ? '#38bdf8' : 'rgba(15, 23, 42, 0.85)');

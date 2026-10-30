@@ -13,8 +13,7 @@ use prebase_core::model::{
 use prebase_core::scanner::{DiscoveredFile, RepositoryScanner, ScannerConfig};
 
 use crate::ast::SourceParser;
-use crate::resolver::{ImportResolver, ResolvedTarget};
-use crate::tsconfig::TsConfig;
+use crate::resolver::{ImportResolver, ProjectContext, ResolvedTarget};
 
 pub struct AnalysisResult {
     pub snapshot: GraphSnapshot,
@@ -88,21 +87,21 @@ impl RepositoryAnalyzer {
                 id: file.relative_path.clone(),
                 relative_path: file.relative_path.clone(),
                 filename: file.filename.clone(),
-                language: Self::infer_language(&file.extension),
+                language: file.language.clone(),
                 size_bytes: file.size_bytes,
                 file_kind: file.file_kind,
                 analysis_status: if file.is_supported_language {
                     NodeAnalysisStatus::Pending
                 } else {
-                    NodeAnalysisStatus::Analyzed
+                    NodeAnalysisStatus::Recognized
                 },
                 direct_dependency_count: 0,
                 direct_dependent_count: 0,
             });
         }
 
-        let tsconfig = TsConfig::load_from_dir(root);
-        let resolver = ImportResolver::new(known_files, tsconfig);
+        let project_context = ProjectContext::load_from_dir(root);
+        let resolver = ImportResolver::with_context(known_files, project_context);
         let mut parser = SourceParser::new();
 
         let analyzed_counter = AtomicUsize::new(0);
@@ -117,6 +116,9 @@ impl RepositoryAnalyzer {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Could not read file {}: {e}", file.relative_path);
+                    if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                        node.analysis_status = NodeAnalysisStatus::Failed;
+                    }
                     issues.push(AnalysisIssue {
                         file_path: file.relative_path.clone(),
                         issue_kind: "FileReadError".to_string(),
@@ -128,10 +130,13 @@ impl RepositoryAnalyzer {
                 }
             };
 
-            let parsed_imports = match parser.parse_file(&file.extension, &content) {
+            let parsed_imports = match parser.parse_source(&file.language, &content) {
                 Ok(imps) => imps,
                 Err(e) => {
                     warn!("Parser error in {}: {e}", file.relative_path);
+                    if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                        node.analysis_status = NodeAnalysisStatus::Failed;
+                    }
                     issues.push(AnalysisIssue {
                         file_path: file.relative_path.clone(),
                         issue_kind: "ParseError".to_string(),
@@ -143,10 +148,15 @@ impl RepositoryAnalyzer {
                 }
             };
 
-            analyzed_counter.fetch_add(1, Ordering::Relaxed);
+            let mut has_unresolved = false;
 
             for imp in parsed_imports {
-                let resolved = resolver.resolve(&file.relative_path, &imp.specifier);
+                let resolved = resolver.resolve_for_language(
+                    &file.relative_path,
+                    &file.language,
+                    &imp.specifier,
+                );
+
                 let evidence = prebase_core::model::DependencyEvidence {
                     source_file_id: file.relative_path.clone(),
                     import_specifier: imp.specifier.clone(),
@@ -167,6 +177,7 @@ impl RepositoryAnalyzer {
                         );
                     }
                     ResolvedTarget::Unresolved(reason) => {
+                        has_unresolved = true;
                         debug!("Unresolved import in {}: {reason}", file.relative_path);
                         issues.push(AnalysisIssue {
                             file_path: file.relative_path.clone(),
@@ -177,9 +188,10 @@ impl RepositoryAnalyzer {
                         });
                     }
                     ResolvedTarget::External(_) => {
-                        // External package reference (e.g. "react"); not added to file-level internal graph
+                        // External reference (e.g. standard library or third-party package)
                     }
                     ResolvedTarget::Unsupported(reason) => {
+                        has_unresolved = true;
                         issues.push(AnalysisIssue {
                             file_path: file.relative_path.clone(),
                             issue_kind: "UnsupportedImport".to_string(),
@@ -190,6 +202,16 @@ impl RepositoryAnalyzer {
                     }
                 }
             }
+
+            if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                if has_unresolved {
+                    node.analysis_status = NodeAnalysisStatus::PartiallyAnalyzed;
+                } else {
+                    node.analysis_status = NodeAnalysisStatus::Analyzed;
+                }
+            }
+
+            analyzed_counter.fetch_add(1, Ordering::Relaxed);
         }
 
         for issue in &issues {
@@ -208,19 +230,5 @@ impl RepositoryAnalyzer {
         let index = GraphIndex::build(&snapshot);
 
         Ok((snapshot, index))
-    }
-
-    fn infer_language(extension: &str) -> String {
-        match extension {
-            ".ts" | ".mts" | ".cts" => "typescript".to_string(),
-            ".tsx" => "tsx".to_string(),
-            ".js" | ".mjs" | ".cjs" => "javascript".to_string(),
-            ".jsx" => "jsx".to_string(),
-            ".json" => "json".to_string(),
-            ".css" | ".scss" | ".less" => "css".to_string(),
-            ".html" => "html".to_string(),
-            ".md" | ".mdx" => "markdown".to_string(),
-            _ => "other".to_string(),
-        }
     }
 }

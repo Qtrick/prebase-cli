@@ -42,7 +42,7 @@
         "file_kind": { "type": "string" },
         "analysis_status": {
           "type": "string",
-          "enum": ["Pending", "Analyzed", "Excluded", "Failed"]
+          "enum": ["Pending", "Recognized", "Parsed", "Analyzed", "PartiallyAnalyzed", "Unsupported", "Excluded", "Failed"]
         },
         "direct_dependency_count": { "type": "integer" },
         "direct_dependent_count": { "type": "integer" }
@@ -57,7 +57,17 @@
         "target_file_id": { "type": "string" },
         "relationship_kind": {
           "type": "string",
-          "enum": ["Import", "Export", "DynamicImport", "TypeOnly"]
+          "enum": [
+            "Import",
+            "Export",
+            "DynamicImport",
+            "TypeOnly",
+            "Include",
+            "ModuleDeclaration",
+            "Require",
+            "PackageImport",
+            "ProjectReference"
+          ]
         },
         "resolution_status": {
           "type": "string",

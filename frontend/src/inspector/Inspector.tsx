@@ -209,7 +209,7 @@ export const Inspector: React.FC<InspectorProps> = ({
         <div className="node-title-group">
           <div
             className="color-dot"
-            style={{ backgroundColor: getFileTypeColor(selectedNode?.relative_path) }}
+            style={{ backgroundColor: getFileTypeColor(selectedNode?.relative_path, selectedNode?.language) }}
           />
           <h3 className="file-name">{selectedNode?.filename}</h3>
         </div>
@@ -264,7 +264,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                     >
                       <div
                         className="color-dot-small"
-                        style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                        style={{ backgroundColor: getFileTypeColor(dep.relative_path, dep.language) }}
                       />
                       <span className="rel-path mono">{dep.relative_path}</span>
                       <ExternalLink size={12} className="link-icon" />
@@ -293,7 +293,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                     >
                       <div
                         className="color-dot-small"
-                        style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                        style={{ backgroundColor: getFileTypeColor(dep.relative_path, dep.language) }}
                       />
                       <span className="rel-path mono">{dep.relative_path}</span>
                       <ExternalLink size={12} className="link-icon" />

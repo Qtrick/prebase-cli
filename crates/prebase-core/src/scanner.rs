@@ -23,6 +23,7 @@ pub struct DiscoveredFile {
     pub relative_path: String,
     pub filename: String,
     pub extension: String,
+    pub language: String,
     pub size_bytes: u64,
     pub file_kind: FileKind,
     pub is_supported_language: bool,
@@ -195,20 +196,21 @@ impl RepositoryScanner {
                 .map(|e| format!(".{}", e.to_lowercase()))
                 .unwrap_or_default();
 
-            let is_supported = matches!(
-                ext.as_str(),
-                ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
-            );
+            let lang_desc = crate::languages::detect_language(&rel);
+            let language = lang_desc
+                .map(|d| d.id.to_string())
+                .unwrap_or_else(|| "other".to_string());
+            let is_supported = lang_desc
+                .map(|d| d.capability_level > crate::languages::CapabilityLevel::Recognized)
+                .unwrap_or(false);
 
             let file_kind =
                 if rel.contains(".test.") || rel.contains(".spec.") || rel.contains("__tests__") {
                     FileKind::Test
-                } else if matches!(ext.as_str(), ".json" | ".yaml" | ".yml" | ".toml") {
-                    FileKind::Config
+                } else if let Some(desc) = lang_desc {
+                    desc.file_kind
                 } else if matches!(ext.as_str(), ".md" | ".txt") {
                     FileKind::Doc
-                } else if is_supported {
-                    FileKind::Source
                 } else {
                     FileKind::Other
                 };
@@ -218,6 +220,7 @@ impl RepositoryScanner {
                 relative_path: rel,
                 filename,
                 extension: ext,
+                language,
                 size_bytes: size,
                 file_kind,
                 is_supported_language: is_supported,

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession } from '../transport/api';
@@ -7,6 +7,7 @@ import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
 import { Inspector } from '../inspector/Inspector';
 import { CommitInspector } from '../inspector/CommitInspector';
+import { LANGUAGE_COLORS } from '../graphs/network/fileTypeColors';
 import {
   Share2,
   Clock,
@@ -62,6 +63,30 @@ export const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<FileNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<string | null>(null);
+
+  const availableLanguages: Array<[string, number]> = useMemo(() => {
+    if (!snapshot) return [];
+    const counts = new Map<string, number>();
+    for (const node of snapshot.nodes) {
+      counts.set(node.language, (counts.get(node.language) || 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [snapshot]);
+
+  const activeSnapshot = useMemo(() => {
+    if (!snapshot || !selectedLanguageFilter) return snapshot;
+    const filteredNodes = snapshot.nodes.filter((n) => n.language === selectedLanguageFilter);
+    const nodeIds = new Set(filteredNodes.map((n) => n.id));
+    const filteredEdges = snapshot.edges.filter(
+      (e) => nodeIds.has(e.source_file_id) && nodeIds.has(e.target_file_id)
+    );
+    return {
+      ...snapshot,
+      nodes: filteredNodes,
+      edges: filteredEdges,
+    };
+  }, [snapshot, selectedLanguageFilter]);
 
   // Temporal state & Anchor Pagination
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
@@ -490,6 +515,31 @@ export const App: React.FC = () => {
           </div>
         </header>
 
+        {/* Language Filter Bar for Polyglot Repositories */}
+        {activeTab === 'network' && availableLanguages.length > 1 && (
+          <div className="language-filter-bar">
+            <button
+              className={`lang-pill ${selectedLanguageFilter === null ? 'active' : ''}`}
+              onClick={() => setSelectedLanguageFilter(null)}
+            >
+              All ({snapshot?.nodes.length})
+            </button>
+            {availableLanguages.map(([lang, count]) => (
+              <button
+                key={lang}
+                className={`lang-pill ${selectedLanguageFilter === lang ? 'active' : ''}`}
+                onClick={() => setSelectedLanguageFilter(selectedLanguageFilter === lang ? null : lang)}
+                style={{
+                  borderLeft: `3px solid ${LANGUAGE_COLORS[lang] || '#71717a'}`,
+                }}
+              >
+                <span className="lang-name">{lang}</span>
+                <span className="lang-count">{count}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Live sync toast notification */}
         {liveNotice && (
           <div className="live-toast">
@@ -535,12 +585,12 @@ export const App: React.FC = () => {
               </div>
             ) : snapshot.nodes.length === 0 ? (
               <div className="empty-overlay">
-                <h3>No supported JavaScript/TypeScript files found</h3>
-                <p>Ensure the directory contains .js, .jsx, .ts, or .tsx files.</p>
+                <h3>No recognizable source files found</h3>
+                <p>PreBase supports Python, Rust, Go, Java, C/C++, C#, Ruby, PHP, TypeScript, JavaScript, and more.</p>
               </div>
             ) : (
               <NetworkCanvas
-                snapshot={snapshot}
+                snapshot={activeSnapshot || snapshot}
                 selectedNodeId={selectedNode?.id || null}
                 selectedEdgeId={selectedEdge?.id || null}
                 onSelectNode={handleSelectNode}

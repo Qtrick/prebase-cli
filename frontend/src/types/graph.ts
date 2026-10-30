@@ -1,5 +1,13 @@
 export type NodeKind = 'Source' | 'Test' | 'Config' | 'Doc' | 'Other';
-export type NodeAnalysisStatus = 'Pending' | 'Analyzed' | 'Excluded' | 'Failed';
+export type NodeAnalysisStatus =
+  | 'Pending'
+  | 'Recognized'
+  | 'Parsed'
+  | 'Analyzed'
+  | 'PartiallyAnalyzed'
+  | 'Unsupported'
+  | 'Excluded'
+  | 'Failed';
 
 export interface FileNode {
   id: string;
@@ -13,7 +21,16 @@ export interface FileNode {
   direct_dependent_count: number;
 }
 
-export type RelationshipKind = 'Import' | 'Export' | 'DynamicImport' | 'TypeOnly';
+export type RelationshipKind =
+  | 'Import'
+  | 'Export'
+  | 'DynamicImport'
+  | 'TypeOnly'
+  | 'Include'
+  | 'ModuleDeclaration'
+  | 'Require'
+  | 'PackageImport'
+  | 'ProjectReference';
 export type ResolutionStatus = 'ResolvedInternal' | 'ExternalPackage' | 'Unresolved' | 'Unsupported';
 
 export interface DependencyEvidence {

@@ -1,5 +1,6 @@
 pub mod graph;
 pub mod index;
+pub mod languages;
 pub mod model;
 pub mod scanner;
 

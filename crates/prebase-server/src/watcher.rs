@@ -199,14 +199,9 @@ fn should_ignore_path(rel_path: &Path) -> bool {
 }
 
 fn is_supported_source_file(path: &Path) -> bool {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if file_name == "tsconfig.json" || file_name == "jsconfig.json" || file_name == "package.json" {
-        return true;
-    }
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "json")
-    )
+    let path_str = path.to_string_lossy();
+    prebase_core::languages::is_manifest_file(&path_str)
+        || prebase_core::languages::is_supported_source_file(&path_str)
 }
 
 #[cfg(test)]
@@ -256,6 +251,22 @@ mod tests {
         assert!(is_supported_source_file(Path::new("types.mts")));
         assert!(is_supported_source_file(Path::new("package.json")));
         assert!(is_supported_source_file(Path::new("tsconfig.json")));
+        assert!(is_supported_source_file(Path::new("main.py")));
+        assert!(is_supported_source_file(Path::new("lib.rs")));
+        assert!(is_supported_source_file(Path::new("server.go")));
+        assert!(is_supported_source_file(Path::new("App.java")));
+        assert!(is_supported_source_file(Path::new("main.c")));
+        assert!(is_supported_source_file(Path::new("engine.cpp")));
+        assert!(is_supported_source_file(Path::new("Program.cs")));
+        assert!(is_supported_source_file(Path::new("app.rb")));
+        assert!(is_supported_source_file(Path::new("index.php")));
+        assert!(is_supported_source_file(Path::new("script.sh")));
+        assert!(is_supported_source_file(Path::new("Cargo.toml")));
+        assert!(is_supported_source_file(Path::new("go.mod")));
+        assert!(is_supported_source_file(Path::new("pom.xml")));
+        assert!(is_supported_source_file(Path::new("pyproject.toml")));
+        assert!(is_supported_source_file(Path::new("Gemfile")));
+        assert!(is_supported_source_file(Path::new("composer.json")));
 
         assert!(!is_supported_source_file(Path::new("image.png")));
         assert!(!is_supported_source_file(Path::new("binary.exe")));

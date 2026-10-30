@@ -5,7 +5,7 @@ pub mod tsconfig;
 
 pub use analyzer::{AnalysisResult, RepositoryAnalyzer};
 pub use ast::{ParsedImport, SourceParser};
-pub use resolver::{ImportResolver, ResolvedTarget};
+pub use resolver::{ImportResolver, ProjectContext, ResolvedTarget};
 pub use tsconfig::TsConfig;
 
 #[cfg(test)]
@@ -97,6 +97,258 @@ mod tests {
 
         // Ensure comment strings were NOT extracted
         assert!(!imports.iter().any(|i| i.specifier.contains("fake/import")));
+    }
+
+    #[test]
+    fn test_all_languages_extractions_verified() {
+        let mut parser = SourceParser::new();
+
+        // 1. Python
+        let py_code = r#"
+            import os
+            import my_pkg.mod
+            from .utils import helper
+            from ..parent import base
+            import numpy as np
+        "#;
+        let py_imps = parser.parse_source("python", py_code).unwrap();
+        assert_eq!(py_imps.len(), 5);
+        assert_eq!(py_imps[0].specifier, "os");
+        assert_eq!(py_imps[1].specifier, "my_pkg.mod");
+        assert_eq!(py_imps[2].specifier, ".utils");
+        assert_eq!(py_imps[3].specifier, "..parent");
+        assert_eq!(py_imps[4].specifier, "numpy");
+
+        // 2. Rust
+        let rust_code = r#"
+            mod service;
+            use crate::service::Client;
+            use super::utils;
+            use std::collections::HashMap;
+            mod inline { fn f() {} }
+        "#;
+        let r_imps = parser.parse_source("rust", rust_code).unwrap();
+        assert_eq!(r_imps.len(), 4);
+        assert_eq!(r_imps[0].specifier, "service");
+        assert_eq!(
+            r_imps[0].relationship_kind,
+            RelationshipKind::ModuleDeclaration
+        );
+        assert_eq!(r_imps[1].specifier, "crate::service::Client");
+        assert_eq!(r_imps[1].relationship_kind, RelationshipKind::Import);
+        assert_eq!(r_imps[2].specifier, "super::utils");
+        assert_eq!(r_imps[3].specifier, "std::collections::HashMap");
+
+        // 3. Go
+        let go_code = r#"
+            package main
+            import "fmt"
+            import "example.com/app/pkg/service"
+            import (
+                "os"
+                alias "net/http"
+            )
+        "#;
+        let go_imps = parser.parse_source("go", go_code).unwrap();
+        assert_eq!(go_imps.len(), 4);
+        assert_eq!(go_imps[0].specifier, "fmt");
+        assert_eq!(
+            go_imps[0].relationship_kind,
+            RelationshipKind::PackageImport
+        );
+        assert_eq!(go_imps[1].specifier, "example.com/app/pkg/service");
+        assert_eq!(go_imps[2].specifier, "os");
+        assert_eq!(go_imps[3].specifier, "net/http");
+
+        // 4. Java
+        let java_code = r#"
+            package com.example;
+            import com.example.service.UserService;
+            import com.example.utils.*;
+        "#;
+        let j_imps = parser.parse_source("java", java_code).unwrap();
+        assert_eq!(j_imps.len(), 2);
+        assert_eq!(j_imps[0].specifier, "com.example.service.UserService");
+        assert_eq!(j_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(j_imps[1].specifier, "com.example.utils.*");
+        assert_eq!(j_imps[1].relationship_kind, RelationshipKind::PackageImport);
+
+        // 5. C/C++
+        let c_code = r#"
+            #include "local.h"
+            #include <vector>
+            #include <stdio.h>
+        "#;
+        let c_imps = parser.parse_source("c", c_code).unwrap();
+        assert_eq!(c_imps.len(), 3);
+        assert_eq!(c_imps[0].specifier, "local.h");
+        assert_eq!(c_imps[0].relationship_kind, RelationshipKind::Include);
+        assert_eq!(c_imps[1].specifier, "vector");
+        assert_eq!(c_imps[2].specifier, "stdio.h");
+
+        // 6. C#
+        let cs_code = r#"
+            using System;
+            using MyProject.Services;
+        "#;
+        let cs_imps = parser.parse_source("csharp", cs_code).unwrap();
+        assert_eq!(cs_imps.len(), 2);
+        assert_eq!(cs_imps[0].specifier, "System");
+        assert_eq!(cs_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(cs_imps[1].specifier, "MyProject.Services");
+
+        // 7. Ruby
+        let rb_code = r#"
+            require_relative "helpers"
+            require "json"
+            load "config.rb"
+        "#;
+        let rb_imps = parser.parse_source("ruby", rb_code).unwrap();
+        assert_eq!(rb_imps.len(), 3);
+        assert_eq!(rb_imps[0].specifier, "helpers");
+        assert_eq!(rb_imps[0].relationship_kind, RelationshipKind::Require);
+        assert_eq!(rb_imps[1].specifier, "json");
+        assert_eq!(rb_imps[2].specifier, "config.rb");
+
+        // 8. PHP
+        let php_code = r#"<?php
+            require_once "config.php";
+            include 'header.php';
+            use App\Services\UserService;
+        "#;
+        let php_imps = parser.parse_source("php", php_code).unwrap();
+        assert_eq!(php_imps.len(), 3);
+        assert_eq!(php_imps[0].specifier, "config.php");
+        assert_eq!(php_imps[0].relationship_kind, RelationshipKind::Require);
+        assert_eq!(php_imps[1].specifier, "header.php");
+        assert_eq!(php_imps[1].relationship_kind, RelationshipKind::Require);
+        assert_eq!(php_imps[2].specifier, "App\\Services\\UserService");
+        assert_eq!(php_imps[2].relationship_kind, RelationshipKind::Import);
+
+        // 9. Lua
+        let lua_code = r#"
+            local sock = require("socket")
+            local mod = require 'my_module'
+        "#;
+        let lua_imps = parser.parse_source("lua", lua_code).unwrap();
+        assert_eq!(lua_imps.len(), 2);
+        assert_eq!(lua_imps[0].specifier, "socket");
+        assert_eq!(lua_imps[0].relationship_kind, RelationshipKind::Require);
+        assert_eq!(lua_imps[1].specifier, "my_module");
+
+        // 10. Kotlin
+        let kt_code = r#"
+            package com.example
+            import com.example.service.UserService
+            import com.example.utils.*
+        "#;
+        let kt_imps = parser.parse_source("kotlin", kt_code).unwrap();
+        assert_eq!(kt_imps.len(), 2);
+        assert_eq!(kt_imps[0].specifier, "com.example.service.UserService");
+        assert_eq!(kt_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(kt_imps[1].specifier, "com.example.utils.*");
+        assert_eq!(
+            kt_imps[1].relationship_kind,
+            RelationshipKind::PackageImport
+        );
+
+        // 11. Swift
+        let swift_code = r#"
+            import Foundation
+            import UIKit
+        "#;
+        let swift_imps = parser.parse_source("swift", swift_code).unwrap();
+        assert_eq!(swift_imps.len(), 2);
+        assert_eq!(swift_imps[0].specifier, "Foundation");
+        assert_eq!(swift_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(swift_imps[1].specifier, "UIKit");
+
+        // 12. Scala
+        let scala_code = r#"
+            import scala.collection.mutable.ArrayBuffer
+        "#;
+        let scala_imps = parser.parse_source("scala", scala_code).unwrap();
+        assert_eq!(scala_imps.len(), 1);
+        assert_eq!(
+            scala_imps[0].specifier,
+            "scala.collection.mutable.ArrayBuffer"
+        );
+        assert_eq!(scala_imps[0].relationship_kind, RelationshipKind::Import);
+
+        // 13. Elixir
+        let ex_code = r#"
+            alias Foo.Bar
+            import Enum
+            require Logger
+        "#;
+        let ex_imps = parser.parse_source("elixir", ex_code).unwrap();
+        assert_eq!(ex_imps.len(), 3);
+        assert_eq!(ex_imps[0].specifier, "Foo.Bar");
+        assert_eq!(ex_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(ex_imps[1].specifier, "Enum");
+        assert_eq!(ex_imps[2].specifier, "Logger");
+
+        // 14. Haskell
+        let hs_code = r#"
+            import Data.List
+            import qualified Data.Map as Map
+        "#;
+        let hs_imps = parser.parse_source("haskell", hs_code).unwrap();
+        assert_eq!(hs_imps.len(), 2);
+        assert_eq!(hs_imps[0].specifier, "Data.List");
+        assert_eq!(hs_imps[1].specifier, "Data.Map");
+
+        // 15. R
+        let r_code = r#"
+            source("helpers.R")
+            library("ggplot2")
+            require(dplyr)
+        "#;
+        let r_imps = parser.parse_source("r", r_code).unwrap();
+        assert_eq!(r_imps.len(), 3);
+        assert_eq!(r_imps[0].specifier, "helpers.R");
+        assert_eq!(r_imps[0].relationship_kind, RelationshipKind::Include);
+        assert_eq!(r_imps[1].specifier, "ggplot2");
+        assert_eq!(r_imps[1].relationship_kind, RelationshipKind::Import);
+        assert_eq!(r_imps[2].specifier, "dplyr");
+
+        // 16. Shell
+        let sh_code = r#"
+            source ./utils.sh
+            . ./config.sh
+        "#;
+        let sh_imps = parser.parse_source("shell", sh_code).unwrap();
+        assert_eq!(sh_imps.len(), 2);
+        assert_eq!(sh_imps[0].specifier, "./utils.sh");
+        assert_eq!(sh_imps[0].relationship_kind, RelationshipKind::Include);
+        assert_eq!(sh_imps[1].specifier, "./config.sh");
+
+        // 17. HTML
+        let html_code = r#"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <link rel="stylesheet" href="./style.css">
+                <script src="./app.js"></script>
+            </head>
+            </html>
+        "#;
+        let html_imps = parser.parse_source("html", html_code).unwrap();
+        assert_eq!(html_imps.len(), 2);
+        assert_eq!(html_imps[0].specifier, "./style.css");
+        assert_eq!(html_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(html_imps[1].specifier, "./app.js");
+
+        // 18. CSS
+        let css_code = r#"
+            @import "base.css";
+            @import url("components/button.css");
+        "#;
+        let css_imps = parser.parse_source("css", css_code).unwrap();
+        assert_eq!(css_imps.len(), 2);
+        assert_eq!(css_imps[0].specifier, "base.css");
+        assert_eq!(css_imps[0].relationship_kind, RelationshipKind::Import);
+        assert_eq!(css_imps[1].specifier, "components/button.css");
     }
 
     #[test]

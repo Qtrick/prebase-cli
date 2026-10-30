@@ -26,11 +26,23 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ## Features
 
-### 1. Interactive Network Graph
-- **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, and `.tsx`.
-- **Module Resolution**: Resolves relative paths, extensionless imports, directory indexes (`index.ts`), and `tsconfig.json` path mappings / baseUrl aliases.
+### 1. Multi-Language Interactive Network Graph
+- **Polyglot Tree-sitter Architecture**: Lazy, statically compiled Tree-sitter parsers supporting 28 programming and configuration languages without runtime binary downloads or dynamic library loading.
+- **Language-Aware Dependency Resolution**:
+  - **JavaScript / TypeScript**: ES imports, CommonJS `require`, dynamic `import()`, re-exports, type-only imports, path aliases (`tsconfig.json`), and index resolution.
+  - **Python**: Relative dot imports (`.utils`, `..parent`), module paths (`pkg.mod`), standard library classification, and third-party packages.
+  - **Rust**: Module declarations (`mod foo;`), `crate::` and `super::` paths, submodules (`foo/mod.rs`), and external crates.
+  - **Go**: Monorepo and subproject module-aware package resolution (`go.mod`), standard library packages (`fmt`, `net/http`), and third-party modules.
+  - **Java**: Package-to-path class mapping, subproject roots (`src/main/java`), wildcard package imports (`com.example.*`), and external packages.
+  - **C & C++**: Quoted `#include "local.h"`, project include paths (`include/`), angle-bracket system headers (`<vector>`), and C/C++ relationship modeling.
+  - **C#**: Namespace resolution (`using MyProject.Services;`), project references (`.csproj`), and system namespaces.
+  - **Ruby**: Relative imports (`require_relative`), library requires (`require`), and gem dependencies.
+  - **PHP**: File inclusions (`require_once`, `include`), PSR-4 namespace mapping (`use App\Services;`).
+  - **Scripting & Web**: Lua `require`, Shell `source` / `.`, HTML `<script>`/`<link>`, CSS `@import`, Kotlin, Swift, Scala, Elixir, Haskell, and R.
+- **Truthful Status Lifecycle**: Clearly separates `Recognized` (Level 0), `Parsed` (Level 1), `PartiallyAnalyzed` (unresolved dependencies logged as issues), `Analyzed` (fully verified), and `Unsupported`.
+- **Polyglot UI & Filter Bar**: Dynamic language pill filters with per-language file counts, language search badges, and custom color-coded node visualization across all supported formats.
 - **Organic Visual Layout**: 2.5D/3D organic force-directed projection highlighting entry points, hubs, and isolated components.
-- **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, and source code previews.
+- **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, language tags, and source code previews.
 
 ### 2. Git-Powered Temporal Graph
 - **Commit Ancestry DAG**: Visualizes repository commit history, branch tracks, and merge arcs with deterministic topological lane allocation.
@@ -77,7 +89,7 @@ cd prebase-cli
 
 ### Running PreBase
 
-Navigate to any JavaScript or TypeScript repository and execute:
+Navigate to any polyglot, monorepo, or single-language repository and execute:
 
 ```bash
 # Analyze current directory and open interactive Network Graph
