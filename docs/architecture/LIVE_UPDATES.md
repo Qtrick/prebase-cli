@@ -114,3 +114,4 @@ In `Inspector.tsx` and `CommitInspector.tsx`:
 - Each request increments a monotonic `requestTokenRef.current`.
 - An `AbortController` cancels previous in-flight requests.
 - When a response arrives, it verifies `currentToken === requestTokenRef.current` before updating React state, guaranteeing that rapid selection clicks never render stale responses out of order.
+

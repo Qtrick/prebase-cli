@@ -57,3 +57,4 @@ describe('Temporal Graph Layout & Time Formatting', () => {
     expect(formatRelativeTime(now - 172800)).toBe('2d ago');
   });
 });
+

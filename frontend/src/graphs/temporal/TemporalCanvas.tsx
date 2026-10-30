@@ -387,3 +387,4 @@ function truncateText(ctx: CanvasRenderingContext2D, text: string, maxWidth: num
   }
   return current + '…';
 }
+

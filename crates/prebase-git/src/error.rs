@@ -28,3 +28,4 @@ pub enum GitError {
     #[error("I/O error executing git: {0}")]
     Io(#[from] std::io::Error),
 }
+

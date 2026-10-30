@@ -112,3 +112,4 @@ When a user requests the history of a specific file (e.g., via the "View File Hi
      - Checks if the file currently exists in the active Network graph snapshot.
      - If present: switches view to Network, selects the node, and centers the camera on it.
      - If absent (historical file deleted or renamed in older revisions): displays a non-destructive contextual toast banner: `"Historical file not present in current working tree"`.
+

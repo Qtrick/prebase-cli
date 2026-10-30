@@ -75,3 +75,4 @@ export type ServerEvent =
   | { type: 'network.updated'; data: NetworkUpdatedEventData }
   | { type: 'git.updated'; data: GitUpdatedEventData }
   | { type: 'heartbeat'; data: { timestamp: number } };
+

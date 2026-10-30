@@ -74,3 +74,4 @@ pub struct FileHistoryResult {
     pub file_path: String,
     pub commits: Vec<CommitSummary>,
 }
+

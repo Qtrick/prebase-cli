@@ -40,3 +40,4 @@ Campaign 3 will focus on:
 2. **Language Expansion**: Additional parser support (e.g., Python, Go, Rust).
 3. **Packaging & Release Distribution**: Homebrew formula, GitHub Actions release pipeline, binary notarization, and cross-platform builds.
 4. **UX Refinement & Keyboard Navigation**: Full keyboard navigation across both graphs, command palette enhancements, and theme customization.
+
