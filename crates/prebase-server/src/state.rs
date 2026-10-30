@@ -39,6 +39,8 @@ pub enum ServerEvent {
 
 pub struct AppState {
     pub session_token: String,
+    pub bootstrap_token: RwLock<Option<String>>,
+    pub allocated_port: u16,
     pub root_path: PathBuf,
     pub repo_name: String,
     pub repo_id: String,
@@ -56,12 +58,16 @@ impl AppState {
         repo_name: String,
         repo_id: String,
         session_token: String,
+        bootstrap_token: Option<String>,
+        allocated_port: u16,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(128);
         let git_engine = Arc::new(GitEngine::new(root_path.clone()));
 
         Self {
             session_token,
+            bootstrap_token: RwLock::new(bootstrap_token),
+            allocated_port,
             root_path,
             repo_name,
             repo_id,
@@ -72,6 +78,18 @@ impl AppState {
             git_engine,
             event_sender,
         }
+    }
+
+    /// Validates and consumes the single-use bootstrap token, returning the session token.
+    pub fn exchange_bootstrap_token(&self, candidate: &str) -> Option<String> {
+        let mut guard = self.bootstrap_token.write().unwrap();
+        if let Some(ref current) = *guard {
+            if current == candidate {
+                *guard = None; // Single-use consumption
+                return Some(self.session_token.clone());
+            }
+        }
+        None
     }
 
     pub fn get_status(&self) -> IndexingStatus {
@@ -117,7 +135,9 @@ impl AppState {
         changed_files: Vec<String>,
         target_generation: Option<u64>,
     ) -> Result<u64, &'static str> {
-        // Stale analysis check
+        let mut pub_guard = self.published.write().unwrap();
+
+        // Stale analysis check under write lock to prevent concurrency races
         if let Some(expected_gen) = target_generation {
             let current = self.current_generation();
             if expected_gen != current {
@@ -147,13 +167,10 @@ impl AppState {
             timestamp: now,
         });
 
-        {
-            let mut pub_guard = self.published.write().unwrap();
-            *pub_guard = Some(new_state);
+        *pub_guard = Some(new_state);
 
-            let mut st_guard = self.status.write().unwrap();
-            *st_guard = IndexingStatus::Ready;
-        }
+        let mut st_guard = self.status.write().unwrap();
+        *st_guard = IndexingStatus::Ready;
 
         info!(
             "Published network revision {} ({} nodes, {} edges)",

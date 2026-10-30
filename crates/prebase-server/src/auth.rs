@@ -20,6 +20,14 @@ pub fn generate_session_token() -> String {
         .collect()
 }
 
+pub fn generate_bootstrap_token() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
 #[derive(Deserialize)]
 pub struct AuthQuery {
     pub token: Option<String>,
@@ -29,9 +37,11 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
 
+    // Strict offline Content Security Policy:
+    // No external fonts, CDNs, scripts, or connections allowed.
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self' 'unsafe-inline' data:; connect-src 'self'; frame-ancestors 'none';"
+        "default-src 'self' 'unsafe-inline' data:; connect-src 'self'; font-src 'self' data:; img-src 'self' data:; frame-ancestors 'none';"
             .parse()
             .unwrap(),
     );
@@ -42,6 +52,21 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
     resp
 }
 
+fn extract_cookie_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookies| {
+            for cookie in cookies.split(';') {
+                let cookie = cookie.trim();
+                if let Some(token) = cookie.strip_prefix("prebase_session=") {
+                    return Some(token.to_string());
+                }
+            }
+            None
+        })
+}
+
 pub async fn host_and_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -49,41 +74,73 @@ pub async fn host_and_auth_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, &'static str)> {
-    // 1. Host header validation (prevent DNS rebinding)
+    let port = state.allocated_port;
+
+    // 1. Exact Host header validation (prevent DNS rebinding attacks)
     if let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
-        let hostname = host.split(':').next().unwrap_or(host);
-        if hostname != "127.0.0.1" && hostname != "localhost" {
-            warn!("Rejected request with invalid Host: {host}");
+        let expected_ip = format!("127.0.0.1:{port}");
+        let expected_lh = format!("localhost:{port}");
+        // Allow without port only if port is standard 80
+        let matches = host == expected_ip
+            || host == expected_lh
+            || (port == 80 && (host == "127.0.0.1" || host == "localhost"));
+
+        if !matches {
+            warn!("Rejected request with invalid Host: {host} (expected {expected_ip} or {expected_lh})");
             return Err((StatusCode::BAD_REQUEST, "Invalid Host header"));
         }
     }
 
-    // 2. Origin validation (prevent unauthorized cross-origin requests)
+    // 2. Exact Origin validation (prevent unauthorized cross-origin requests)
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-        if !origin.starts_with("http://127.0.0.1:") && !origin.starts_with("http://localhost:") {
+        let expected_ip = format!("http://127.0.0.1:{port}");
+        let expected_lh = format!("http://localhost:{port}");
+        let matches = origin == expected_ip
+            || origin == expected_lh
+            || (port == 80 && (origin == "http://127.0.0.1" || origin == "http://localhost"));
+
+        if !matches {
             warn!("Rejected cross-origin request from: {origin}");
             return Err((StatusCode::FORBIDDEN, "Forbidden Origin"));
         }
     }
 
     let path = req.uri().path();
-    // Allow static frontend assets (css, js, html, favicon) to load without auth header,
-    // as the session token is passed in the URL query string on initial launch or cookie
     let is_api_route = path.starts_with("/api/");
+    let is_public_api = path == "/api/v1/health" || path == "/api/v1/auth/session";
 
-    if is_api_route && path != "/api/v1/health" {
-        let token_matches = if let Some(header_token) = headers
+    if is_api_route && !is_public_api {
+        let mut authorized = false;
+
+        // Check 1: X-Prebase-Session header
+        if let Some(header_token) = headers
             .get("x-prebase-session")
             .and_then(|h| h.to_str().ok())
         {
-            header_token == state.session_token
-        } else if let Some(q_token) = query.token {
-            q_token == state.session_token
-        } else {
-            false
-        };
+            if header_token == state.session_token {
+                authorized = true;
+            }
+        }
 
-        if !token_matches {
+        // Check 2: HttpOnly Session Cookie
+        if !authorized {
+            if let Some(cookie_token) = extract_cookie_token(&headers) {
+                if cookie_token == state.session_token {
+                    authorized = true;
+                }
+            }
+        }
+
+        // Check 3: Query Parameter fallback (e.g. for initial testing or SSE)
+        if !authorized {
+            if let Some(ref q_token) = query.token {
+                if q_token == &state.session_token {
+                    authorized = true;
+                }
+            }
+        }
+
+        if !authorized {
             warn!("Unauthorized API request to {path}");
             return Err((
                 StatusCode::UNAUTHORIZED,

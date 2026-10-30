@@ -1,4 +1,8 @@
-use axum::{middleware, routing::get, Router};
+use axum::{
+    middleware,
+    routing::{get, post},
+    Router,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,7 +10,10 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use crate::auth::{generate_session_token, host_and_auth_middleware, security_headers_middleware};
+use crate::auth::{
+    generate_bootstrap_token, generate_session_token, host_and_auth_middleware,
+    security_headers_middleware,
+};
 use crate::routes::*;
 use crate::state::AppState;
 use crate::static_assets::serve_static_asset;
@@ -15,6 +22,7 @@ use crate::watcher::{start_repo_watcher, RepoWatcherHandle};
 pub struct RunningServer {
     pub port: u16,
     pub session_token: String,
+    pub bootstrap_token: String,
     pub state: Arc<AppState>,
     pub shutdown_tx: oneshot::Sender<()>,
     pub server_handle: tokio::task::JoinHandle<()>,
@@ -24,6 +32,7 @@ pub struct RunningServer {
 pub fn create_router(state: Arc<AppState>) -> Router {
     let api_router = Router::new()
         .route("/health", get(handle_health))
+        .route("/auth/session", post(handle_auth_session))
         .route("/status", get(handle_status))
         .route("/repository", get(handle_repository))
         .route("/network", get(handle_network))
@@ -57,18 +66,21 @@ pub async fn start_server(
     port: Option<u16>,
     watch_filesystem: bool,
 ) -> Result<RunningServer, Box<dyn std::error::Error + Send + Sync>> {
+    let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
+    let listener = TcpListener::bind(bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    let allocated_port = local_addr.port();
+
     let session_token = generate_session_token();
+    let bootstrap_token = generate_bootstrap_token();
     let state = Arc::new(AppState::new(
         root_path.clone(),
         repo_name,
         repo_id,
         session_token.clone(),
+        Some(bootstrap_token.clone()),
+        allocated_port,
     ));
-
-    let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
-    let listener = TcpListener::bind(bind_addr).await?;
-    let local_addr = listener.local_addr()?;
-    let allocated_port = local_addr.port();
 
     info!("PreBase server listening on http://127.0.0.1:{allocated_port}");
 
@@ -103,6 +115,7 @@ pub async fn start_server(
     Ok(RunningServer {
         port: allocated_port,
         session_token,
+        bootstrap_token,
         state,
         shutdown_tx,
         server_handle,

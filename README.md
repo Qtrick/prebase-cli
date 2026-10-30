@@ -3,8 +3,9 @@
 > **Local-first codebase intelligence application featuring interactive Network and Temporal graphs, powered by a standalone Rust engine.**
 
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
-[![Status: Campaign 2 Verified](https://img.shields.io/badge/status-Campaign%202%20Verified-2dd4bf.svg)](#development-status)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Status: MVP Complete / Release Ready](https://img.shields.io/badge/status-MVP%20Complete%20%2F%20Release%20Ready-2dd4bf.svg)](#development-status)
+[![CI](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml)
 
 ---
 
@@ -16,8 +17,9 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 **Key Design Principles:**
 - **Zero Runtime Dependencies**: Does not require Node.js, Electron, or Code - OSS at runtime. The compiled `prebase` binary is fully standalone and embeds the frontend.
-- **Strictly Local-First**: Runs entirely on `127.0.0.1`. No code leaves your machine. No accounts, telemetry, or external cloud services.
+- **Strictly Local-First & 100% Offline**: Runs entirely on `127.0.0.1`. No code leaves your machine. No accounts, telemetry, external fonts, or cloud dependencies.
 - **Bi-Directional Visual Intelligence**: Seamlessly switch between the **Network Graph** (spatial dependency structure) and the **Temporal Graph** (Git ancestry DAG).
+- **Demand-Driven Rendering**: 0% idle CPU utilization. Canvases render only on user interaction or state change.
 - **Live Incremental Monitoring**: Watches source files for changes, reanalyzes code incrementally, and updates browser views in real time via authenticated Server-Sent Events (SSE) while preserving your camera viewport.
 
 ---
@@ -32,6 +34,9 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ### 2. Git-Powered Temporal Graph
 - **Commit Ancestry DAG**: Visualizes repository commit history, branch tracks, and merge arcs with deterministic topological lane allocation.
+- **Anchor-Based Cursor Pagination**: History paginates stably using commit SHA anchors, immune to concurrent commits added to HEAD.
+- **Stale Cursor Detection**: Gracefully handles git rebases, resets, and detached commits with automatic recovery (HTTP `410 Gone`).
+- **Merge Commit First-Parent Diffs**: Accurately computes file changes on merge commits relative to first parent (`<hash>^1 <hash>`) with explicit UI comparison basis labels.
 - **Rename-Aware Diffing**: Tracks file mutations across renames (`git diff-tree -M`) and root commits with similarity scoring.
 - **File History Lineage**: Follows the chronological history of individual files across historical moves and renames.
 - **Commit Inspector**: View full commit messages, author/committer metadata, diff stats (+/- lines), and click changed files to locate them in the Network Graph.
@@ -43,8 +48,9 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 ### 4. Live Filesystem Watching
 - **Rust `notify` Watcher**: Automatically detects file additions, modifications, and deletions.
 - **Noise Rejection**: Excludes `.git/objects`, `node_modules`, `dist`, `target`, and temporary files, while listening to `.git/HEAD` and `.git/refs/` for branch switches and commits.
+- **Buffer Overflow Protection**: Falls back safely to full reanalysis when filesystem event queues overflow.
 - **Atomic State Publication**: Swaps graph snapshots and indexes under a single lock with strictly monotonic revisions, eliminating state tearing and race conditions.
-- **Server-Sent Events (SSE)**: Streams updates to the browser without page reloads.
+- **Server-Sent Events (SSE)**: Streams updates to the browser without page reloads, with automatic reconnection reconciliation.
 
 ---
 
@@ -52,23 +58,20 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ### Prerequisites
 - [Rust toolchain](https://rustup.rs/) (1.75 or later)
-- [Node.js](https://nodejs.org/) (v18+) & `npm` (required only to compile frontend assets)
+- [Node.js](https://nodejs.org/) (v18+) & `npm` (required only when compiling frontend from source)
 - [Git](https://git-scm.com/)
 
 ### Build From Source
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/prebase/prebase-cli.git
+git clone https://github.com/Qtrick/prebase-cli.git
 cd prebase-cli
 
-# 2. Build the frontend (compiles to crates/prebase-server/dist)
-npm --prefix frontend run build
+# 2. Build full distribution (frontend + release binary)
+./scripts/build.sh
 
-# 3. Build standalone release binary
-cargo build --release
-
-# The single standalone binary is now at:
+# The single standalone binary is located at:
 # target/release/prebase
 ```
 
@@ -142,20 +145,22 @@ prebase-cli/
 │   │   └── types/                # Canonical TypeScript contracts
 ├── tests/
 │   └── fixtures/sample-monorepo/ # Monorepo integration test fixture
-└── docs/                         # Architecture, migration, and testing specifications
+├── scripts/                      # Build, test, package, and benchmark scripts
+└── docs/                         # Architecture, decisions, and requirement audits
 ```
 
 ---
 
-## Security
+## Security Hardening
 
-PreBase is designed with security boundaries for local code exploration:
+PreBase is engineered with strict local security boundaries:
 - **Loopback Only**: Server binds exclusively to `127.0.0.1`.
-- **DNS Rebinding Protection**: Host headers other than `127.0.0.1` and `localhost` are rejected with `400 Bad Request`.
-- **CSRF / Origin Isolation**: Cross-origin requests from external origins are rejected with `403 Forbidden`.
-- **Session Token Authorization**: An ephemeral 32-character alphanumeric session token is generated on startup. API endpoints require the token via `x-prebase-session` header or `?token=` query parameter.
-- **Path Traversal Protection**: File paths are strictly canonicalized against the repository root; requests containing `..` or escaping the workspace root are blocked.
-- **Security Headers**: All HTTP responses include `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`.
+- **Exact Host Port Validation**: Header must match `127.0.0.1:<port>` or `localhost:<port>`. DNS rebinding attacks from arbitrary hosts are blocked with `400 Bad Request`.
+- **Exact Origin Validation**: Cross-origin requests from external origins are rejected with `403 Forbidden`.
+- **Single-Use Bootstrap Authentication**: Browser launch uses a single-use bootstrap token exchanged via `POST /api/v1/auth/session` for a secure session cookie, immediately stripped from the URL bar (`history.replaceState`).
+- **Path Traversal & Scope Restrictions**: File access is canonicalized against repository root, rejects `..`, and restricts access to files that exist in the indexed dependency graph snapshot.
+- **Bounded Resource Limits**: Git subprocesses are bounded by a 10s timeout and a 10MB output cap. Source file reads are capped at 500KB.
+- **Strict Offline CSP**: Content-Security-Policy blocks all remote fonts, CDNs, external scripts, and external connections (`default-src 'self' 'unsafe-inline' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none';`).
 
 ---
 
@@ -173,18 +178,32 @@ PreBase is designed with security boundaries for local code exploration:
   - Rust filesystem watcher (`notify`) with debouncing.
   - Coherent atomic state publication (`PublishedNetworkState`) and monotonic revisions.
   - Server-Sent Events (SSE) live updates preserving user viewports.
-- [ ] **Campaign 3: Production Hardening & Distribution**
-  - Performance profiling on 10,000+ node codebases.
-  - Multi-language expansion (Python, Go, Rust).
-  - Homebrew, binary distribution, and automated GitHub Actions releases.
+- [x] **Campaign 3: Production Hardening, Defect Remediation & Release Readiness**
+  - Stable anchor-based pagination cursor (`--is-ancestor`) and stale-cursor detection.
+  - Merge commit first-parent diffs and comparison basis indicator.
+  - Bounded Git subprocesses (timeout, buffer limit, child cleanup).
+  - Machine-readable NUL-delimited parsing immune to delimiter collision in commit messages.
+  - Exact Host & Origin port validation and single-use bootstrap token exchange.
+  - Indexed set enforcement and 500KB cap on source viewer.
+  - Demand-driven Canvas rendering (zero idle CPU utilization).
+  - 100% offline system fonts and dark/light theme toggle.
+  - GitHub Actions CI matrix and automated release workflow.
+
+---
+
+## Known Limitations
+
+- **Language Scope**: The initial MVP focuses specifically on JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`). Support for Python, Go, and Rust is scheduled for post-MVP.
+- **Subprocess Timeout**: Massive repositories with hundreds of thousands of commits may encounter the 10-second subprocess limit on initial root discovery if unindexed.
+- **Submodules**: Git submodules are treated as directory boundaries rather than recursively unpacked repositories.
 
 ---
 
 ## License
 
 Licensed under either of:
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
 

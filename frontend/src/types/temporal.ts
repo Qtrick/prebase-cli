@@ -37,6 +37,7 @@ export interface CommitDetails {
   message: string;
   stats: CommitStats;
   files: FileChange[];
+  comparison_basis?: string | null;
 }
 
 export interface HistoryPage {
@@ -57,6 +58,7 @@ export interface GitStatus {
   head_commit: string | null;
   is_dirty: boolean;
   dirty_files: string[];
+  is_worktree?: boolean;
 }
 
 export interface NetworkUpdatedEventData {

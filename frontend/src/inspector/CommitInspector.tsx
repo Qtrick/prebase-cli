@@ -169,6 +169,16 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
           </div>
         ) : details ? (
           <>
+            {/* Comparison Basis for Merge Commits */}
+            {details.comparison_basis && (
+              <div className="stat-card" style={{ borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+                <span className="stat-label">Merge Comparison Basis</span>
+                <span className="stat-value" style={{ fontSize: '12px', color: '#38bdf8' }}>
+                  {details.comparison_basis}
+                </span>
+              </div>
+            )}
+
             {/* Diff Stats */}
             <div className="stats-grid">
               <div className="stat-card">

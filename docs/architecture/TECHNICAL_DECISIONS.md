@@ -152,3 +152,79 @@ Option 3: Extracted high-performance canvas engine within a clean React shell.
 ### Rationale
 Preserves 100% of Prebasecode's visual algorithms, depth cueing, edge visual priorities, and arrow geometry, while completely severing all VS Code webview and workbench dependencies.
 
+---
+
+## ADR-007: Stable Git History Traversal and Anchor-Based Pagination
+
+### Problem
+Pagination using numeric offset skips (`--skip N`) breaks whenever commits are added or HEAD branches change between page requests. An offset-based cursor can return duplicate commits or skip commits if history shifts.
+
+### Options Investigated
+1. **Numeric Offset Cursor (`skip=N`)**: Simple, but fragile under concurrent commits or branch checkouts.
+2. **Persistent Database of Commits (SQLite / embedded DB)**: Heavyweight; introduces cache invalidation complexities, disk overhead, and sync drift.
+3. **Anchor Commit Cursor with History Generation Verification**:
+   - The client passes `cursor=<commit_hash>` anchored to the last seen commit.
+   - The engine checks if the anchor commit exists in current HEAD history (`git merge-base --is-ancestor <anchor> HEAD`).
+   - If the anchor is valid, the log resumes strictly after that commit (`<anchor>~1`).
+   - If the anchor is no longer an ancestor (e.g. branch checkout), return a structured `410 Gone / StaleCursor` error letting the frontend refresh from new HEAD.
+
+### Selected Approach
+Option 3: Anchor commit SHA cursor with ancestor verification.
+
+### Rationale
+Provides O(1) storage overhead, avoids external databases, guarantees no duplicates in stable traversal, and detects stale branches deterministically.
+
+---
+
+## ADR-008: Bounded and Cancellable Subprocess Execution
+
+### Problem
+Executing `git` commands synchronously with standard `Command::output()` risks unbounded execution time and memory consumption on huge repositories or adversarial inputs.
+
+### Options Investigated
+1. **Unbounded Synchronous Execution**: High risk of hangs or OOM.
+2. **Asynchronous Bounded Execution with Deadline and Buffer Cap**:
+   - `tokio::process::Command` with explicit execution deadline (`tokio::time::timeout`, 10s default).
+   - Bounded stdout/stderr reader (max 10MB) to prevent buffer overflows.
+   - Kill child process on cancellation or timeout (`kill_on_drop(true)`).
+
+### Selected Approach
+Option 2: Asynchronous execution with deadline, output bounds, and child process cleanup.
+
+---
+
+## ADR-009: Session Bootstrap and Credential Protection
+
+### Problem
+Passing long-lived session tokens in URL query strings exposes credentials in shell history, browser address bar, and terminal logs.
+
+### Options Investigated
+1. **Permanent Session Token in URL (`?token=...`)**: Insecure; URL persists in browser history and logs.
+2. **Short-Lived Single-Use Bootstrap Token with HttpOnly Cookie Exchange**:
+   - Server generates a single-use bootstrap token valid for 30 seconds.
+   - Browser opens with `?bootstrap=<bootstrap_token>`.
+   - Frontend immediately exchanges bootstrap token via `POST /api/v1/auth/session` to obtain an `HttpOnly`, `SameSite=Strict` cookie (or local bearer token).
+   - URL parameter is immediately stripped via `history.replaceState`.
+   - Host header and exact port matching enforced on all requests.
+
+### Selected Approach
+Option 2: Single-use bootstrap token exchanged for scoped session credentials and stripped from URL.
+
+---
+
+## ADR-010: Demand-Driven Canvas Rendering and Layout Preservation
+
+### Problem
+Continuous `requestAnimationFrame` loops waste significant CPU/battery even when the graph is static. Full re-layout on live updates causes existing nodes to jump randomly across the screen.
+
+### Options Investigated
+1. **Continuous 60fps Loop with Full Relayout**: Consumes 20-40% idle CPU and disorients developers during code edits.
+2. **Demand-Driven Redraw with Incremental Position Seeding**:
+   - Frame renders are scheduled only when inputs change: viewport pan/zoom, hover, selection, or graph state update.
+   - When a new snapshot arrives, existing node coordinates are preserved in the positions map.
+   - New nodes are seeded near connected neighbors; removed nodes are cleaned up without moving unchanged nodes.
+
+### Selected Approach
+Option 2: Demand-driven rendering with node position preservation.
+
+

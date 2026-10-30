@@ -119,8 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let url = format!(
-        "http://127.0.0.1:{}/?token={}&view={}",
-        server.port, server.session_token, default_view
+        "http://127.0.0.1:{}/?bootstrap={}&view={}",
+        server.port, server.bootstrap_token, default_view
     );
 
     println!(

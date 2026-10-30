@@ -27,6 +27,8 @@ mod tests {
             "test-repo".into(),
             "repo-123".into(),
             "secret-token-xyz".into(),
+            Some("bootstrap-token-abc".into()),
+            8080,
         ));
 
         let app = create_router(state.clone());
@@ -61,16 +63,17 @@ mod tests {
         let auth_resp = app.clone().oneshot(auth_req).await.unwrap();
         assert_eq!(auth_resp.status(), StatusCode::OK);
 
-        // 4. Protected endpoint with token in query string (for SSE) must succeed
-        let query_auth_req = Request::builder()
-            .uri("/api/v1/repository?token=secret-token-xyz")
+        // 4. Protected endpoint with cookie must succeed
+        let cookie_auth_req = Request::builder()
+            .uri("/api/v1/repository")
             .header(header::HOST, "127.0.0.1:8080")
+            .header(header::COOKIE, "prebase_session=secret-token-xyz")
             .body(Body::empty())
             .unwrap();
-        let query_resp = app.clone().oneshot(query_auth_req).await.unwrap();
-        assert_eq!(query_resp.status(), StatusCode::OK);
+        let cookie_resp = app.clone().oneshot(cookie_auth_req).await.unwrap();
+        assert_eq!(cookie_resp.status(), StatusCode::OK);
 
-        // 5. Host header validation must reject arbitrary external host (DNS rebinding protection)
+        // 5. Host header validation must reject arbitrary external host or wrong port
         let evil_host_req = Request::builder()
             .uri("/api/v1/health")
             .header(header::HOST, "evil-attacker.com")
@@ -78,6 +81,37 @@ mod tests {
             .unwrap();
         let evil_resp = app.clone().oneshot(evil_host_req).await.unwrap();
         assert_eq!(evil_resp.status(), StatusCode::BAD_REQUEST);
+
+        let wrong_port_req = Request::builder()
+            .uri("/api/v1/health")
+            .header(header::HOST, "127.0.0.1:9999")
+            .body(Body::empty())
+            .unwrap();
+        let wrong_port_resp = app.clone().oneshot(wrong_port_req).await.unwrap();
+        assert_eq!(wrong_port_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 6. Bootstrap token exchange: first attempt succeeds, sets cookie, returns session_token
+        let exchange_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/session")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"bootstrap_token":"bootstrap-token-abc"}"#))
+            .unwrap();
+        let exchange_resp = app.clone().oneshot(exchange_req).await.unwrap();
+        assert_eq!(exchange_resp.status(), StatusCode::OK);
+        assert!(exchange_resp.headers().contains_key(header::SET_COOKIE));
+
+        // Reusing the same bootstrap token must fail with 401
+        let reuse_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/session")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"bootstrap_token":"bootstrap-token-abc"}"#))
+            .unwrap();
+        let reuse_resp = app.clone().oneshot(reuse_req).await.unwrap();
+        assert_eq!(reuse_resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -88,6 +122,8 @@ mod tests {
             "test-repo".into(),
             "repo-123".into(),
             "token".into(),
+            None,
+            8080,
         ));
         let app = create_router(state);
 
@@ -109,6 +145,8 @@ mod tests {
             "test-repo".into(),
             "repo-123".into(),
             "token".into(),
+            None,
+            8080,
         ));
 
         let mut event_rx = state.event_sender.subscribe();

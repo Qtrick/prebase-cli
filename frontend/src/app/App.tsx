@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
-import { api } from '../transport/api';
+import { api, initSession } from '../transport/api';
 import { NetworkCanvas } from '../graphs/network/NetworkCanvas';
 import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
@@ -20,6 +20,9 @@ import {
   GitBranch,
   X,
   Radio,
+  Sun,
+  Moon,
+  ArrowDown,
 } from 'lucide-react';
 import './App.css';
 
@@ -32,6 +35,24 @@ export const App: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'network' | 'temporal'>(initialView);
 
+  // Theme state
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return (localStorage.getItem('prebase_theme') as 'dark' | 'light') || 'dark';
+  });
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('prebase_theme', next);
+      document.documentElement.setAttribute('data-theme', next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
   // Network state
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
@@ -42,22 +63,29 @@ export const App: React.FC = () => {
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
 
-  // Temporal state
+  // Temporal state & Anchor Pagination
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [commits, setCommits] = useState<CommitSummary[]>([]);
   const [selectedCommit, setSelectedCommit] = useState<CommitSummary | null>(null);
   const [temporalLoading, setTemporalLoading] = useState(false);
   const [temporalFilterPath, setTemporalFilterPath] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMoreCommits, setHasMoreCommits] = useState(false);
+  const [totalCommits, setTotalCommits] = useState<number | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Live SSE sync state
   const [liveRevision, setLiveRevision] = useState<number>(0);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
+  const [watcherStatus, setWatcherStatus] = useState<
+    'connected' | 'reconnecting' | 'error' | 'disabled'
+  >('connected');
 
   // View triggers (true bounding box fit view & reset view)
   const [fitViewCounter, setFitViewCounter] = useState(0);
   const [resetViewCounter, setResetViewCounter] = useState(0);
 
-  // 1. Initial repository info & polling until ready
+  // 1. Initial session bootstrap & repository info
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -85,32 +113,62 @@ export const App: React.FC = () => {
       }
     };
 
-    checkStatus();
-
-    // Also fetch git status initially
-    api.getGitStatus().then(setGitStatus).catch(() => {});
+    // Initialize session from bootstrap token first, then start fetching
+    initSession().then(() => {
+      checkStatus();
+      api.getGitStatus().then(setGitStatus).catch(() => {});
+    });
 
     return () => clearTimeout(timer);
   }, []);
 
-  // 2. Fetch Git commit history (full or filtered by file)
+  // 2. Fetch Git commit history with anchor pagination
   const loadCommits = useCallback(async (filterPath?: string | null) => {
     setTemporalLoading(true);
     try {
       if (filterPath) {
         const res = await api.getFileHistory(filterPath, 100);
         setCommits(res.commits);
+        setNextCursor(null);
+        setHasMoreCommits(false);
+        setTotalCommits(res.commits.length);
       } else {
-        const res = await api.getHistory(150);
+        const res = await api.getHistory(50, null);
         setCommits(res.commits);
+        setNextCursor(res.next_cursor);
+        setHasMoreCommits(res.has_more);
+        setTotalCommits(res.total_commits);
       }
-    } catch (e) {
-      // Git might not be initialized or history empty
+    } catch {
       setCommits([]);
+      setNextCursor(null);
+      setHasMoreCommits(false);
+      setTotalCommits(null);
     } finally {
       setTemporalLoading(false);
     }
   }, []);
+
+  const handleLoadMoreCommits = useCallback(async () => {
+    if (!nextCursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const res = await api.getHistory(50, nextCursor);
+      setCommits((prev) => [...prev, ...res.commits]);
+      setNextCursor(res.next_cursor);
+      setHasMoreCommits(res.has_more);
+      setTotalCommits(res.total_commits);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('410') || msg.includes('StaleCursor')) {
+        setLiveNotice('Commit history updated on disk. Reloading history from HEAD...');
+        setTimeout(() => setLiveNotice(null), 3500);
+        loadCommits(temporalFilterPath);
+      }
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath]);
 
   // Load commits when active tab is temporal or filter changes
   useEffect(() => {
@@ -119,48 +177,91 @@ export const App: React.FC = () => {
     }
   }, [activeTab, temporalFilterPath, loadCommits]);
 
-  // 3. Authenticated Server-Sent Events (SSE) for Live Updates
+  // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
-    const unsubscribe = api.subscribeToEvents((event: ServerEvent) => {
-      if (event.type === 'network.updated') {
-        const { revision, changed_files } = event.data;
-        setLiveRevision(revision);
+    const unsubscribe = api.subscribeToEvents(
+      (event: ServerEvent) => {
+        setWatcherStatus('connected');
+        if (event.type === 'network.updated') {
+          const { revision, changed_files } = event.data;
+          setLiveRevision(revision);
 
-        // Fetch latest network snapshot without full page reload
-        api
-          .getNetwork()
-          .then((newSnap) => {
-            setSnapshot(newSnap);
-            setStatus('Ready');
+          // Fetch latest network snapshot without full page reload
+          api
+            .getNetwork()
+            .then((newSnap) => {
+              setSnapshot(newSnap);
+              setStatus('Ready');
 
-            // Flash subtle live-update toast
-            const fileNotice =
-              changed_files.length > 0
-                ? `${changed_files.length} file(s) updated`
-                : 'Graph reanalyzed';
-            setLiveNotice(`Live update: ${fileNotice} (rev ${revision})`);
-            setTimeout(() => setLiveNotice(null), 3500);
+              // Flash subtle live-update toast
+              const fileNotice =
+                changed_files.length > 0 && changed_files[0] !== '*'
+                  ? `${changed_files.length} file(s) updated`
+                  : 'Graph reanalyzed';
+              setLiveNotice(`Live update: ${fileNotice} (rev ${revision})`);
+              setTimeout(() => setLiveNotice(null), 3500);
 
-            // Re-sync selected node if still exists in the new snapshot
-            setSelectedNode((prev) => {
-              if (!prev) return null;
-              return newSnap.nodes.find((n) => n.id === prev.id) || null;
-            });
-          })
-          .catch(() => {});
-      } else if (event.type === 'git.updated') {
-        // Git branch or head commit changed
-        api.getGitStatus().then(setGitStatus).catch(() => {});
-        if (activeTab === 'temporal') {
-          loadCommits(temporalFilterPath);
+              // Re-sync selected node if still exists in the new snapshot
+              setSelectedNode((prev) => {
+                if (!prev) return null;
+                return newSnap.nodes.find((n) => n.id === prev.id) || null;
+              });
+            })
+            .catch(() => {});
+        } else if (event.type === 'git.updated') {
+          api.getGitStatus().then(setGitStatus).catch(() => {});
+          if (activeTab === 'temporal') {
+            loadCommits(temporalFilterPath);
+          }
+        }
+      },
+      (status) => {
+        setWatcherStatus(status);
+        if (status === 'connected') {
+          // Re-fetch state on reconnect to reconcile any missed updates
+          api.getStatus().then((st) => {
+            if (st.revision > liveRevision) {
+              api.getNetwork().then((newSnap) => {
+                setSnapshot(newSnap);
+                setLiveRevision(st.revision);
+              }).catch(() => {});
+            }
+          }).catch(() => {});
         }
       }
-    });
+    );
 
     return () => {
       unsubscribe();
     };
-  }, [activeTab, temporalFilterPath, loadCommits]);
+  }, [activeTab, temporalFilterPath, loadCommits, liveRevision]);
+
+  // 4. Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      const isInput = targetTag === 'input' || targetTag === 'textarea';
+
+      if (e.key === 'Escape') {
+        setSelectedNode(null);
+        setSelectedEdge(null);
+        setSelectedCommit(null);
+        setFocusedNodeId(null);
+        return;
+      }
+
+      if (!isInput) {
+        if (e.key === '1') {
+          setActiveTab('network');
+        } else if (e.key === '2') {
+          setActiveTab('temporal');
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Selection handlers
   const handleSelectNode = useCallback((node: FileNode | null) => {
@@ -202,7 +303,16 @@ export const App: React.FC = () => {
             <div className="logo-orb" />
             <span className="brand-name">PreBase</span>
           </div>
-          <span className="brand-version">v0.1</span>
+          <div className="header-actions">
+            <button
+              className="theme-toggle-btn"
+              onClick={toggleTheme}
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            >
+              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+            <span className="brand-version">v0.1</span>
+          </div>
         </div>
 
         <div className="repo-badge">
@@ -259,8 +369,24 @@ export const App: React.FC = () => {
           </div>
 
           <div className="live-watcher-badge">
-            <Radio size={12} className="pulse-icon" color="#2dd4bf" />
-            <span>Live Watcher Active</span>
+            <Radio
+              size={12}
+              className={watcherStatus === 'connected' ? 'pulse-icon' : ''}
+              color={
+                watcherStatus === 'connected'
+                  ? '#2dd4bf'
+                  : watcherStatus === 'reconnecting'
+                  ? '#f59e0b'
+                  : '#ef4444'
+              }
+            />
+            <span>
+              {watcherStatus === 'connected'
+                ? 'Live Watcher Active'
+                : watcherStatus === 'reconnecting'
+                ? 'Reconnecting...'
+                : 'Watcher Inactive'}
+            </span>
           </div>
 
           {snapshot && (
@@ -289,7 +415,11 @@ export const App: React.FC = () => {
             <div className="temporal-header-info">
               <Clock size={15} color="#38bdf8" />
               <span>Git Commit History & Ancestry DAG</span>
-              {commits.length > 0 && <span className="dim">({commits.length} commits)</span>}
+              {commits.length > 0 && (
+                <span className="dim">
+                  ({commits.length} {totalCommits ? `of ${totalCommits}` : ''} commits)
+                </span>
+              )}
             </div>
           )}
 
@@ -331,7 +461,10 @@ export const App: React.FC = () => {
         {activeTab === 'temporal' && temporalFilterPath && (
           <div className="temporal-filter-bar">
             <span>
-              Showing commit history for: <strong className="mono">{temporalFilterPath}</strong>
+              Showing history touching: <strong className="mono">{temporalFilterPath}</strong>
+              <span className="dim" style={{ marginLeft: '8px' }}>
+                (Dashed edges denote ancestry across omitted intermediate commits)
+              </span>
             </span>
             <button
               className="clear-filter-btn"
@@ -401,13 +534,41 @@ export const App: React.FC = () => {
                 )}
               </div>
             ) : (
-              <TemporalCanvas
-                commits={commits}
-                selectedCommitHash={selectedCommit?.hash || null}
-                onSelectCommit={setSelectedCommit}
-                fitViewTrigger={fitViewCounter}
-                resetViewTrigger={resetViewCounter}
-              />
+              <>
+                <TemporalCanvas
+                  commits={commits}
+                  selectedCommitHash={selectedCommit?.hash || null}
+                  onSelectCommit={setSelectedCommit}
+                  isFiltered={Boolean(temporalFilterPath)}
+                  fitViewTrigger={fitViewCounter}
+                  resetViewTrigger={resetViewCounter}
+                />
+
+                {/* Floating Load More Commits Button */}
+                {hasMoreCommits && (
+                  <div className="pagination-float-bar">
+                    <button
+                      className="pagination-btn"
+                      disabled={isLoadingMore}
+                      onClick={handleLoadMoreCommits}
+                    >
+                      {isLoadingMore ? (
+                        <>
+                          <Loader2 size={14} className="spinner" color="#38bdf8" />
+                          <span>Loading older commits...</span>
+                        </>
+                      ) : (
+                        <>
+                          <ArrowDown size={14} color="#38bdf8" />
+                          <span>
+                            Load older commits ({commits.length} {totalCommits ? `of ${totalCommits}` : ''})
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

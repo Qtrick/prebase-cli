@@ -14,6 +14,7 @@ interface TemporalCanvasProps {
   commits: CommitSummary[];
   selectedCommitHash: string | null;
   onSelectCommit: (commit: CommitSummary | null) => void;
+  isFiltered?: boolean;
   fitViewTrigger?: number;
   resetViewTrigger?: number;
 }
@@ -22,6 +23,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   commits,
   selectedCommitHash,
   onSelectCommit,
+  isFiltered,
   fitViewTrigger,
   resetViewTrigger,
 }) => {
@@ -36,7 +38,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   const initialTransformRef = useRef<Transform>({ x: 0, y: 0, k: 1 });
   const didDragRef = useRef(false);
 
-  const layout = useMemo(() => computeTemporalLayout(commits), [commits]);
+  const layout = useMemo(() => computeTemporalLayout(commits, isFiltered), [commits, isFiltered]);
 
   // Fit View helper
   const fitView = useCallback(() => {
@@ -79,147 +81,153 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     }
   }, [resetViewTrigger]);
 
-  // Canvas render loop
+  // Demand-driven canvas rendering (zero idle CPU usage)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let animId: number;
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth || 800;
+    const height = canvas.clientHeight || 600;
 
-    const render = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const width = canvas.clientWidth;
-      const height = canvas.clientHeight;
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+    }
 
-      if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    // Camera transform
+    ctx.translate(transform.x, transform.y);
+    ctx.scale(transform.k, transform.k);
+
+    // 1. Draw commit edges (branch, merge lines, and stubs)
+    for (const edge of layout.edges) {
+      ctx.beginPath();
+      ctx.strokeStyle = getLaneColor(edge.lane);
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+
+      const isHighlighted =
+        edge.fromHash === selectedCommitHash ||
+        edge.toHash === selectedCommitHash ||
+        edge.fromHash === hoveredHash ||
+        edge.toHash === hoveredHash;
+
+      ctx.globalAlpha = isHighlighted ? 1.0 : 0.65;
+      if (isHighlighted) {
+        ctx.lineWidth = 3.5;
       }
 
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, width, height);
+      if (edge.isDashed) {
+        ctx.setLineDash([4, 4]);
+      } else {
+        ctx.setLineDash([]);
+      }
 
-      // Background subtle grid
-      ctx.save();
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(0, 0, width, height);
-
-      // Camera transform
-      ctx.translate(transform.x, transform.y);
-      ctx.scale(transform.k, transform.k);
-
-      // 1. Draw commit edges (branch and merge lines)
-      for (const edge of layout.edges) {
+      if (edge.isStub) {
+        ctx.moveTo(edge.fromX, edge.fromY);
+        ctx.lineTo(edge.toX, edge.toY);
+        ctx.stroke();
+        // Continuation stub dot
         ctx.beginPath();
-        ctx.strokeStyle = getLaneColor(edge.lane);
-        ctx.lineWidth = 2.5;
-        ctx.lineCap = 'round';
-
-        const isHighlighted =
-          edge.fromHash === selectedCommitHash ||
-          edge.toHash === selectedCommitHash ||
-          edge.fromHash === hoveredHash ||
-          edge.toHash === hoveredHash;
-
-        ctx.globalAlpha = isHighlighted ? 1.0 : 0.65;
-        if (isHighlighted) {
-          ctx.lineWidth = 3.5;
-        }
-
-        if (Math.abs(edge.fromX - edge.toX) < 1) {
-          // Straight line down the same lane
-          ctx.moveTo(edge.fromX, edge.fromY);
-          ctx.lineTo(edge.toX, edge.toY);
-        } else {
-          // Smooth Bézier curve for branch or merge
-          ctx.moveTo(edge.fromX, edge.fromY);
-          const cpY1 = edge.fromY + (edge.toY - edge.fromY) * 0.5;
-          const cpY2 = edge.fromY + (edge.toY - edge.fromY) * 0.5;
-          ctx.bezierCurveTo(edge.fromX, cpY1, edge.toX, cpY2, edge.toX, edge.toY);
-        }
+        ctx.arc(edge.toX, edge.toY, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = getLaneColor(edge.lane);
+        ctx.fill();
+      } else if (Math.abs(edge.fromX - edge.toX) < 1) {
+        // Straight line down the same lane
+        ctx.moveTo(edge.fromX, edge.fromY);
+        ctx.lineTo(edge.toX, edge.toY);
+        ctx.stroke();
+      } else {
+        // Smooth Bézier curve for branch or merge
+        ctx.moveTo(edge.fromX, edge.fromY);
+        const cpY1 = edge.fromY + (edge.toY - edge.fromY) * 0.5;
+        const cpY2 = edge.fromY + (edge.toY - edge.fromY) * 0.5;
+        ctx.bezierCurveTo(edge.fromX, cpY1, edge.toX, cpY2, edge.toX, edge.toY);
         ctx.stroke();
       }
+      ctx.setLineDash([]);
+    }
 
-      ctx.globalAlpha = 1.0;
+    ctx.globalAlpha = 1.0;
 
-      // 2. Draw commit nodes & labels
-      for (let i = 0; i < layout.nodes.length; i++) {
-        const item = layout.nodes[i];
-        const isSelected = item.commit.hash === selectedCommitHash;
-        const isHovered = item.commit.hash === hoveredHash;
-        const color = getLaneColor(item.lane);
+    // 2. Draw commit nodes & labels
+    for (let i = 0; i < layout.nodes.length; i++) {
+      const item = layout.nodes[i];
+      const isSelected = item.commit.hash === selectedCommitHash;
+      const isHovered = item.commit.hash === hoveredHash;
+      const color = getLaneColor(item.lane);
 
-        // Node circle
-        const radius = isSelected ? 8 : isHovered ? 7 : 5.5;
+      // Node circle
+      const radius = isSelected ? 8 : isHovered ? 7 : 5.5;
 
-        // Outer glow on select/hover
-        if (isSelected || isHovered) {
-          ctx.beginPath();
-          ctx.arc(item.x, item.y, radius + 5, 0, Math.PI * 2);
-          ctx.fillStyle = color;
-          ctx.globalAlpha = 0.3;
-          ctx.fill();
-          ctx.globalAlpha = 1.0;
-        }
-
-        // Inner circle
+      // Outer glow on select/hover
+      if (isSelected || isHovered) {
         ctx.beginPath();
-        ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = isSelected ? '#ffffff' : color;
+        ctx.arc(item.x, item.y, radius + 5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.3;
         ctx.fill();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = isSelected ? color : '#0f172a';
-        ctx.stroke();
-
-        // 3. Draw text and badges on the right side of the lanes
-        const textStartX = MARGIN_LEFT + (Math.max(1, item.lane) + 1.2) * 36 + 20;
-
-        // Hash Badge
-        const badgeWidth = 64;
-        const badgeHeight = 20;
-        const badgeX = textStartX;
-        const badgeY = item.y - badgeHeight / 2;
-
-        ctx.fillStyle = isSelected ? 'rgba(56, 189, 248, 0.25)' : 'rgba(30, 41, 59, 0.8)';
-        ctx.strokeStyle = isSelected ? '#38bdf8' : 'rgba(71, 85, 105, 0.6)';
-        ctx.lineWidth = 1;
-        roundRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-        ctx.fillStyle = isSelected ? '#38bdf8' : '#94a3b8';
-        ctx.textBaseline = 'middle';
-        ctx.textAlign = 'center';
-        ctx.fillText(item.commit.short_hash, badgeX + badgeWidth / 2, item.y);
-
-        // Commit summary title
-        const summaryX = badgeX + badgeWidth + 12;
-        ctx.textAlign = 'left';
-        ctx.font = isSelected ? '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' : '500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        ctx.fillStyle = isSelected ? '#f8fafc' : '#e2e8f0';
-
-        const maxSummaryWidth = 360;
-        const summaryText = truncateText(ctx, item.commit.summary, maxSummaryWidth);
-        ctx.fillText(summaryText, summaryX, item.y);
-
-        // Author & Relative Date
-        const metaX = summaryX + 380;
-        ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        ctx.fillStyle = '#64748b';
-        const relTime = formatRelativeTime(item.commit.author_timestamp);
-        ctx.fillText(`${item.commit.author_name} • ${relTime}`, metaX, item.y);
+        ctx.globalAlpha = 1.0;
       }
 
-      ctx.restore();
-      animId = requestAnimationFrame(render);
-    };
+      // Inner circle
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = isSelected ? '#ffffff' : color;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = isSelected ? color : '#0f172a';
+      ctx.stroke();
 
-    animId = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(animId);
+      // 3. Draw text and badges on the right side of the lanes
+      const textStartX = MARGIN_LEFT + (Math.max(1, item.lane) + 1.2) * 36 + 20;
+
+      // Hash Badge
+      const badgeWidth = 64;
+      const badgeHeight = 20;
+      const badgeX = textStartX;
+      const badgeY = item.y - badgeHeight / 2;
+
+      ctx.fillStyle = isSelected ? 'rgba(56, 189, 248, 0.25)' : 'rgba(30, 41, 59, 0.8)';
+      ctx.strokeStyle = isSelected ? '#38bdf8' : 'rgba(71, 85, 105, 0.6)';
+      ctx.lineWidth = 1;
+      roundRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+      ctx.fillStyle = isSelected ? '#38bdf8' : '#94a3b8';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillText(item.commit.short_hash, badgeX + badgeWidth / 2, item.y);
+
+      // Commit summary title
+      const summaryX = badgeX + badgeWidth + 12;
+      ctx.textAlign = 'left';
+      ctx.font = isSelected
+        ? '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+        : '500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillStyle = isSelected ? '#f8fafc' : '#e2e8f0';
+
+      const maxSummaryWidth = 360;
+      const summaryText = truncateText(ctx, item.commit.summary, maxSummaryWidth);
+      ctx.fillText(summaryText, summaryX, item.y);
+
+      // Author & Relative Date
+      const metaX = summaryX + 380;
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillStyle = '#64748b';
+      const relTime = formatRelativeTime(item.commit.author_timestamp);
+      ctx.fillText(`${item.commit.author_name} • ${relTime}`, metaX, item.y);
+    }
+
+    ctx.restore();
   }, [layout, transform, selectedCommitHash, hoveredHash]);
 
   // Coordinate projection from screen to world

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitStatus {
     pub is_git_repo: bool,
+    pub is_worktree: bool,
     pub branch: Option<String>,
     pub head_commit: Option<String>,
     pub is_dirty: bool,
@@ -59,6 +60,7 @@ pub struct CommitDetails {
     pub message: String,
     pub stats: CommitStats,
     pub files: Vec<FileChange>,
+    pub comparison_basis: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,4 +76,3 @@ pub struct FileHistoryResult {
     pub file_path: String,
     pub commits: Vec<CommitSummary>,
 }
-

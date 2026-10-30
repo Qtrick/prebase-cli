@@ -13,14 +13,55 @@ import {
   ServerEvent,
 } from '../types/temporal';
 
+let inMemorySessionToken: string = '';
+
 export function getSessionToken(): string {
-  const urlParams = new URLSearchParams(window.location.search);
-  const tokenFromUrl = urlParams.get('token');
-  if (tokenFromUrl) {
-    sessionStorage.setItem('prebase_token', tokenFromUrl);
-    return tokenFromUrl;
+  if (inMemorySessionToken) return inMemorySessionToken;
+  const tokenFromStorage = sessionStorage.getItem('prebase_token');
+  if (tokenFromStorage) {
+    inMemorySessionToken = tokenFromStorage;
+    return tokenFromStorage;
   }
-  return sessionStorage.getItem('prebase_token') || '';
+  return '';
+}
+
+export async function initSession(): Promise<string> {
+  const urlParams = new URLSearchParams(window.location.search);
+  const bootstrapToken = urlParams.get('bootstrap');
+  const tokenFromUrl = urlParams.get('token');
+
+  if (bootstrapToken) {
+    try {
+      const resp = await fetch('/api/v1/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bootstrap_token: bootstrapToken }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.session_token) {
+          inMemorySessionToken = data.session_token;
+          sessionStorage.setItem('prebase_token', data.session_token);
+        }
+      }
+    } catch {
+      // ignore network errors on init
+    }
+    // Clean bootstrap parameter from browser address bar
+    urlParams.delete('bootstrap');
+    const newSearch = urlParams.toString();
+    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+    window.history.replaceState({}, '', cleanUrl);
+  } else if (tokenFromUrl) {
+    inMemorySessionToken = tokenFromUrl;
+    sessionStorage.setItem('prebase_token', tokenFromUrl);
+    urlParams.delete('token');
+    const newSearch = urlParams.toString();
+    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+    window.history.replaceState({}, '', cleanUrl);
+  }
+
+  return getSessionToken();
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -80,11 +121,15 @@ export const api = {
   // Server-Sent Events (SSE)
   subscribeToEvents: (
     onEvent: (event: ServerEvent) => void,
-    onError?: (err: Event) => void
+    onStatusChange?: (status: 'connected' | 'reconnecting' | 'error') => void
   ): (() => void) => {
     const token = getSessionToken();
     const url = `/api/v1/events?token=${encodeURIComponent(token)}`;
     const eventSource = new EventSource(url);
+
+    eventSource.onopen = () => {
+      if (onStatusChange) onStatusChange('connected');
+    };
 
     eventSource.onmessage = (e) => {
       try {
@@ -96,8 +141,8 @@ export const api = {
       }
     };
 
-    eventSource.onerror = (e) => {
-      if (onError) onError(e);
+    eventSource.onerror = () => {
+      if (onStatusChange) onStatusChange('reconnecting');
     };
 
     return () => {

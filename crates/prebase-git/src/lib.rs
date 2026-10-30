@@ -7,6 +7,12 @@ pub use engine::GitEngine;
 pub use error::GitError;
 pub use model::*;
 
+impl CommitDetails {
+    pub fn summary_or_message(&self) -> &str {
+        self.message.lines().next().unwrap_or("")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,34 +73,68 @@ mod tests {
         assert!(!status.is_dirty);
         assert_eq!(status.dirty_files.len(), 0);
 
-        // Make it dirty
-        fs::write(dir.path().join("untracked.txt"), "dirty").unwrap();
+        // Make it dirty with spaces and unicode
+        fs::write(dir.path().join("untracked with space 🌟.txt"), "dirty").unwrap();
         let dirty_status = engine.get_status().expect("failed to get dirty status");
         assert!(dirty_status.is_dirty);
         assert!(dirty_status
             .dirty_files
-            .contains(&"untracked.txt".to_string()));
+            .contains(&"untracked with space 🌟.txt".to_string()));
     }
 
     #[test]
-    fn test_git_history_pagination() {
+    fn test_git_history_anchor_pagination() {
         let dir = setup_test_git_repo();
         let engine = GitEngine::new(dir.path().to_path_buf());
 
-        let history = engine
+        // Page 1: limit 2
+        let page1 = engine
             .get_history(2, None)
             .expect("failed to get history page 1");
-        assert_eq!(history.commits.len(), 2);
-        assert!(history.has_more);
-        assert_eq!(history.total_commits, Some(3));
-        assert!(history.next_cursor.is_some());
+        assert_eq!(page1.commits.len(), 2);
+        assert!(page1.has_more);
+        assert_eq!(page1.total_commits, Some(3));
+        let cursor = page1.next_cursor.expect("expected next cursor");
 
+        // Add a new commit to HEAD while user is paginating!
+        fs::write(dir.path().join("new_file.txt"), "new content").unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["commit", "-m", "feat: new commit during pagination"])
+            .status()
+            .unwrap();
+
+        // Page 2: with anchor cursor from Page 1 (must be immune to new commits on HEAD!)
         let page2 = engine
-            .get_history(2, history.next_cursor.as_deref())
+            .get_history(2, Some(&cursor))
             .expect("failed to get history page 2");
         assert_eq!(page2.commits.len(), 1);
         assert!(!page2.has_more);
         assert_eq!(page2.next_cursor, None);
+
+        // Verify no duplicate commits between page 1 and page 2
+        let page1_hashes: Vec<_> = page1.commits.iter().map(|c| &c.hash).collect();
+        assert!(!page1_hashes.contains(&&page2.commits[0].hash));
+    }
+
+    #[test]
+    fn test_stale_cursor_detection() {
+        let dir = setup_test_git_repo();
+        let engine = GitEngine::new(dir.path().to_path_buf());
+
+        // A fabricated SHA that is not an ancestor of HEAD
+        let fake_cursor = "0123456789abcdef0123456789abcdef01234567";
+        let res = engine.get_history(2, Some(fake_cursor));
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            GitError::StaleCursor(c) => assert_eq!(c, fake_cursor),
+            err => panic!("Unexpected error variant: {:?}", err),
+        }
     }
 
     #[test]
@@ -137,6 +177,73 @@ mod tests {
             .files
             .iter()
             .all(|f| f.status == FileChangeStatus::Added));
+    }
+
+    #[test]
+    fn test_merge_commit_file_changes_and_comparison_basis() {
+        let dir = tempdir().expect("failed to create tempdir");
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(path)
+                .args(args)
+                .status()
+                .expect("failed to execute git");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+
+        run(&["init"]);
+        run(&["config", "user.name", "Merge Tester"]);
+        run(&["config", "user.email", "merge@prebase.dev"]);
+
+        // Commit 1 on main
+        fs::write(path.join("base.txt"), "base\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "chore: base commit"]);
+
+        // Branch feature
+        run(&["checkout", "-b", "feature"]);
+        fs::write(path.join("feature_file.txt"), "feature content\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "feat: add feature file"]);
+
+        // Switch back to main and commit on main
+        run(&["checkout", "main"]);
+        fs::write(path.join("main_file.txt"), "main content\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "chore: add main file"]);
+
+        // Merge feature into main (creates 2-parent merge commit)
+        run(&[
+            "merge",
+            "feature",
+            "--no-ff",
+            "-m",
+            "merge: merge feature into main",
+        ]);
+
+        let engine = GitEngine::new(path.to_path_buf());
+        let head_history = engine.get_history(1, None).unwrap();
+        let merge_commit_hash = &head_history.commits[0].hash;
+
+        let details = engine.get_commit_details(merge_commit_hash).unwrap();
+        assert_eq!(
+            details.parent_hashes.len(),
+            2,
+            "Expected 2 parents for merge commit"
+        );
+        assert!(
+            details.comparison_basis.is_some(),
+            "Expected comparison basis label"
+        );
+
+        // The merge brought feature_file.txt relative to first parent (main)!
+        let feature_change = details.files.iter().find(|f| f.path == "feature_file.txt");
+        assert!(
+            feature_change.is_some(),
+            "Expected feature_file.txt in merge commit diff"
+        );
+        assert_eq!(feature_change.unwrap().status, FileChangeStatus::Added);
     }
 
     #[test]
@@ -188,11 +295,5 @@ mod tests {
 
         let history_err = engine.get_history(10, None);
         assert!(history_err.is_err());
-    }
-}
-
-impl CommitDetails {
-    pub fn summary_or_message(&self) -> &str {
-        self.message.lines().next().unwrap_or("")
     }
 }

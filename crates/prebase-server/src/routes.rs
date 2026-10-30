@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -51,6 +51,44 @@ pub struct HistoryQuery {
 pub struct FileHistoryQuery {
     pub path: String,
     pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthSessionRequest {
+    pub bootstrap_token: String,
+}
+
+#[derive(Serialize)]
+pub struct AuthSessionResponse {
+    pub session_token: String,
+}
+
+pub async fn handle_auth_session(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AuthSessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+    match state.exchange_bootstrap_token(&payload.bootstrap_token) {
+        Some(token) => {
+            let mut headers = HeaderMap::new();
+            let cookie_val = format!(
+                "prebase_session={}; HttpOnly; SameSite=Strict; Path=/",
+                token
+            );
+            if let Ok(val) = cookie_val.parse() {
+                headers.insert(header::SET_COOKIE, val);
+            }
+            Ok((
+                headers,
+                Json(AuthSessionResponse {
+                    session_token: token,
+                }),
+            ))
+        }
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired bootstrap token",
+        )),
+    }
 }
 
 pub async fn handle_health() -> Json<HealthResponse> {
@@ -171,6 +209,30 @@ pub async fn handle_get_source(
         ));
     }
 
+    // Verify that the requested file exists in the published canonical snapshot
+    let published = match state.get_published() {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Repository index not ready yet",
+            ))
+        }
+    };
+
+    let is_indexed = published
+        .snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == file_path || n.relative_path == file_path);
+    if !is_indexed {
+        warn!("Attempted to read non-indexed file: {file_path}");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Requested file is not part of indexed repository",
+        ));
+    }
+
     let target = state.root_path.join(&file_path);
     let canonical = match target.canonicalize() {
         Ok(p) => p,
@@ -186,6 +248,18 @@ pub async fn handle_get_source(
     if !canonical.starts_with(&canonical_root) {
         warn!("Path traversal attempt blocked: {file_path}");
         return Err((StatusCode::FORBIDDEN, "Path escapes repository root"));
+    }
+
+    // Enforce 500KB read cap to prevent memory DOS
+    let metadata = match std::fs::metadata(&canonical) {
+        Ok(m) => m,
+        Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to read file metadata")),
+    };
+    if metadata.len() > 500 * 1024 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Source file exceeds 500KB limit",
+        ));
     }
 
     match std::fs::read_to_string(&canonical) {
@@ -216,7 +290,11 @@ pub async fn handle_history(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| match e {
+            prebase_git::GitError::StaleCursor(_) => (StatusCode::GONE, e.to_string()),
+            prebase_git::GitError::InvalidRevision(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })
 }
 
 pub async fn handle_commit_details(

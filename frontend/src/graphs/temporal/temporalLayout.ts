@@ -15,6 +15,8 @@ export interface CommitEdge {
   toX: number;
   toY: number;
   lane: number;
+  isStub?: boolean;
+  isDashed?: boolean;
 }
 
 export interface TemporalGraphLayout {
@@ -50,7 +52,10 @@ export const ROW_HEIGHT = 56;
 export const MARGIN_LEFT = 60;
 export const MARGIN_TOP = 60;
 
-export function computeTemporalLayout(commits: CommitSummary[]): TemporalGraphLayout {
+export function computeTemporalLayout(
+  commits: CommitSummary[],
+  isFiltered = false
+): TemporalGraphLayout {
   if (commits.length === 0) {
     return {
       nodes: [],
@@ -106,6 +111,21 @@ export function computeTemporalLayout(commits: CommitSummary[]): TemporalGraphLa
           toX: parentNode.x,
           toY: parentNode.y,
           lane: node.lane,
+          isStub: false,
+          isDashed: isFiltered,
+        });
+      } else {
+        // Parent is outside the loaded page!
+        edges.push({
+          fromHash: node.commit.hash,
+          toHash: parentHash,
+          fromX: node.x,
+          fromY: node.y,
+          toX: node.x,
+          toY: node.y + ROW_HEIGHT * 0.75,
+          lane: node.lane,
+          isStub: true,
+          isDashed: true,
         });
       }
     }
