@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 use tracing::warn;
 
 use prebase_core::model::{
-    DependencyEdge, FileNode, GraphSnapshot, IndexingStatus, RepositoryInfo,
+    DependencyEdge, FileNode, GraphSnapshot, IndexingStatus, RepositoryInfo, WatcherHealth,
 };
 use prebase_core::scanner::RepositoryScanner;
 use prebase_git::{CommitDetails, FileHistoryResult, GitStatus, HistoryPage};
@@ -33,6 +33,7 @@ pub struct HealthResponse {
 pub struct StatusResponse {
     pub indexing_status: IndexingStatus,
     pub revision: u64,
+    pub watcher_health: WatcherHealth,
 }
 
 #[derive(Deserialize)]
@@ -101,9 +102,11 @@ pub async fn handle_health() -> Json<HealthResponse> {
 pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let status = state.get_status();
     let revision = state.get_current_revision();
+    let watcher_health = state.get_watcher_health();
     Json(StatusResponse {
         indexing_status: status,
         revision,
+        watcher_health,
     })
 }
 
@@ -250,11 +253,27 @@ pub async fn handle_get_source(
         return Err((StatusCode::FORBIDDEN, "Path escapes repository root"));
     }
 
-    // Enforce 500KB read cap to prevent memory DOS
+    // Verify resolved canonical target is not an excluded sensitive file (prevents internal symlink leaks)
+    let canonical_rel = match canonical.strip_prefix(&canonical_root) {
+        Ok(p) => p.to_string_lossy().replace('\\', "/"),
+        Err(_) => return Err((StatusCode::FORBIDDEN, "Path escapes repository root")),
+    };
+    if RepositoryScanner::is_excluded_relative_path(&canonical_rel) {
+        warn!("Blocked access to excluded sensitive file via symlink: {canonical_rel}");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access to file is excluded for security",
+        ));
+    }
+
+    // Enforce regular file check (prevents thread hangs on FIFOs/named pipes) and 500KB cap
     let metadata = match std::fs::metadata(&canonical) {
         Ok(m) => m,
         Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to read file metadata")),
     };
+    if !metadata.is_file() {
+        return Err((StatusCode::BAD_REQUEST, "Target is not a regular file"));
+    }
     if metadata.len() > 500 * 1024 {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -316,9 +335,17 @@ pub async fn handle_file_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileHistoryQuery>,
 ) -> Result<Json<FileHistoryResult>, (StatusCode, String)> {
+    let clean_path = query.path.trim_start_matches('/').trim_start_matches('\\');
+    if clean_path.contains("..") || RepositoryScanner::is_excluded_relative_path(clean_path) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access to file history is excluded for security".into(),
+        ));
+    }
+
     let limit = query.limit.unwrap_or(50).min(100);
     let git = state.git_engine.clone();
-    let path = query.path;
+    let path = clean_path.to_string();
 
     tokio::task::spawn_blocking(move || git.get_file_history(&path, limit))
         .await
@@ -346,12 +373,18 @@ pub async fn handle_events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.event_sender.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+    let state_clone = state.clone();
+    let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
         Ok(evt) => {
             let data = serde_json::to_string(&evt).unwrap_or_default();
             Some(Ok(Event::default().data(data)))
         }
-        Err(_) => None,
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => {
+            let current_revision = state_clone.get_current_revision();
+            let evt = crate::state::ServerEvent::ReconcileRequired { current_revision };
+            let data = serde_json::to_string(&evt).unwrap_or_default();
+            Some(Ok(Event::default().data(data)))
+        }
     });
 
     Sse::new(stream).keep_alive(

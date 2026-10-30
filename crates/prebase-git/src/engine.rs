@@ -29,7 +29,8 @@ impl GitEngine {
     }
 
     /// Executes a bounded, safe, read-only Git subprocess with execution deadline,
-    /// output size limits, and guaranteed child-process cleanup on cancellation.
+    /// output size limits, concurrent pipe draining (preventing OS pipe buffer deadlocks),
+    /// and guaranteed child-process cleanup on cancellation.
     fn run_git_cmd(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.root_path)
@@ -43,27 +44,50 @@ impl GitEngine {
         let start = Instant::now();
         let timeout = Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS);
 
+        let mut stdout_handle = child.stdout.take().unwrap();
+        let mut stderr_handle = child.stderr.take().unwrap();
+
+        // Concurrently drain stdout up to max limit + 1 byte (to detect overflow)
+        let stdout_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 16384];
+            while buf.len() <= GIT_MAX_OUTPUT_BYTES {
+                match stdout_handle.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            buf
+        });
+
+        // Concurrently drain stderr up to 64KB
+        let stderr_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while buf.len() < 64 * 1024 {
+                match stderr_handle.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            buf
+        });
+
         loop {
             match child.try_wait().map_err(GitError::Io)? {
                 Some(status) => {
-                    let mut stdout = Vec::new();
-                    if let Some(mut out) = child.stdout.take() {
-                        out.by_ref()
-                            .take(GIT_MAX_OUTPUT_BYTES as u64 + 1)
-                            .read_to_end(&mut stdout)
-                            .map_err(GitError::Io)?;
-                    }
+                    let stdout = stdout_reader.join().unwrap_or_default();
+                    let stderr = stderr_reader.join().unwrap_or_default();
 
                     if stdout.len() > GIT_MAX_OUTPUT_BYTES {
                         return Err(GitError::OutputLimitExceeded {
                             command: format!("git {}", args.join(" ")),
                             max_bytes: GIT_MAX_OUTPUT_BYTES,
                         });
-                    }
-
-                    let mut stderr = Vec::new();
-                    if let Some(mut err_pipe) = child.stderr.take() {
-                        let _ = err_pipe.by_ref().take(64 * 1024).read_to_end(&mut stderr);
                     }
 
                     if !status.success() {
@@ -81,12 +105,14 @@ impl GitEngine {
                     if start.elapsed() > timeout {
                         let _ = child.kill();
                         let _ = child.wait();
+                        let _ = stdout_reader.join();
+                        let _ = stderr_reader.join();
                         return Err(GitError::Timeout {
                             command: format!("git {}", args.join(" ")),
                             duration_secs: GIT_COMMAND_TIMEOUT_SECS,
                         });
                     }
-                    std::thread::sleep(Duration::from_millis(5));
+                    std::thread::sleep(Duration::from_millis(2));
                 }
             }
         }
@@ -195,19 +221,27 @@ impl GitEngine {
     }
 
     /// Retrieves paginated commit history with topological ordering, lane allocation,
-    /// and anchor-commit cursor verification for stable history traversal across branch updates.
+    /// and revision-pinned cursor continuity for stable history traversal across branch updates.
     pub fn get_history(&self, limit: usize, cursor: Option<&str>) -> Result<HistoryPage, GitError> {
         if !self.is_git_repository() {
             return Err(GitError::NotAGitRepository(self.root_path.clone()));
         }
 
-        // Total commits in current HEAD
-        let total_commits = match self.run_git_str(&["rev-list", "--count", "HEAD"]) {
-            Ok(out) => out.trim().parse::<usize>().ok(),
-            Err(_) => Some(0),
+        // Get current HEAD commit SHA
+        let current_head = match self.run_git_str(&["rev-parse", "HEAD"]) {
+            Ok(out) => out.trim().to_string(),
+            Err(_) => {
+                // Empty repository (unborn branch)
+                return Ok(HistoryPage {
+                    commits: Vec::new(),
+                    next_cursor: None,
+                    has_more: false,
+                    total_commits: Some(0),
+                });
+            }
         };
 
-        if total_commits == Some(0) {
+        if current_head.is_empty() {
             return Ok(HistoryPage {
                 commits: Vec::new(),
                 next_cursor: None,
@@ -217,58 +251,97 @@ impl GitEngine {
         }
 
         let fetch_limit = limit.clamp(1, 200);
-        let limit_plus_one_str = (fetch_limit + 1).to_string();
+
+        // Determine traversal pinned HEAD and offset from cursor
+        let (pinned_head, offset) = match cursor {
+            Some(c) if !c.trim().is_empty() => {
+                let cursor_str = c.trim();
+                // Cursor format: "<head_sha>:<offset>" or "<head_sha>:<offset>:<last_sha>"
+                if let Some((head_part, rest)) = cursor_str.split_once(':') {
+                    let head_part = head_part.trim();
+                    let offset_part = rest.split(':').next().unwrap_or(rest).trim();
+                    if !is_valid_sha(head_part) {
+                        return Err(GitError::InvalidRevision(head_part.to_string()));
+                    }
+
+                    // Check if pinned_head is equal to current_head or an ancestor of current_head
+                    let is_valid_ancestor = if head_part == current_head {
+                        true
+                    } else {
+                        self.run_git_cmd(&["merge-base", "--is-ancestor", head_part, &current_head])
+                            .is_ok()
+                    };
+
+                    if !is_valid_ancestor {
+                        return Err(GitError::StaleCursor(cursor_str.to_string()));
+                    }
+
+                    let parsed_offset = offset_part
+                        .parse::<usize>()
+                        .map_err(|_| GitError::InvalidRevision(cursor_str.to_string()))?;
+                    (head_part.to_string(), parsed_offset)
+                } else if let Ok(offset_num) = cursor_str.parse::<usize>() {
+                    // Plain numeric offset
+                    (current_head.clone(), offset_num)
+                } else if is_valid_sha(cursor_str) {
+                    // Legacy single-SHA cursor:
+                    // Check if it's an ancestor of current_head
+                    let is_valid_ancestor = if cursor_str == current_head {
+                        true
+                    } else {
+                        self.run_git_cmd(&[
+                            "merge-base",
+                            "--is-ancestor",
+                            cursor_str,
+                            &current_head,
+                        ])
+                        .is_ok()
+                    };
+                    if !is_valid_ancestor {
+                        return Err(GitError::StaleCursor(cursor_str.to_string()));
+                    }
+
+                    // For a single SHA cursor, find its index in the topological history from current_head
+                    let revs_bytes =
+                        self.run_git_cmd(&["rev-list", "--topo-order", &current_head])?;
+                    let revs_str = String::from_utf8_lossy(&revs_bytes);
+                    let mut found_idx = None;
+                    for (idx, line) in revs_str.lines().enumerate() {
+                        if line.trim() == cursor_str {
+                            found_idx = Some(idx + 1); // continue strictly after cursor
+                            break;
+                        }
+                    }
+                    match found_idx {
+                        Some(idx) => (current_head.clone(), idx),
+                        None => return Err(GitError::StaleCursor(cursor_str.to_string())),
+                    }
+                } else {
+                    return Err(GitError::InvalidRevision(cursor_str.to_string()));
+                }
+            }
+            _ => (current_head.clone(), 0),
+        };
+
+        // Total commits reachable from the pinned HEAD
+        let total_commits = match self.run_git_str(&["rev-list", "--count", &pinned_head]) {
+            Ok(out) => out.trim().parse::<usize>().ok(),
+            Err(_) => Some(0),
+        };
 
         let mut args: Vec<String> = vec![
             "log".into(),
             "--topo-order".into(),
             "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x1e".into(),
             "-n".into(),
-            limit_plus_one_str,
+            (fetch_limit + 1).to_string(),
         ];
 
-        // Anchor cursor verification
-        if let Some(c) = cursor {
-            let cursor_str = c.trim();
-            if !cursor_str.is_empty() {
-                // If cursor is a numeric offset for legacy callers, support it safely
-                if let Ok(offset) = cursor_str.parse::<usize>() {
-                    if offset > 0 {
-                        args.push("--skip".into());
-                        args.push(offset.to_string());
-                    }
-                } else {
-                    // Cursor is a commit SHA: verify it is an ancestor of HEAD
-                    if !is_valid_sha(cursor_str) {
-                        return Err(GitError::InvalidRevision(cursor_str.to_string()));
-                    }
-
-                    // Check ancestor relationship to detect branch changes / stale cursors
-                    let is_ancestor = self
-                        .run_git_cmd(&["merge-base", "--is-ancestor", cursor_str, "HEAD"])
-                        .is_ok();
-
-                    if !is_ancestor {
-                        return Err(GitError::StaleCursor(cursor_str.to_string()));
-                    }
-
-                    // Traverse starting strictly after cursor commit: <cursor>~1
-                    let anchor_ref = format!("{cursor_str}~1");
-                    // Check if cursor commit has parents (if not, it's root commit, no more history)
-                    let parent_check = self.run_git_str(&["rev-parse", &anchor_ref]);
-                    if parent_check.is_err() {
-                        return Ok(HistoryPage {
-                            commits: Vec::new(),
-                            next_cursor: None,
-                            has_more: false,
-                            total_commits,
-                        });
-                    }
-
-                    args.push(anchor_ref);
-                }
-            }
+        if offset > 0 {
+            args.push(format!("--skip={offset}"));
         }
+
+        args.push(pinned_head.clone());
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output_bytes = self.run_git_cmd(&arg_refs)?;
@@ -326,9 +399,10 @@ impl GitEngine {
             raw_commits.truncate(fetch_limit);
         }
 
-        // Anchor cursor is the SHA of the last commit on the returned page
+        let next_offset = offset + raw_commits.len();
         let next_cursor = if has_more {
-            raw_commits.last().map(|c| c.hash.clone())
+            let last_hash = raw_commits.last().map(|c| c.hash.as_str()).unwrap_or("");
+            Some(format!("{pinned_head}:{next_offset}:{last_hash}"))
         } else {
             None
         };

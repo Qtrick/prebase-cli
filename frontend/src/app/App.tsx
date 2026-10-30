@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo } from '../types/graph';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession } from '../transport/api';
 import { NetworkCanvas } from '../graphs/network/NetworkCanvas';
@@ -74,12 +74,13 @@ export const App: React.FC = () => {
   const [totalCommits, setTotalCommits] = useState<number | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
-  // Live SSE sync state
+  // Live SSE sync & watcher state
   const [liveRevision, setLiveRevision] = useState<number>(0);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
-  const [watcherStatus, setWatcherStatus] = useState<
-    'connected' | 'reconnecting' | 'error' | 'disabled'
-  >('connected');
+  const [watcherHealth, setWatcherHealth] = useState<WatcherHealth>('active');
+  const [sseState, setSseState] = useState<'connected' | 'reconnecting' | 'error'>('connected');
+
+  const latestAppliedRevisionRef = useRef<number>(0);
 
   // View triggers (true bounding box fit view & reset view)
   const [fitViewCounter, setFitViewCounter] = useState(0);
@@ -93,15 +94,23 @@ export const App: React.FC = () => {
       try {
         const repo = await api.getRepository();
         setRepoInfo(repo);
-        setLiveRevision(repo.analysis_revision);
+        if (repo.watcher_health) {
+          setWatcherHealth(repo.watcher_health);
+        }
 
         const st = await api.getStatus();
         setStatus(st.indexing_status);
+        if (st.watcher_health) {
+          setWatcherHealth(st.watcher_health);
+        }
 
         if (st.indexing_status === 'Ready') {
           const snap = await api.getNetwork();
-          setSnapshot(snap);
-          setLiveRevision(snap.revision);
+          if (snap.revision >= latestAppliedRevisionRef.current) {
+            latestAppliedRevisionRef.current = snap.revision;
+            setSnapshot(snap);
+            setLiveRevision(snap.revision);
+          }
         } else if (st.indexing_status === 'Failed') {
           setError('Repository analysis failed. Please check CLI terminal output.');
         } else {
@@ -177,54 +186,78 @@ export const App: React.FC = () => {
     }
   }, [activeTab, temporalFilterPath, loadCommits]);
 
+  // Stable refs for background SSE callbacks without effect churn
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const temporalFilterPathRef = useRef(temporalFilterPath);
+  temporalFilterPathRef.current = temporalFilterPath;
+  const loadCommitsRef = useRef(loadCommits);
+  loadCommitsRef.current = loadCommits;
+
   // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
+    const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
+      if (newSnap.revision >= latestAppliedRevisionRef.current) {
+        latestAppliedRevisionRef.current = newSnap.revision;
+        setSnapshot(newSnap);
+        setLiveRevision(newSnap.revision);
+        setStatus('Ready');
+
+        // Flash subtle live-update toast
+        const fileNotice =
+          changedFiles.length > 0 && changedFiles[0] !== '*'
+            ? `${changedFiles.length} file(s) updated`
+            : 'Graph reanalyzed';
+        setLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
+        setTimeout(() => setLiveNotice(null), 3500);
+
+        // Re-sync selected node if still exists in the new snapshot
+        setSelectedNode((prev) => {
+          if (!prev) return null;
+          return newSnap.nodes.find((n) => n.id === prev.id) || null;
+        });
+      }
+    };
+
     const unsubscribe = api.subscribeToEvents(
       (event: ServerEvent) => {
-        setWatcherStatus('connected');
+        setSseState('connected');
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
-          setLiveRevision(revision);
-
-          // Fetch latest network snapshot without full page reload
-          api
-            .getNetwork()
-            .then((newSnap) => {
-              setSnapshot(newSnap);
-              setStatus('Ready');
-
-              // Flash subtle live-update toast
-              const fileNotice =
-                changed_files.length > 0 && changed_files[0] !== '*'
-                  ? `${changed_files.length} file(s) updated`
-                  : 'Graph reanalyzed';
-              setLiveNotice(`Live update: ${fileNotice} (rev ${revision})`);
-              setTimeout(() => setLiveNotice(null), 3500);
-
-              // Re-sync selected node if still exists in the new snapshot
-              setSelectedNode((prev) => {
-                if (!prev) return null;
-                return newSnap.nodes.find((n) => n.id === prev.id) || null;
-              });
-            })
-            .catch(() => {});
+          if (revision > latestAppliedRevisionRef.current) {
+            api
+              .getNetwork()
+              .then((newSnap) => applySnapshot(newSnap, changed_files))
+              .catch(() => {});
+          }
         } else if (event.type === 'git.updated') {
           api.getGitStatus().then(setGitStatus).catch(() => {});
-          if (activeTab === 'temporal') {
-            loadCommits(temporalFilterPath);
+          if (activeTabRef.current === 'temporal') {
+            loadCommitsRef.current(temporalFilterPathRef.current);
           }
+        } else if (event.type === 'reconcile.required') {
+          api.getStatus().then((st) => {
+            if (st.watcher_health) setWatcherHealth(st.watcher_health);
+            if (st.revision > latestAppliedRevisionRef.current) {
+              api
+                .getNetwork()
+                .then((newSnap) => applySnapshot(newSnap, ['*']))
+                .catch(() => {});
+            }
+          }).catch(() => {});
         }
       },
       (status) => {
-        setWatcherStatus(status);
+        setSseState(status);
         if (status === 'connected') {
-          // Re-fetch state on reconnect to reconcile any missed updates
+          // Re-fetch status on reconnect to reconcile any missed updates
           api.getStatus().then((st) => {
-            if (st.revision > liveRevision) {
-              api.getNetwork().then((newSnap) => {
-                setSnapshot(newSnap);
-                setLiveRevision(st.revision);
-              }).catch(() => {});
+            if (st.watcher_health) setWatcherHealth(st.watcher_health);
+            if (st.revision > latestAppliedRevisionRef.current) {
+              api
+                .getNetwork()
+                .then((newSnap) => applySnapshot(newSnap, ['*']))
+                .catch(() => {});
             }
           }).catch(() => {});
         }
@@ -234,7 +267,7 @@ export const App: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, [activeTab, temporalFilterPath, loadCommits, liveRevision]);
+  }, []); // Run ONCE on mount — eliminates EventSource reconnect churn on every tab/filter/revision update
 
   // 4. Global Keyboard Shortcuts
   useEffect(() => {
@@ -371,21 +404,29 @@ export const App: React.FC = () => {
           <div className="live-watcher-badge">
             <Radio
               size={12}
-              className={watcherStatus === 'connected' ? 'pulse-icon' : ''}
+              className={watcherHealth === 'active' && sseState === 'connected' ? 'pulse-icon' : ''}
               color={
-                watcherStatus === 'connected'
+                watcherHealth === 'disabled'
+                  ? '#64748b'
+                  : watcherHealth === 'degraded'
+                  ? '#f59e0b'
+                  : sseState === 'connected'
                   ? '#2dd4bf'
-                  : watcherStatus === 'reconnecting'
+                  : sseState === 'reconnecting'
                   ? '#f59e0b'
                   : '#ef4444'
               }
             />
             <span>
-              {watcherStatus === 'connected'
+              {watcherHealth === 'disabled'
+                ? 'Watcher Disabled (--no-watch)'
+                : watcherHealth === 'degraded'
+                ? 'Watcher Degraded'
+                : sseState === 'connected'
                 ? 'Live Watcher Active'
-                : watcherStatus === 'reconnecting'
+                : sseState === 'reconnecting'
                 ? 'Reconnecting...'
-                : 'Watcher Inactive'}
+                : 'Watcher Disconnected'}
             </span>
           </div>
 

@@ -149,28 +149,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(async move {
         println!("  Indexing source files...");
         let start = Instant::now();
+        let initial_gen = state_clone.get_next_generation();
         let analyzer = RepositoryAnalyzer::default();
         match tokio::task::spawn_blocking(move || analyzer.analyze_path(&root_clone)).await {
             Ok(Ok(result)) => {
                 let duration = start.elapsed().as_millis();
                 let node_count = result.snapshot.nodes.len();
                 let edge_count = result.snapshot.edges.len();
-                println!(
-                    "\x1b[32m✔\x1b[0m Indexed \x1b[1m{}\x1b[0m files with \x1b[1m{}\x1b[0m confirmed relationships in {}ms",
-                    node_count,
-                    edge_count,
-                    duration
+                let publish_res = state_clone.publish_network(
+                    result.snapshot,
+                    result.index,
+                    vec![],
+                    Some(initial_gen),
                 );
-                let _ = state_clone.publish_network(result.snapshot, result.index, vec![], None);
+                if publish_res.is_ok() {
+                    println!(
+                        "\x1b[32m✔\x1b[0m Indexed \x1b[1m{}\x1b[0m files with \x1b[1m{}\x1b[0m confirmed relationships in {}ms",
+                        node_count,
+                        edge_count,
+                        duration
+                    );
+                }
             }
             Ok(Err(err)) => {
                 error!("Repository analysis failed: {err}");
                 eprintln!("\x1b[31m✖\x1b[0m Repository analysis failed: {err}");
-                state_clone.set_failed(&err);
+                if state_clone.current_generation() == initial_gen {
+                    state_clone.set_failed(&err);
+                }
             }
             Err(join_err) => {
                 error!("Analysis task panicked: {join_err}");
-                state_clone.set_failed("Analysis task panicked");
+                if state_clone.current_generation() == initial_gen {
+                    state_clone.set_failed("Analysis task panicked");
+                }
             }
         }
     });

@@ -4,6 +4,7 @@ import {
   GraphSnapshot,
   RepositoryInfo,
   DependencyEdge,
+  WatcherHealth,
 } from '../types/graph';
 import {
   CommitDetails,
@@ -86,7 +87,7 @@ export const api = {
   getHealth: (signal?: AbortSignal) =>
     request<{ status: string; version: string }>('/api/v1/health', signal),
   getStatus: (signal?: AbortSignal) =>
-    request<{ indexing_status: string; revision: number }>('/api/v1/status', signal),
+    request<{ indexing_status: string; revision: number; watcher_health: WatcherHealth }>('/api/v1/status', signal),
   getRepository: (signal?: AbortSignal) =>
     request<RepositoryInfo>('/api/v1/repository', signal),
   getNetwork: (signal?: AbortSignal) =>
@@ -123,8 +124,9 @@ export const api = {
     onEvent: (event: ServerEvent) => void,
     onStatusChange?: (status: 'connected' | 'reconnecting' | 'error') => void
   ): (() => void) => {
-    const token = getSessionToken();
-    const url = `/api/v1/events?token=${encodeURIComponent(token)}`;
+    // Authenticate via HttpOnly session cookie on same-origin EventSource,
+    // avoiding query parameter token leakage in URLs and logs (Defect 5.13).
+    const url = '/api/v1/events';
     const eventSource = new EventSource(url);
 
     eventSource.onopen = () => {

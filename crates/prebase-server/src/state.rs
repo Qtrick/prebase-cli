@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prebase_core::index::GraphIndex;
-use prebase_core::model::{GraphSnapshot, IndexingStatus, RepositoryInfo};
+use prebase_core::model::{GraphSnapshot, IndexingStatus, RepositoryInfo, WatcherHealth};
 use prebase_git::GitEngine;
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -33,6 +33,8 @@ pub enum ServerEvent {
         head_commit: Option<String>,
         branch: Option<String>,
     },
+    #[serde(rename = "reconcile.required")]
+    ReconcileRequired { current_revision: u64 },
     #[serde(rename = "heartbeat")]
     Heartbeat { timestamp: u64 },
 }
@@ -48,6 +50,7 @@ pub struct AppState {
     pub published: RwLock<Option<Arc<PublishedNetworkState>>>,
     pub revision_counter: AtomicU64,
     pub analysis_generation: AtomicU64,
+    pub watcher_health: RwLock<WatcherHealth>,
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
 }
@@ -60,9 +63,15 @@ impl AppState {
         session_token: String,
         bootstrap_token: Option<String>,
         allocated_port: u16,
+        watch_filesystem: bool,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(128);
         let git_engine = Arc::new(GitEngine::new(root_path.clone()));
+        let initial_health = if watch_filesystem {
+            WatcherHealth::Active
+        } else {
+            WatcherHealth::Disabled
+        };
 
         Self {
             session_token,
@@ -75,6 +84,7 @@ impl AppState {
             published: RwLock::new(None),
             revision_counter: AtomicU64::new(0),
             analysis_generation: AtomicU64::new(0),
+            watcher_health: RwLock::new(initial_health),
             git_engine,
             event_sender,
         }
@@ -108,6 +118,15 @@ impl AppState {
         self.analysis_generation.load(Ordering::SeqCst)
     }
 
+    pub fn get_watcher_health(&self) -> WatcherHealth {
+        *self.watcher_health.read().unwrap()
+    }
+
+    pub fn set_watcher_health(&self, health: WatcherHealth) {
+        let mut guard = self.watcher_health.write().unwrap();
+        *guard = health;
+    }
+
     pub fn get_published(&self) -> Option<Arc<PublishedNetworkState>> {
         self.published.read().unwrap().clone()
     }
@@ -122,6 +141,7 @@ impl AppState {
             repository_root_display: self.repo_name.clone(),
             analysis_revision: revision,
             indexing_status: status,
+            watcher_health: self.get_watcher_health(),
         }
     }
 

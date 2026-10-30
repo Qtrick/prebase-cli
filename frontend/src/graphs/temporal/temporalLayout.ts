@@ -52,6 +52,74 @@ export const ROW_HEIGHT = 56;
 export const MARGIN_LEFT = 60;
 export const MARGIN_TOP = 60;
 
+/**
+ * Dynamically computes topologically consistent branch lanes across the entire
+ * sequence of loaded commits, preventing lane discontinuities across paginated fetches.
+ */
+export function assignLanesToCommits(commits: CommitSummary[]): number[] {
+  const lanes: number[] = new Array(commits.length);
+  const activeLanes: (string | null)[] = [];
+  const commitLanes = new Map<string, number>();
+
+  for (let i = 0; i < commits.length; i++) {
+    const c = commits[i];
+    let lane: number;
+    if (commitLanes.has(c.hash)) {
+      lane = commitLanes.get(c.hash)!;
+    } else {
+      const freeIdx = activeLanes.findIndex((s) => s === null);
+      if (freeIdx !== -1) {
+        activeLanes[freeIdx] = c.hash;
+        lane = freeIdx;
+      } else {
+        lane = activeLanes.length;
+        activeLanes.push(c.hash);
+      }
+    }
+    lanes[i] = lane;
+
+    if (lane < activeLanes.length && activeLanes[lane] === c.hash) {
+      activeLanes[lane] = null;
+    }
+
+    for (let pIdx = 0; pIdx < c.parent_hashes.length; pIdx++) {
+      const pHash = c.parent_hashes[pIdx];
+      if (commitLanes.has(pHash)) {
+        const existingLane = commitLanes.get(pHash)!;
+        if (pIdx === 0 && lane < existingLane) {
+          commitLanes.set(pHash, lane);
+          if (existingLane < activeLanes.length && activeLanes[existingLane] === pHash) {
+            activeLanes[existingLane] = null;
+          }
+          if (lane < activeLanes.length && activeLanes[lane] === null) {
+            activeLanes[lane] = pHash;
+          }
+        }
+      } else if (pIdx === 0 && lane < activeLanes.length && activeLanes[lane] === null) {
+        activeLanes[lane] = pHash;
+        commitLanes.set(pHash, lane);
+      } else {
+        const nextFree = activeLanes.findIndex((s) => s === null);
+        let pLane: number;
+        if (nextFree !== -1) {
+          activeLanes[nextFree] = pHash;
+          pLane = nextFree;
+        } else {
+          pLane = activeLanes.length;
+          activeLanes.push(pHash);
+        }
+        commitLanes.set(pHash, pLane);
+      }
+    }
+
+    while (activeLanes.length > 0 && activeLanes[activeLanes.length - 1] === null) {
+      activeLanes.pop();
+    }
+  }
+
+  return lanes;
+}
+
 export function computeTemporalLayout(
   commits: CommitSummary[],
   isFiltered = false
@@ -72,17 +140,20 @@ export function computeTemporalLayout(
   let minY = Infinity;
   let maxY = -Infinity;
 
+  const dynamicLanes = assignLanesToCommits(commits);
+
   // 1. Position nodes
   for (let i = 0; i < commits.length; i++) {
     const c = commits[i];
-    const x = MARGIN_LEFT + c.lane * LANE_WIDTH;
+    const lane = dynamicLanes[i];
+    const x = MARGIN_LEFT + lane * LANE_WIDTH;
     const y = MARGIN_TOP + i * ROW_HEIGHT;
 
     const layoutNode: LayoutCommit = {
-      commit: c,
+      commit: { ...c, lane },
       x,
       y,
-      lane: c.lane,
+      lane,
     };
 
     nodes.push(layoutNode);

@@ -60,12 +60,15 @@ export interface GraphSnapshot {
   issues: AnalysisIssue[];
 }
 
+export type WatcherHealth = 'active' | 'degraded' | 'disabled';
+
 export interface RepositoryInfo {
   repository_id: string;
   repository_root_display: string;
   repository_name: string;
   analysis_revision: number;
   indexing_status: 'NotStarted' | 'Scanning' | 'Parsing' | 'Resolving' | 'Ready' | 'Partial' | 'Failed';
+  watcher_health: WatcherHealth;
 }
 
 export interface FileInspection {

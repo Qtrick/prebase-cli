@@ -13,6 +13,15 @@ pub enum IndexingStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WatcherHealth {
+    Active,
+    Degraded,
+    #[default]
+    Disabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryInfo {
     pub repository_id: String,
@@ -20,6 +29,7 @@ pub struct RepositoryInfo {
     pub repository_name: String,
     pub analysis_revision: u64,
     pub indexing_status: IndexingStatus,
+    pub watcher_health: WatcherHealth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -76,5 +76,6 @@ export interface GitUpdatedEventData {
 export type ServerEvent =
   | { type: 'network.updated'; data: NetworkUpdatedEventData }
   | { type: 'git.updated'; data: GitUpdatedEventData }
+  | { type: 'reconcile.required'; data: { current_revision: number } }
   | { type: 'heartbeat'; data: { timestamp: number } };
 

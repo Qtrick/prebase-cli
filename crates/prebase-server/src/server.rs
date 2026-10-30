@@ -80,6 +80,7 @@ pub async fn start_server(
         session_token.clone(),
         Some(bootstrap_token.clone()),
         allocated_port,
+        watch_filesystem,
     ));
 
     info!("PreBase server listening on http://127.0.0.1:{allocated_port}");
@@ -105,6 +106,7 @@ pub async fn start_server(
             }
             Err(e) => {
                 tracing::warn!("Failed to initialize filesystem watcher: {e}");
+                state.set_watcher_health(prebase_core::model::WatcherHealth::Degraded);
                 None
             }
         }

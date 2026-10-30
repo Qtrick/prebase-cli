@@ -57,7 +57,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     }));
 
     const isFirstRun = positions.size === 0;
-    const computed = layoutOrganic(layoutNodes, layoutLinks);
+    const computed = layoutOrganic(layoutNodes, layoutLinks, undefined, isFirstRun ? undefined : positions);
     setPositions(computed);
 
     // Initial fit view ONLY on first load (preserve viewport on live updates!)

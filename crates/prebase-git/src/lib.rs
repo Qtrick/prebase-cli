@@ -296,4 +296,137 @@ mod tests {
         let history_err = engine.get_history(10, None);
         assert!(history_err.is_err());
     }
+
+    #[test]
+    fn test_branched_dag_pagination_no_skipped_or_duplicated_commits() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(path)
+                .args(args)
+                .status()
+                .expect("failed to execute git");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+
+        run(&["init"]);
+        run(&["config", "user.name", "DAG Test"]);
+        run(&["config", "user.email", "dag@prebase.dev"]);
+
+        // 1. Root commit
+        fs::write(path.join("root.txt"), "root").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "root commit"]);
+
+        // 2. Main branch commits (m1, m2)
+        fs::write(path.join("main1.txt"), "m1").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "main 1 commit"]);
+
+        fs::write(path.join("main2.txt"), "m2").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "main 2 commit"]);
+
+        // 3. Feature branch off root (f1, f2)
+        run(&["checkout", "-b", "feature", "HEAD~2"]);
+        fs::write(path.join("feat1.txt"), "f1").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "feature 1 commit"]);
+
+        fs::write(path.join("feat2.txt"), "f2").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "feature 2 commit"]);
+
+        // 4. Merge feature into main
+        run(&["checkout", "main"]);
+        run(&["merge", "feature", "--no-ff", "-m", "merge commit"]);
+
+        // 5. Additional commit on main after merge
+        fs::write(path.join("after.txt"), "after").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "post merge commit"]);
+
+        let engine = GitEngine::new(path.to_path_buf());
+
+        // Get total expected commits in single full query
+        let full_page = engine.get_history(100, None).unwrap();
+        let expected_total = full_page.commits.len();
+        assert_eq!(expected_total, 7);
+        let expected_hashes: Vec<String> =
+            full_page.commits.iter().map(|c| c.hash.clone()).collect();
+
+        // Test pagination with various page sizes: 1, 2, 3, 5
+        for page_size in [1, 2, 3, 5] {
+            let mut paginated_hashes = Vec::new();
+            let mut cursor: Option<String> = None;
+
+            loop {
+                let page = engine
+                    .get_history(page_size, cursor.as_deref())
+                    .expect("page fetch failed");
+
+                for c in &page.commits {
+                    assert!(
+                        !paginated_hashes.contains(&c.hash),
+                        "Duplicate commit detected in page size {}: {}",
+                        page_size,
+                        c.hash
+                    );
+                    paginated_hashes.push(c.hash.clone());
+                }
+
+                if !page.has_more {
+                    assert_eq!(page.next_cursor, None);
+                    break;
+                }
+
+                assert!(page.next_cursor.is_some());
+                cursor = page.next_cursor;
+            }
+
+            assert_eq!(
+                paginated_hashes.len(),
+                expected_total,
+                "Missing commits with page size {}",
+                page_size
+            );
+            assert_eq!(
+                paginated_hashes, expected_hashes,
+                "Topological order mismatch with page size {}",
+                page_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_subprocess_large_output_no_deadlock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(path)
+                .args(args)
+                .status()
+                .expect("failed to execute git");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+
+        run(&["init"]);
+        run(&["config", "user.name", "Large Test"]);
+        run(&["config", "user.email", "large@prebase.dev"]);
+
+        // Create 1,500 files to generate > 100KB stdout during git status / log
+        for i in 0..1500 {
+            fs::write(path.join(format!("file_{i}.txt")), format!("content {i}\n")).unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-m", "chore: add 1500 files"]);
+
+        let engine = GitEngine::new(path.to_path_buf());
+        // This diff details will output > 100KB of text, exceeding standard 64KB pipe buffer
+        let head = engine.get_status().unwrap().head_commit.unwrap();
+        let details = engine.get_commit_details(&head).unwrap();
+        assert_eq!(details.files.len(), 1500);
+    }
 }

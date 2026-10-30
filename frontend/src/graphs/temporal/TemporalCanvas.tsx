@@ -40,29 +40,29 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
 
   const layout = useMemo(() => computeTemporalLayout(commits, isFiltered), [commits, isFiltered]);
 
-  // Fit View helper
+  // Fit View helper: scales horizontally to fit tracks & text without squishing vertical timeline (Defect 5.9)
   const fitView = useCallback(() => {
     if (!containerRef.current || layout.nodes.length === 0) return;
     const width = containerRef.current.clientWidth || 800;
-    const height = containerRef.current.clientHeight || 600;
 
     const pad = 60;
     const graphWidth = Math.max(100, layout.bounds.width);
-    const graphHeight = Math.max(100, layout.bounds.height);
-
     const scaleX = (width - pad * 2) / graphWidth;
-    const scaleY = (height - pad * 2) / graphHeight;
-    const k = Math.min(1.2, Math.max(0.4, Math.min(scaleX, scaleY)));
+    const k = Math.min(1.0, Math.max(0.65, scaleX));
 
-    const x = pad + 20;
+    const x = pad + 10;
     const y = pad;
 
     setTransform({ x, y, k });
   }, [layout]);
 
-  // Initial fit view on commits load
+  // Initial fit view ONLY on first commits load (preserve camera transform during pagination! Defect 5.8)
+  const hasInitializedViewRef = useRef(false);
   useEffect(() => {
-    fitView();
+    if (commits.length > 0 && !hasInitializedViewRef.current) {
+      hasInitializedViewRef.current = true;
+      fitView();
+    }
   }, [commits, fitView]);
 
   // External trigger for fit view

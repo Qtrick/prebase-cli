@@ -76,4 +76,105 @@ describe('Network Layout & Render Math', () => {
     // World-space radius should be larger when zoomed out so it stays legible
     expect(rZoomedOut).toBeGreaterThan(rZoomedIn);
   });
+
+  it('layoutOrganic strictly preserves existing coordinates when re-running without new nodes', () => {
+    const existingNodes = [
+      { id: 'node-1', val: 5 },
+      { id: 'node-2', val: 3 },
+      { id: 'node-3', val: 2 },
+    ];
+    const existingLinks = [
+      { source: 'node-1', target: 'node-2' },
+      { source: 'node-2', target: 'node-3' },
+    ];
+
+    const initialPositions = layoutOrganic(existingNodes, existingLinks);
+
+    // When existingPositions is passed and no new nodes are added, positions are strictly preserved
+    const rerunPositions = layoutOrganic(existingNodes, existingLinks, undefined, initialPositions);
+    expect(rerunPositions.size).toBe(3);
+
+    for (const [id, originalPos] of initialPositions) {
+      const rerunPos = rerunPositions.get(id);
+      expect(rerunPos).toBeDefined();
+      expect(rerunPos!.x).toBe(originalPos.x);
+      expect(rerunPos!.y).toBe(originalPos.y);
+      expect(rerunPos!.z).toBe(originalPos.z);
+    }
+  });
+
+  it('layoutOrganic with existingPositions places new nodes near connected neighbors while preserving layout stability', () => {
+    const initialNodes = [
+      { id: 'auth-service', val: 10, isEntry: true },
+      { id: 'user-db', val: 6 },
+      { id: 'metrics', val: 2 },
+    ];
+    const initialLinks = [
+      { source: 'auth-service', target: 'user-db' },
+      { source: 'auth-service', target: 'metrics' },
+    ];
+
+    const initialPositions = layoutOrganic(initialNodes, initialLinks);
+    const authPos = initialPositions.get('auth-service')!;
+    const dbPos = initialPositions.get('user-db')!;
+    const metricsPos = initialPositions.get('metrics')!;
+
+    // Introduce a new node connected ONLY to user-db
+    const updatedNodes = [
+      ...initialNodes,
+      { id: 'user-cache', val: 3 },
+    ];
+    const updatedLinks = [
+      ...initialLinks,
+      { source: 'user-db', target: 'user-cache' },
+    ];
+
+    // Layout WITH existingPositions:
+    const incrementalPositions = layoutOrganic(updatedNodes, updatedLinks, undefined, initialPositions);
+    expect(incrementalPositions.size).toBe(4);
+
+    const newCachePos = incrementalPositions.get('user-cache')!;
+    const incDbPos = incrementalPositions.get('user-db')!;
+    const incAuthPos = incrementalPositions.get('auth-service')!;
+    const incMetricsPos = incrementalPositions.get('metrics')!;
+
+    // 1. Existing nodes that do not interact with the new node remain strictly unchanged
+    // metrics is not linked to user-cache and is far from it
+    expect(incMetricsPos.x).toBeCloseTo(metricsPos.x, 1);
+    expect(incMetricsPos.y).toBeCloseTo(metricsPos.y, 1);
+    expect(incMetricsPos.z).toBeCloseTo(metricsPos.z, 1);
+
+    // 2. Connected existing nodes maintain high spatial stability (preserved orientation, delta < 1.5 units)
+    expect(Math.hypot(incDbPos.x - dbPos.x, incDbPos.y - dbPos.y)).toBeLessThan(1.5);
+    expect(Math.hypot(incAuthPos.x - authPos.x, incAuthPos.y - authPos.y)).toBeLessThan(1.5);
+
+    // 3. New node is placed in immediate proximity to its connected neighbor (user-db)
+    const distToConnectedNeighbor = Math.hypot(
+      newCachePos.x - incDbPos.x,
+      newCachePos.y - incDbPos.y,
+      newCachePos.z - incDbPos.z
+    );
+    const distToFarNode = Math.hypot(
+      newCachePos.x - incAuthPos.x,
+      newCachePos.y - incAuthPos.y,
+      newCachePos.z - incAuthPos.z
+    );
+
+    // Connected neighbor distance should be significantly smaller than distance to far nodes
+    expect(distToConnectedNeighbor).toBeLessThan(distToFarNode);
+    expect(distToConnectedNeighbor).toBeLessThan(60);
+
+    // 4. Contrast: re-computing from scratch without existingPositions causes drastic layout churn
+    const scratchPositions = layoutOrganic(updatedNodes, updatedLinks);
+    const scratchDbPos = scratchPositions.get('user-db')!;
+
+    // Recomputing from scratch yields completely shifted coordinates across the global sphere
+    const scratchShift = Math.hypot(
+      scratchDbPos.x - dbPos.x,
+      scratchDbPos.y - dbPos.y,
+      scratchDbPos.z - dbPos.z
+    );
+    expect(scratchShift).toBeGreaterThan(15);
+  });
 });
+

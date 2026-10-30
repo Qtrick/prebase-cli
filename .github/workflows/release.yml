@@ -19,7 +19,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: prebase-macos-aarch64.tar.gz
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: prebase-macos-x86_64.tar.gz
 
@@ -34,7 +34,7 @@ jobs:
 
       - name: Build Frontend Distribution
         run: |
-          npm --prefix frontend ci || npm --prefix frontend install
+          npm --prefix frontend ci
           npm --prefix frontend run build
 
       - name: Setup Rust toolchain

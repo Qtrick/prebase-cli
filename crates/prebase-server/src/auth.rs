@@ -41,7 +41,7 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
     // No external fonts, CDNs, scripts, or connections allowed.
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self' 'unsafe-inline' data:; connect-src 'self'; font-src 'self' data:; img-src 'self' data:; frame-ancestors 'none';"
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self' data:; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
             .parse()
             .unwrap(),
     );
@@ -77,18 +77,26 @@ pub async fn host_and_auth_middleware(
     let port = state.allocated_port;
 
     // 1. Exact Host header validation (prevent DNS rebinding attacks)
-    if let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
-        let expected_ip = format!("127.0.0.1:{port}");
-        let expected_lh = format!("localhost:{port}");
-        // Allow without port only if port is standard 80
-        let matches = host == expected_ip
-            || host == expected_lh
-            || (port == 80 && (host == "127.0.0.1" || host == "localhost"));
-
-        if !matches {
-            warn!("Rejected request with invalid Host: {host} (expected {expected_ip} or {expected_lh})");
-            return Err((StatusCode::BAD_REQUEST, "Invalid Host header"));
+    let host = match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(h) if !h.trim().is_empty() => h.trim(),
+        _ => {
+            warn!("Rejected request missing or empty Host header");
+            return Err((StatusCode::BAD_REQUEST, "Missing or invalid Host header"));
         }
+    };
+
+    let expected_ip = format!("127.0.0.1:{port}");
+    let expected_lh = format!("localhost:{port}");
+    let matches = host.eq_ignore_ascii_case(&expected_ip)
+        || host.eq_ignore_ascii_case(&expected_lh)
+        || (port == 80
+            && (host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")));
+
+    if !matches {
+        warn!(
+            "Rejected request with invalid Host: {host} (expected {expected_ip} or {expected_lh})"
+        );
+        return Err((StatusCode::BAD_REQUEST, "Invalid Host header"));
     }
 
     // 2. Exact Origin validation (prevent unauthorized cross-origin requests)

@@ -29,6 +29,7 @@ mod tests {
             "secret-token-xyz".into(),
             Some("bootstrap-token-abc".into()),
             8080,
+            false,
         ));
 
         let app = create_router(state.clone());
@@ -124,6 +125,7 @@ mod tests {
             "token".into(),
             None,
             8080,
+            false,
         ));
         let app = create_router(state);
 
@@ -147,6 +149,7 @@ mod tests {
             "token".into(),
             None,
             8080,
+            false,
         ));
 
         let mut event_rx = state.event_sender.subscribe();
@@ -213,5 +216,218 @@ mod tests {
             Some(current_gen - 1),
         );
         assert!(stale_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_watcher_health_reporting_and_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token".into(),
+            None,
+            8080,
+            false, // --no-watch
+        ));
+
+        let app = create_router(state.clone());
+
+        // Check initial watcher_health is Disabled
+        assert_eq!(
+            state.get_watcher_health(),
+            prebase_core::model::WatcherHealth::Disabled
+        );
+
+        let req = Request::builder()
+            .uri("/api/v1/status")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains(r#""watcher_health":"disabled""#));
+
+        // Update health to Degraded
+        state.set_watcher_health(prebase_core::model::WatcherHealth::Degraded);
+        assert_eq!(
+            state.get_watcher_health(),
+            prebase_core::model::WatcherHealth::Degraded
+        );
+
+        // Verify ServerEvent::ReconcileRequired serialization
+        let evt = ServerEvent::ReconcileRequired {
+            current_revision: 99,
+        };
+        let serialized = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"type":"reconcile.required","data":{"current_revision":99}}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_stream_lagged_reconcile_event() {
+        use tokio_stream::wrappers::BroadcastStream;
+        use tokio_stream::StreamExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        // Advance current revision to 42
+        state
+            .revision_counter
+            .store(42, std::sync::atomic::Ordering::SeqCst);
+
+        let rx = state.event_sender.subscribe();
+        let state_clone = state.clone();
+        let mut stream = BroadcastStream::new(rx).filter_map(move |res| match res {
+            Ok(evt) => {
+                let data = serde_json::to_string(&evt).unwrap_or_default();
+                Some(data)
+            }
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => {
+                let current_revision = state_clone.get_current_revision();
+                let evt = ServerEvent::ReconcileRequired { current_revision };
+                let data = serde_json::to_string(&evt).unwrap_or_default();
+                Some(data)
+            }
+        });
+
+        // Overflow the broadcast buffer (capacity is 128)
+        for i in 0..150 {
+            let _ = state
+                .event_sender
+                .send(ServerEvent::Heartbeat { timestamp: i });
+        }
+
+        // The very first item from lagged stream must be ReconcileRequired with revision 42
+        let first = stream.next().await.expect("expected stream item");
+        assert!(first.contains(r#""type":"reconcile.required""#));
+        assert!(first.contains(r#""current_revision":42"#));
+    }
+
+    #[tokio::test]
+    async fn test_sse_endpoint_lagged_reconcile_event_e2e() {
+        use axum::response::IntoResponse;
+        use tokio_stream::StreamExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        state
+            .revision_counter
+            .store(108, std::sync::atomic::Ordering::SeqCst);
+
+        // Call handle_events directly to get the actual SSE response stream produced by the handler
+        let sse_resp = crate::routes::handle_events(axum::extract::State(state.clone()))
+            .await
+            .into_response();
+
+        let mut data_stream = sse_resp.into_body().into_data_stream();
+
+        // Overflow the broadcast channel while the subscriber is not reading
+        for i in 0..150 {
+            let _ = state
+                .event_sender
+                .send(ServerEvent::Heartbeat { timestamp: i });
+        }
+
+        // The first chunk yielded by the actual SSE handler body must be the reconcile.required SSE event
+        let chunk = data_stream.next().await.expect("expected chunk").unwrap();
+        let chunk_str = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(
+            chunk_str.contains(r#"data: {"type":"reconcile.required""#)
+                || chunk_str.contains(r#""type":"reconcile.required""#)
+        );
+        assert!(chunk_str.contains(r#""current_revision":108"#));
+    }
+
+    #[tokio::test]
+    async fn test_sse_route_lagged_reconcile_event_via_router() {
+        use axum::http::Request;
+        use tokio_stream::StreamExt;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token".into(),
+            None,
+            8080,
+            false,
+        ));
+        state
+            .revision_counter
+            .store(77, std::sync::atomic::Ordering::SeqCst);
+
+        let app = create_router(state.clone());
+
+        let req = Request::builder()
+            .uri("/api/v1/events")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+
+        let mut data_stream = resp.into_body().into_data_stream();
+
+        // Cause the broadcast stream to lag by overflowing its channel
+        for i in 0..150 {
+            let _ = state
+                .event_sender
+                .send(ServerEvent::Heartbeat { timestamp: i });
+        }
+
+        let chunk = data_stream
+            .next()
+            .await
+            .expect("expected stream item")
+            .unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(
+            text.contains(r#"data: {"type":"reconcile.required""#)
+                || text.contains("reconcile.required")
+        );
+        assert!(text.contains(r#""current_revision":77"#));
+
+        // After the lag error is handled, the stream recovers and yields the remaining queued events
+        let next_chunk = data_stream
+            .next()
+            .await
+            .expect("expected next item")
+            .unwrap();
+        let next_text = String::from_utf8(next_chunk.to_vec()).unwrap();
+        assert!(next_text.contains(r#""type":"heartbeat""#));
     }
 }
