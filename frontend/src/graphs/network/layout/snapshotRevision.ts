@@ -4,6 +4,7 @@ import {
   Point3D,
   ViewportInsets,
 } from '../../../types/graph';
+import { layoutSphere } from './sphereLayout';
 import { layoutOrganic } from './organicLayout';
 import {
   DEFAULT_YAW,
@@ -12,6 +13,8 @@ import {
   projectGraph,
   computeNetworkFitTransform,
 } from '../render/networkRenderMath';
+
+export type NetworkLayoutMode = 'sphere' | 'organic';
 
 export interface SnapshotRevisionState {
   repositoryId: string | null;
@@ -28,13 +31,15 @@ export interface SnapshotRevisionResult {
  * Handles a snapshot revision:
  * - If the repository ID matches the currently initialized repository, existing node world
  *   positions and camera state (yaw, pitch, pan, zoom) are strictly preserved.
- * - If the repository ID is new/different, the graph layout is computed from scratch and an
- *   initial fit view transform is applied.
+ * - If the repository ID is new/different, the graph layout is computed using the 3D Sphere
+ *   layout (or organic if specified) to form the iconic dependency orb, and an initial fit
+ *   view transform is applied.
  */
 export function processSnapshotRevision(
   currentState: SnapshotRevisionState,
   snapshot: GraphSnapshot,
-  viewport: { width: number; height: number; insets?: ViewportInsets }
+  viewport: { width: number; height: number; insets?: ViewportInsets },
+  mode: NetworkLayoutMode = 'sphere'
 ): SnapshotRevisionResult {
   if (!snapshot || snapshot.nodes.length === 0) {
     return {
@@ -61,12 +66,20 @@ export function processSnapshotRevision(
     target: e.target_file_id,
   }));
 
-  const computedPositions = layoutOrganic(
-    layoutNodes,
-    layoutLinks,
-    undefined,
-    isNewRepo ? undefined : currentState.positions
-  );
+  const computedPositions =
+    mode === 'organic'
+      ? layoutOrganic(
+          layoutNodes,
+          layoutLinks,
+          undefined,
+          isNewRepo ? undefined : currentState.positions
+        )
+      : layoutSphere(
+          layoutNodes,
+          layoutLinks,
+          undefined,
+          isNewRepo ? undefined : currentState.positions
+        );
 
   if (isNewRepo) {
     const centroid = computeGraphCentroid(computedPositions.values());
@@ -106,9 +119,9 @@ export function processSnapshotRevision(
   // Same repository revision: strictly preserve camera state!
   return {
     state: {
-      repositoryId: currentState.repositoryId,
+      repositoryId: snapshot.repository_id,
       positions: computedPositions,
-      camera: { ...currentState.camera },
+      camera: currentState.camera,
     },
     didTriggerInitialFit: false,
   };

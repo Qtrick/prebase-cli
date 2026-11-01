@@ -252,7 +252,8 @@ export function computeNetworkFitTransform(
   viewportWidth: number,
   viewportHeight: number,
   insets?: ViewportInsets,
-  padding = 64
+  padding = 64,
+  centerAtPivot = true
 ): { panX: number; panY: number; zoom: number } {
   const insetLeft = insets?.left ?? 0;
   const insetRight = insets?.right ?? 0;
@@ -263,6 +264,19 @@ export function computeNetworkFitTransform(
   const usableH = Math.max(100, viewportHeight - insetTop - insetBottom);
   const usableCenterX = insetLeft + usableW / 2;
   const usableCenterY = insetTop + usableH / 2;
+
+  if (centerAtPivot) {
+    const maxExtentX = Math.max(Math.abs(bounds.minX), Math.abs(bounds.maxX));
+    const maxExtentY = Math.max(Math.abs(bounds.minY), Math.abs(bounds.maxY));
+    const scaleX = (usableW - padding * 2) / Math.max(20, maxExtentX * 2);
+    const scaleY = (usableH - padding * 2) / Math.max(20, maxExtentY * 2);
+    const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(scaleX, scaleY)));
+    return {
+      panX: usableCenterX,
+      panY: usableCenterY,
+      zoom,
+    };
+  }
 
   const graphWidth = Math.max(20, bounds.maxX - bounds.minX);
   const graphHeight = Math.max(20, bounds.maxY - bounds.minY);
@@ -337,6 +351,82 @@ export function applyZoomAroundCursor(
     panY: nextPanY,
     zoom: nextZoom,
   };
+}
+
+/**
+ * Applies viewport-center anchored zoom transform when Center Lock is active.
+ * The center of the usable viewport (and rotation pivot) remains strictly stationary on screen.
+ */
+export function applyZoomAroundCenter(
+  camera: NetworkCamera,
+  factor: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  insets?: ViewportInsets,
+  minZoom = MIN_ZOOM,
+  maxZoom = MAX_ZOOM
+): NetworkCamera {
+  const insetLeft = insets?.left ?? 0;
+  const insetRight = insets?.right ?? 0;
+  const insetTop = insets?.top ?? 0;
+  const insetBottom = insets?.bottom ?? 0;
+
+  const usableW = Math.max(100, viewportWidth - insetLeft - insetRight);
+  const usableH = Math.max(100, viewportHeight - insetTop - insetBottom);
+  const usableCenterX = insetLeft + usableW / 2;
+  const usableCenterY = insetTop + usableH / 2;
+
+  return applyZoomAroundCursor(camera, factor, usableCenterX, usableCenterY, minZoom, maxZoom);
+}
+
+/**
+ * Computes center-locked pan translation given visible graph bounds, viewport dimensions, and current zoom.
+ * Adjusts translation so the graph's 3D centroid and visual formation remain centered in the usable viewport.
+ */
+export function computeCenterLockedTransform(
+  bounds: { minX: number; maxX: number; minY: number; maxY: number } | null,
+  viewportWidth: number,
+  viewportHeight: number,
+  currentZoom: number,
+  insets?: ViewportInsets
+): { panX: number; panY: number; zoom: number } {
+  const zoom = Number.isFinite(currentZoom) && currentZoom > 0 ? currentZoom : 1.0;
+  const insetLeft = insets?.left ?? 0;
+  const insetRight = insets?.right ?? 0;
+  const insetTop = insets?.top ?? 0;
+  const insetBottom = insets?.bottom ?? 0;
+
+  const usableW = Math.max(100, viewportWidth - insetLeft - insetRight);
+  const usableH = Math.max(100, viewportHeight - insetTop - insetBottom);
+  const usableCenterX = insetLeft + usableW / 2;
+  const usableCenterY = insetTop + usableH / 2;
+
+  if (!bounds) {
+    return { panX: usableCenterX, panY: usableCenterY, zoom };
+  }
+
+  const graphMidX = (bounds.minX + bounds.maxX) / 2;
+  const graphMidY = (bounds.minY + bounds.maxY) / 2;
+
+  return {
+    panX: usableCenterX - graphMidX * zoom,
+    panY: usableCenterY - graphMidY * zoom,
+    zoom,
+  };
+}
+
+/**
+ * Tests if the spatial displacement between current and target pan is within a sub-pixel dead-zone threshold.
+ * Prevents micro-jitter during continuous 3D rotation.
+ */
+export function isCenterDeadZone(
+  current: { panX: number; panY: number },
+  target: { panX: number; panY: number },
+  thresholdPx = 0.5
+): boolean {
+  const dx = Math.abs(current.panX - target.panX);
+  const dy = Math.abs(current.panY - target.panY);
+  return dx <= thresholdPx && dy <= thresholdPx;
 }
 
 export function normalizeWheelZoomDelta(e: { deltaY: number; deltaMode: number; ctrlKey?: boolean }): number {
@@ -420,7 +510,61 @@ export function findHitNode(
 }
 
 /**
+ * Computes orbit-preserving camera orientation to bring a target node directly to the front-facing
+ * center of the 3D dependency orb without translating or displacing the orb across the viewport.
+ */
+export function computeOrbitRevealCamera(
+  projectedNode: ProjectedNode,
+  currentCamera: NetworkCamera,
+  viewportWidth: number,
+  viewportHeight: number,
+  insets?: ViewportInsets,
+  onlyIfOutside = false
+): NetworkCamera | null {
+  const isVisible = isNodeVisibleInViewport(
+    projectedNode.screenX,
+    projectedNode.screenY,
+    projectedNode.radius,
+    viewportWidth,
+    viewportHeight,
+    insets
+  );
+
+  // If node is already visible on the front hemisphere and onlyIfOutside is requested, do not move
+  if (onlyIfOutside && isVisible && projectedNode.projected.z >= -20) {
+    return null;
+  }
+
+  const { x, y, z } = projectedNode.localPos;
+  const dist = Math.hypot(x, y, z);
+  if (dist < 1e-4) {
+    return null;
+  }
+
+  const sgn = z >= 0 ? 1 : -1;
+  const targetPitch = clampPitch(Math.atan2(sgn * y, Math.max(1e-4, sgn * z)));
+  const yzHypot = Math.hypot(y, z);
+  const targetYaw = wrapRotationAngle(Math.atan2(-x, sgn * Math.max(1e-4, yzHypot)));
+
+  const insetLeft = insets?.left ?? 0;
+  const insetRight = insets?.right ?? 0;
+  const insetTop = insets?.top ?? 0;
+  const insetBottom = insets?.bottom ?? 0;
+  const usableCenterX = insetLeft + Math.max(100, viewportWidth - insetLeft - insetRight) / 2;
+  const usableCenterY = insetTop + Math.max(100, viewportHeight - insetTop - insetBottom) / 2;
+
+  return {
+    ...currentCamera,
+    yaw: targetYaw,
+    pitch: targetPitch,
+    panX: usableCenterX,
+    panY: usableCenterY,
+  };
+}
+
+/**
  * Computes camera transform to reveal and focus a target node.
+ * If preserveOrbit is true, rotates the orb to face the node rather than shifting the pivot.
  * If onlyIfOutside is true and the node is already within the usable viewport, returns null (no camera movement).
  * Otherwise, centers the node in the usable viewport while preserving camera yaw, pitch, and zoom.
  */
@@ -430,8 +574,20 @@ export function computeRevealCamera(
   viewportWidth: number,
   viewportHeight: number,
   insets?: ViewportInsets,
-  onlyIfOutside = false
+  onlyIfOutside = false,
+  preserveOrbit = false
 ): NetworkCamera | null {
+  if (preserveOrbit) {
+    return computeOrbitRevealCamera(
+      projectedNode,
+      currentCamera,
+      viewportWidth,
+      viewportHeight,
+      insets,
+      onlyIfOutside
+    );
+  }
+
   const isVisible = isNodeVisibleInViewport(
     projectedNode.screenX,
     projectedNode.screenY,

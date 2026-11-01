@@ -18,6 +18,11 @@ import {
   computeNetworkFitTransform,
   isNodeVisibleInViewport,
   applyZoomAroundCursor,
+  applyZoomAroundCenter,
+  computeCenterLockedTransform,
+  isCenterDeadZone,
+  computeOrbitRevealCamera,
+  computeRevealCamera,
   createDefaultCamera,
   resetNetworkCamera,
   normalizeWheelZoomDelta,
@@ -529,6 +534,133 @@ describe('Network Camera & 3D Projection Math', () => {
       expect(computeContinuousZoomFactor(0)).toBe(1.0);
       expect(computeContinuousZoomFactor(100)).toBeLessThan(1.0); // Scroll down -> zoom out
       expect(computeContinuousZoomFactor(-100)).toBeGreaterThan(1.0); // Scroll up -> zoom in
+    });
+  });
+
+  describe('Center Locking and Orbit-Preserving Reveal', () => {
+    const baseCamera: NetworkCamera = {
+      yaw: 0.55,
+      pitch: 0.28,
+      panX: 400,
+      panY: 300,
+      zoom: 1.0,
+    };
+
+    it('applyZoomAroundCenter keeps usable viewport center pivot strictly stationary', () => {
+      const insets: ViewportInsets = { top: 60, bottom: 20, left: 40, right: 40 };
+      const width = 800;
+      const height = 600;
+      const usableCenterX = 40 + (800 - 80) / 2; // 400
+      const usableCenterY = 60 + (600 - 80) / 2; // 320
+
+      const camAtCenter: NetworkCamera = {
+        ...baseCamera,
+        panX: usableCenterX,
+        panY: usableCenterY,
+      };
+
+      const zoomed = applyZoomAroundCenter(camAtCenter, 1.5, width, height, insets);
+      expect(zoomed.zoom).toBe(1.5);
+      expect(zoomed.panX).toBeCloseTo(usableCenterX, 6);
+      expect(zoomed.panY).toBeCloseTo(usableCenterY, 6);
+    });
+
+    it('computeCenterLockedTransform aligns bounds center to usable viewport center', () => {
+      const insets: ViewportInsets = { top: 60, bottom: 20, left: 20, right: 20 };
+      const bounds = { minX: -100, maxX: 100, minY: -50, maxY: 50 };
+      const transform = computeCenterLockedTransform(bounds, 800, 600, 1.2, insets);
+
+      // Usable center is (20 + 380 = 400, 60 + 260 = 320)
+      // Graph mid is (0, 0)
+      expect(transform.panX).toBe(400);
+      expect(transform.panY).toBe(320);
+      expect(transform.zoom).toBe(1.2);
+    });
+
+    it('isCenterDeadZone detects sub-pixel jitter threshold', () => {
+      const current = { panX: 400.2, panY: 300.1 };
+      const target = { panX: 400.0, panY: 300.0 };
+      expect(isCenterDeadZone(current, target, 0.5)).toBe(true);
+      expect(isCenterDeadZone(current, target, 0.1)).toBe(false);
+    });
+
+    it('computeOrbitRevealCamera rotates front hemisphere node to screen center facing forward', () => {
+      const targetLocal: Point3D = { x: 80, y: 40, z: 120 };
+      const pNode = {
+        id: 'node-front',
+        node: createNode('node-front'),
+        worldPos: targetLocal,
+        localPos: targetLocal,
+        projected: projectPoint3D(targetLocal.x, targetLocal.y, targetLocal.z, baseCamera.yaw, baseCamera.pitch),
+        screenX: 250,
+        screenY: 180,
+        radius: 10,
+      };
+
+      const revealedCam = computeOrbitRevealCamera(pNode, baseCamera, 800, 600);
+      expect(revealedCam).not.toBeNull();
+
+      // Project targetLocal with computed yaw & pitch
+      const proj = projectPoint3D(targetLocal.x, targetLocal.y, targetLocal.z, revealedCam!.yaw, revealedCam!.pitch);
+      expect(proj.x).toBeCloseTo(0, 4);
+      expect(proj.y).toBeCloseTo(0, 4);
+      expect(proj.z).toBeGreaterThan(0); // Front-facing
+      expect(revealedCam!.panX).toBe(400); // Orbit center preserved
+      expect(revealedCam!.panY).toBe(300);
+    });
+
+    it('computeOrbitRevealCamera rotates back hemisphere node (z < 0) to screen center facing forward without upside-down pitch', () => {
+      const targetLocal: Point3D = { x: -60, y: 30, z: -100 };
+      const pNode = {
+        id: 'node-back',
+        node: createNode('node-back'),
+        worldPos: targetLocal,
+        localPos: targetLocal,
+        projected: projectPoint3D(targetLocal.x, targetLocal.y, targetLocal.z, baseCamera.yaw, baseCamera.pitch),
+        screenX: 250,
+        screenY: 180,
+        radius: 10,
+      };
+
+      const revealedCam = computeOrbitRevealCamera(pNode, baseCamera, 800, 600);
+      expect(revealedCam).not.toBeNull();
+
+      // Pitch limit clamp check: must never exceed [-PITCH_CLAMP_LIMIT, PITCH_CLAMP_LIMIT]
+      expect(Math.abs(revealedCam!.pitch)).toBeLessThanOrEqual(PITCH_CLAMP_LIMIT);
+
+      // Project targetLocal with computed yaw & pitch
+      const proj = projectPoint3D(targetLocal.x, targetLocal.y, targetLocal.z, revealedCam!.yaw, revealedCam!.pitch);
+      expect(proj.x).toBeCloseTo(0, 4);
+      expect(proj.y).toBeCloseTo(0, 4);
+      expect(proj.z).toBeGreaterThan(0); // Rotated to front-facing!
+      expect(revealedCam!.panX).toBe(400); // Orbit center preserved
+      expect(revealedCam!.panY).toBe(300);
+    });
+
+    it('computeRevealCamera respects preserveOrbit flag', () => {
+      const targetLocal: Point3D = { x: 50, y: -40, z: 80 };
+      const pNode = {
+        id: 'node-toggle',
+        node: createNode('node-toggle'),
+        worldPos: targetLocal,
+        localPos: targetLocal,
+        projected: projectPoint3D(targetLocal.x, targetLocal.y, targetLocal.z, baseCamera.yaw, baseCamera.pitch),
+        screenX: 250,
+        screenY: 180,
+        radius: 10,
+      };
+
+      // With preserveOrbit = false: yaw and pitch are preserved, pan shifts
+      const panCam = computeRevealCamera(pNode, baseCamera, 800, 600, undefined, false, false);
+      expect(panCam!.yaw).toBe(baseCamera.yaw);
+      expect(panCam!.pitch).toBe(baseCamera.pitch);
+      expect(panCam!.panX).not.toBe(400);
+
+      // With preserveOrbit = true: pan stays centered at 400, yaw and pitch rotate
+      const orbitCam = computeRevealCamera(pNode, baseCamera, 800, 600, undefined, false, true);
+      expect(orbitCam!.panX).toBe(400);
+      expect(orbitCam!.panY).toBe(300);
+      expect(orbitCam!.yaw).not.toBe(baseCamera.yaw);
     });
   });
 });

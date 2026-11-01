@@ -13,23 +13,24 @@ import {
   DEFAULT_PITCH,
   MIN_ZOOM,
   MAX_ZOOM,
+  DEFAULT_ZOOM,
+  ROTATION_SENSITIVITY,
+  PAN_SENSITIVITY,
+  GESTURE_THRESHOLD_MOUSE,
+  GESTURE_THRESHOLD_PEN,
+  GESTURE_THRESHOLD_TOUCH,
   wrapRotationAngle,
   clampPitch,
   computeGraphCentroid,
   computeDepthAlpha,
   projectGraph,
   computeNetworkFitTransform,
-  findHitNode,
-  computeRevealCamera,
+  isNodeVisibleInViewport,
   applyZoomAroundCursor,
+  applyZoomAroundCenter,
   normalizeWheelZoomDelta,
   computeContinuousZoomFactor,
-  handleGesturePointerDown,
-  handleGesturePointerMove,
-  resetGestureState,
-  createDefaultCamera,
   ProjectedGraph,
-  NetworkGestureState,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
@@ -49,6 +50,9 @@ interface NetworkCanvasProps {
   revealRequest?: RevealRequest | null;
   fitViewTrigger?: number;
   resetViewTrigger?: number;
+  keepGraphCentered?: boolean;
+  onToggleCenterLock?: () => void;
+  isVisible?: boolean;
   insets?: ViewportInsets;
   onAnnounce?: (message: string) => void;
 }
@@ -69,6 +73,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   revealRequest,
   fitViewTrigger,
   resetViewTrigger,
+  keepGraphCentered = true,
+  onToggleCenterLock,
+  isVisible = true,
   insets,
   onAnnounce,
 }) => {
@@ -77,32 +84,29 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [positions, setPositions] = useState<Map<string, Point3D>>(new Map());
-  const positionsRef = useRef<Map<string, Point3D>>(new Map());
+  const positionsRef = useRef<Map<string, Point3D>>(positions);
   positionsRef.current = positions;
+
+  // Pointer capture target reference
+  const pointerTargetRef = useRef<HTMLElement | null>(null);
 
   // Repository initialization tracker (fit ONLY on initial load, preserve on revisions)
   const initializedRepoIdRef = useRef<string | null>(null);
 
   // Authoritative Camera ref (eliminates React re-render churn during 60fps dragging)
-  const cameraRef = useRef<NetworkCamera>(createDefaultCamera());
+  const cameraRef = useRef<NetworkCamera>({
+    yaw: DEFAULT_YAW,
+    pitch: DEFAULT_PITCH,
+    panX: 400,
+    panY: 300,
+    zoom: DEFAULT_ZOOM,
+  });
 
   // RAF & Dirty flag scheduler
   const isDirtyRef = useRef<boolean>(true);
   const rafIdRef = useRef<number | null>(null);
   const cameraAnimRef = useRef<CameraAnimation | null>(null);
   const renderLoopRef = useRef<(timestamp: number) => void>(() => {});
-
-  // Cache for projection output
-  const projectedDataRef = useRef<ProjectedGraph | null>(null);
-  const centroidRef = useRef<Point3D>({ x: 0, y: 0, z: 0 });
-
-  // Pointer gesture tracking
-  const gestureRef = useRef<NetworkGestureState>(resetGestureState(cameraRef.current));
-
-  const prefersReducedMotion = useMemo(() => {
-    return typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  }, []);
 
   const requestRender = useCallback(() => {
     isDirtyRef.current = true;
@@ -113,8 +117,88 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     }
   }, []);
 
+  // Cache for projection output
+  const projectedDataRef = useRef<ProjectedGraph | null>(null);
+  const centroidRef = useRef<Point3D>({ x: 0, y: 0, z: 0 });
+
+  // Pointer gesture tracking
+  const gestureRef = useRef<{
+    active: boolean;
+    mode: 'idle' | 'rotating' | 'panning';
+    startX: number;
+    startY: number;
+    startCamera: NetworkCamera;
+    pointerId: number | null;
+    pointerType: string;
+    exceededThreshold: boolean;
+  }>({
+    active: false,
+    mode: 'idle',
+    startX: 0,
+    startY: 0,
+    startCamera: { ...cameraRef.current },
+    pointerId: null,
+    pointerType: 'mouse',
+    exceededThreshold: false,
+  });
+
+  const prefersReducedMotion = useMemo(() => {
+    return typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }, []);
+
+  // Expose authoritative debug metrics for Playwright browser verification & runtime inspection
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__prebaseNetworkDebug = {
+        getCamera: () => ({ ...cameraRef.current }),
+        getCentroid: () => ({ ...centroidRef.current }),
+        getProjectedNodes: () =>
+          projectedDataRef.current?.projectedList?.map((p) => ({
+            id: p.id,
+            screenX: p.screenX,
+            screenY: p.screenY,
+            depthScale: p.projected.depthScale,
+            z: p.projected.z,
+            localPos: p.localPos,
+          })) || [],
+        isCenterLocked: () => keepGraphCentered,
+      };
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        delete (window as any).__prebaseNetworkDebug;
+      }
+    };
+  }, [keepGraphCentered]);
+
+  // When Center Lock is enabled or restored, anchor camera directly at the usable viewport center
+  useEffect(() => {
+    if (keepGraphCentered && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      const insetLeft = insets?.left ?? 0;
+      const insetRight = insets?.right ?? 0;
+      const insetTop = insets?.top ?? 0;
+      const insetBottom = insets?.bottom ?? 0;
+      const usableCenterX = insetLeft + Math.max(100, width - insetLeft - insetRight) / 2;
+      const usableCenterY = insetTop + Math.max(100, height - insetTop - insetBottom) / 2;
+      cameraRef.current.panX = usableCenterX;
+      cameraRef.current.panY = usableCenterY;
+      requestRender();
+    }
+  }, [keepGraphCentered, insets, requestRender]);
+
   // Compute graph layout positions once per snapshot revision
   useEffect(() => {
+    if (!snapshot || snapshot.nodes.length === 0) {
+      setPositions(new Map());
+      positionsRef.current = new Map();
+      centroidRef.current = { x: 0, y: 0, z: 0 };
+      requestRender();
+      return;
+    }
+
     const width = containerRef.current?.clientWidth || 800;
     const height = containerRef.current?.clientHeight || 600;
 
@@ -125,17 +209,21 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         camera: cameraRef.current,
       },
       snapshot,
-      { width, height, insets }
+      { width, height, insets },
+      'sphere'
     );
 
-    initializedRepoIdRef.current = result.state.repositoryId;
-    positionsRef.current = result.state.positions;
     setPositions(result.state.positions);
+    positionsRef.current = result.state.positions;
     centroidRef.current = computeGraphCentroid(result.state.positions.values());
-    cameraRef.current = result.state.camera;
+    initializedRepoIdRef.current = result.state.repositoryId;
+
+    if (result.didTriggerInitialFit) {
+      cameraRef.current = result.state.camera;
+    }
 
     requestRender();
-  }, [snapshot, insets]);
+  }, [snapshot, insets, requestRender]);
 
   // Handle external Fit View trigger (preserves current yaw and pitch!)
   useEffect(() => {
@@ -220,16 +308,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     if (!revealRequest || !containerRef.current) return;
     const { nodeId, onlyIfOutside } = revealRequest;
 
-    let projData = projectedDataRef.current;
-    if (!projData && positionsRef.current.size > 0) {
-      projData = projectGraph(
-        snapshot.nodes,
-        positionsRef.current,
-        centroidRef.current,
-        cameraRef.current
-      );
-      projectedDataRef.current = projData;
-    }
+    const projData = projectedDataRef.current;
     if (!projData) return;
     const projectedNode = projData.projectedMap.get(nodeId);
     if (!projectedNode) return;
@@ -237,23 +316,45 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     const width = containerRef.current.clientWidth || 800;
     const height = containerRef.current.clientHeight || 600;
 
-    const targetCamera = computeRevealCamera(
-      projectedNode,
-      cameraRef.current,
+    // Check if node is already safely visible
+    const isVisible = isNodeVisibleInViewport(
+      projectedNode.screenX,
+      projectedNode.screenY,
+      projectedNode.radius,
       width,
       height,
-      insets,
-      onlyIfOutside
+      insets
     );
 
-    if (!targetCamera) return;
+    if (onlyIfOutside && isVisible) {
+      // Node is already comfortably visible: do nothing!
+      return;
+    }
+
+    // Center node in usable viewport
+    const insetLeft = insets?.left ?? 0;
+    const insetRight = insets?.right ?? 0;
+    const insetTop = insets?.top ?? 0;
+    const insetBottom = insets?.bottom ?? 0;
+    const usableCenterX = insetLeft + Math.max(100, width - insetLeft - insetRight) / 2;
+    const usableCenterY = insetTop + Math.max(100, height - insetTop - insetBottom) / 2;
+
+    const cur = cameraRef.current;
+    const targetPanX = usableCenterX - projectedNode.projected.x * cur.zoom;
+    const targetPanY = usableCenterY - projectedNode.projected.y * cur.zoom;
+
+    const targetCamera: NetworkCamera = {
+      ...cur,
+      panX: targetPanX,
+      panY: targetPanY,
+    };
 
     if (prefersReducedMotion) {
       cameraRef.current = targetCamera;
       requestRender();
     } else {
       cameraAnimRef.current = {
-        startCamera: { ...cameraRef.current },
+        startCamera: { ...cur },
         targetCamera,
         startTime: performance.now(),
         durationMs: 300,
@@ -285,23 +386,15 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          if (prevWidth === 0 && prevHeight === 0) {
-            prevWidth = width;
-            prevHeight = height;
-            requestRender();
-            continue;
-          }
-          if (width !== prevWidth || height !== prevHeight) {
-            // Adjust pan smoothly so graph centroid remains centered
-            const dx = (width - prevWidth) / 2;
-            const dy = (height - prevHeight) / 2;
-            cameraRef.current.panX += dx;
-            cameraRef.current.panY += dy;
-            prevWidth = width;
-            prevHeight = height;
-            requestRender();
-          }
+        if (width > 0 && height > 0 && (width !== prevWidth || height !== prevHeight)) {
+          // Adjust pan smoothly so graph centroid remains centered
+          const dx = (width - prevWidth) / 2;
+          const dy = (height - prevHeight) / 2;
+          cameraRef.current.panX += dx;
+          cameraRef.current.panY += dy;
+          prevWidth = width;
+          prevHeight = height;
+          requestRender();
         }
       }
     });
@@ -314,6 +407,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const renderLoop = useCallback(
     (timestamp: number) => {
       rafIdRef.current = null;
+      if (!isVisible) return;
 
       // Handle active camera animation (cubic ease-out)
       if (cameraAnimRef.current) {
@@ -359,179 +453,179 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, width, height);
 
-      const camera = cameraRef.current;
+      try {
+        const camera = cameraRef.current;
 
-      // 1. Authoritative projection pass
-      const projData = projectGraph(snapshot.nodes, positions, centroidRef.current, camera, {
-        entryNodeId: snapshot.nodes[0]?.id,
-        selectedNodeId,
-        hoveredNodeId,
-      });
-      projectedDataRef.current = projData;
+        // 1. Authoritative projection pass
+        const projData = projectGraph(snapshot.nodes, positions, centroidRef.current, camera, {
+          entryNodeId: snapshot.nodes[0]?.id,
+          selectedNodeId,
+          hoveredNodeId,
+        });
+        projectedDataRef.current = projData;
 
-      const activeHighlightId = selectedNodeId || hoveredNodeId;
-      const connectedNodes = activeHighlightId
-        ? new Set([activeHighlightId, ...(neighborMap.get(activeHighlightId) || [])])
-        : null;
+        const activeHighlightId = selectedNodeId || hoveredNodeId;
+        const connectedNodes = activeHighlightId
+          ? new Set([activeHighlightId, ...(neighborMap.get(activeHighlightId) || [])])
+          : null;
 
-      // 2. Draw Edges
-      const edgesToDraw = [];
-      for (let i = 0; i < snapshot.edges.length; i++) {
-        const edge = snapshot.edges[i];
-        const p1 = projData.projectedMap.get(edge.source_file_id);
-        const p2 = projData.projectedMap.get(edge.target_file_id);
-        if (!p1 || !p2) continue;
+        // 2. Draw Edges
+        const edgesToDraw = [];
+        for (let i = 0; i < snapshot.edges.length; i++) {
+          const edge = snapshot.edges[i];
+          const p1 = projData.projectedMap.get(edge.source_file_id);
+          const p2 = projData.projectedMap.get(edge.target_file_id);
+          if (!p1 || !p2) continue;
 
-        const isConnected = Boolean(
-          activeHighlightId &&
+          const isConnected = Boolean(
+            activeHighlightId &&
             (edge.source_file_id === activeHighlightId || edge.target_file_id === activeHighlightId)
-        );
-        const isEdgeSelected = selectedEdgeId === edge.id;
-        const desc = resolveNetworkEdgeVisual(
-          edge,
-          isConnected || isEdgeSelected,
-          activeHighlightId,
-          camera.zoom
-        );
-        if (!desc) continue;
+          );
+          const isEdgeSelected = selectedEdgeId === edge.id;
+          const desc = resolveNetworkEdgeVisual(
+            edge,
+            isConnected || isEdgeSelected,
+            activeHighlightId,
+            camera.zoom
+          );
+          if (!desc) continue;
 
-        edgesToDraw.push({ p1, p2, desc, isEdgeSelected });
-      }
+          edgesToDraw.push({ p1, p2, desc, isEdgeSelected });
+        }
 
-      edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
+        edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
 
-      for (let i = 0; i < edgesToDraw.length; i++) {
-        const { p1, p2, desc, isEdgeSelected } = edgesToDraw[i];
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(p1.screenX, p1.screenY);
-        ctx.lineTo(p2.screenX, p2.screenY);
-        ctx.strokeStyle = isEdgeSelected ? '#38bdf8' : desc.color;
-        ctx.lineWidth = isEdgeSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
-        ctx.globalAlpha = isEdgeSelected ? 1.0 : desc.alpha;
-        if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
-        ctx.stroke();
+        for (let i = 0; i < edgesToDraw.length; i++) {
+          const { p1, p2, desc, isEdgeSelected } = edgesToDraw[i];
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(p1.screenX, p1.screenY);
+          ctx.lineTo(p2.screenX, p2.screenY);
+          ctx.strokeStyle = isEdgeSelected ? '#38bdf8' : desc.color;
+          ctx.lineWidth = isEdgeSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
+          ctx.globalAlpha = isEdgeSelected ? 1.0 : desc.alpha;
+          if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
+          ctx.stroke();
 
-        // Directional arrow pointing source -> target
-        if (desc.showArrow || isEdgeSelected) {
-          const dx = p2.screenX - p1.screenX;
-          const dy = p2.screenY - p1.screenY;
-          const len = Math.hypot(dx, dy);
-          if (len > 24) {
-            const midX = p1.screenX + dx * 0.62;
-            const midY = p1.screenY + dy * 0.62;
-            const angle = Math.atan2(dy, dx);
-            const arrowSize = Math.max(4.0, 5.0 * Math.min(1.2, camera.zoom));
+          // Directional arrow pointing source -> target
+          if (desc.showArrow || isEdgeSelected) {
+            const dx = p2.screenX - p1.screenX;
+            const dy = p2.screenY - p1.screenY;
+            const len = Math.hypot(dx, dy);
+            if (len > 24) {
+              const midX = p1.screenX + dx * 0.62;
+              const midY = p1.screenY + dy * 0.62;
+              const angle = Math.atan2(dy, dx);
+              const arrowSize = Math.max(4.0, 5.0 * Math.min(1.2, camera.zoom));
 
-            ctx.fillStyle = isEdgeSelected ? '#38bdf8' : desc.color;
-            ctx.beginPath();
-            ctx.moveTo(midX, midY);
-            ctx.lineTo(
-              midX - arrowSize * Math.cos(angle - Math.PI / 6),
-              midY - arrowSize * Math.sin(angle - Math.PI / 6)
-            );
-            ctx.lineTo(
-              midX - arrowSize * Math.cos(angle + Math.PI / 6),
-              midY - arrowSize * Math.sin(angle + Math.PI / 6)
-            );
-            ctx.closePath();
-            ctx.fill();
+              ctx.fillStyle = isEdgeSelected ? '#38bdf8' : desc.color;
+              ctx.beginPath();
+              ctx.moveTo(midX, midY);
+              ctx.lineTo(
+                midX - arrowSize * Math.cos(angle - Math.PI / 6),
+                midY - arrowSize * Math.sin(angle - Math.PI / 6)
+              );
+              ctx.lineTo(
+                midX - arrowSize * Math.cos(angle + Math.PI / 6),
+                midY - arrowSize * Math.sin(angle + Math.PI / 6)
+              );
+              ctx.closePath();
+              ctx.fill();
+            }
           }
-        }
-        ctx.restore();
-      }
-
-      // 3. Draw Nodes (sorted back-to-front by projected.z)
-      const sortedNodes = projData.projectedList;
-      for (let i = 0; i < sortedNodes.length; i++) {
-        const pNode = sortedNodes[i];
-        const isSelected = selectedNodeId === pNode.id;
-        const isHovered = hoveredNodeId === pNode.id;
-        const isDimmed = Boolean(connectedNodes && !connectedNodes.has(pNode.id));
-
-        const screenR = pNode.radius * camera.zoom;
-        const depthAlpha = computeDepthAlpha(pNode.projected.depthScale);
-
-        ctx.save();
-        ctx.globalAlpha = isDimmed ? 0.2 : depthAlpha;
-
-        // Selection / Hover outer ring
-        if (isSelected) {
-          ctx.beginPath();
-          ctx.arc(pNode.screenX, pNode.screenY, screenR + 4.5, 0, Math.PI * 2);
-          ctx.strokeStyle = '#2dd4bf';
-          ctx.lineWidth = 2.5;
-          ctx.stroke();
-        } else if (isHovered) {
-          ctx.beginPath();
-          ctx.arc(pNode.screenX, pNode.screenY, screenR + 3.5, 0, Math.PI * 2);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 2.0;
-          ctx.stroke();
+          ctx.restore();
         }
 
-        // Node glyph body
-        ctx.beginPath();
-        ctx.arc(pNode.screenX, pNode.screenY, screenR, 0, Math.PI * 2);
-        ctx.fillStyle =
-          pNode.id === snapshot.nodes[0]?.id
-            ? ENTRY_NODE_COLOR
-            : getFileTypeColor(pNode.node.relative_path);
-        ctx.fill();
+        // 3. Draw Nodes (sorted back-to-front by projected.z)
+        const sortedNodes = projData.projectedList;
+        for (let i = 0; i < sortedNodes.length; i++) {
+          const pNode = sortedNodes[i];
+          const isSelected = selectedNodeId === pNode.id;
+          const isHovered = hoveredNodeId === pNode.id;
+          const isDimmed = Boolean(connectedNodes && !connectedNodes.has(pNode.id));
 
-        ctx.strokeStyle = isSelected
-          ? '#2dd4bf'
-          : isHovered
-          ? '#38bdf8'
-          : 'rgba(15, 23, 42, 0.85)';
-        ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
-        ctx.stroke();
+          const screenR = pNode.radius * camera.zoom;
+          const depthAlpha = computeDepthAlpha(pNode.projected.depthScale);
+
+          ctx.save();
+          ctx.globalAlpha = isDimmed ? 0.2 : depthAlpha;
+
+          // Selection / Hover outer ring
+          if (isSelected) {
+            ctx.beginPath();
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 4.5, 0, Math.PI * 2);
+            ctx.strokeStyle = '#2dd4bf';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+          } else if (isHovered) {
+            ctx.beginPath();
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 3.5, 0, Math.PI * 2);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+          }
+
+          // Node glyph body
+          ctx.beginPath();
+          ctx.arc(pNode.screenX, pNode.screenY, screenR, 0, Math.PI * 2);
+          ctx.fillStyle =
+            pNode.id === snapshot.nodes[0]?.id
+              ? ENTRY_NODE_COLOR
+              : getFileTypeColor(pNode.node.relative_path);
+          ctx.fill();
+
+          ctx.strokeStyle = isSelected
+            ? '#2dd4bf'
+            : isHovered
+              ? '#38bdf8'
+              : 'rgba(15, 23, 42, 0.85)';
+          ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 4. Draw Node Labels
+        for (let i = 0; i < sortedNodes.length; i++) {
+          const pNode = sortedNodes[i];
+          const isSelected = selectedNodeId === pNode.id;
+          const isHovered = hoveredNodeId === pNode.id;
+          const isHub =
+            pNode.node.direct_dependency_count + pNode.node.direct_dependent_count >= 4;
+          const shouldDrawLabel = isSelected || isHovered || camera.zoom > 0.85 || isHub;
+
+          if (!shouldDrawLabel) continue;
+
+          const screenR = pNode.radius * camera.zoom;
+          const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
+
+          ctx.save();
+          ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+
+          const labelY = pNode.screenY + screenR + 4;
+          const text = pNode.node.filename;
+
+          // Halo text background for legibility
+          ctx.strokeStyle = 'rgba(10, 14, 23, 0.9)';
+          ctx.lineWidth = 3.5;
+          ctx.strokeText(text, pNode.screenX, labelY);
+
+          ctx.fillStyle = isSelected ? '#2dd4bf' : isHovered ? '#38bdf8' : '#e2e8f0';
+          ctx.fillText(text, pNode.screenX, labelY);
+          ctx.restore();
+        }
+      } finally {
         ctx.restore();
       }
-
-      // 4. Draw Node Labels
-      const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
-      ctx.save();
-      ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.lineWidth = 3.5;
-
-      for (let i = 0; i < sortedNodes.length; i++) {
-        const pNode = sortedNodes[i];
-        const isSelected = selectedNodeId === pNode.id;
-        const isHovered = hoveredNodeId === pNode.id;
-        const isHub =
-          pNode.node.direct_dependency_count + pNode.node.direct_dependent_count >= 4;
-        const shouldDrawLabel = isSelected || isHovered || camera.zoom > 0.85 || isHub;
-
-        if (!shouldDrawLabel) continue;
-
-        const screenR = pNode.radius * camera.zoom;
-        const labelY = pNode.screenY + screenR + 4;
-        const text = pNode.node.filename;
-
-        // Halo text background for legibility
-        ctx.strokeStyle = 'rgba(10, 14, 23, 0.9)';
-        ctx.strokeText(text, pNode.screenX, labelY);
-
-        ctx.fillStyle = isSelected ? '#2dd4bf' : isHovered ? '#38bdf8' : '#e2e8f0';
-        ctx.fillText(text, pNode.screenX, labelY);
-      }
-      ctx.restore();
-
-      ctx.restore();
 
       // If animation is still running, schedule next frame
       if (cameraAnimRef.current) {
-        rafIdRef.current = requestAnimationFrame((t) => {
-          renderLoopRef.current(t);
-        });
+        rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },
-    [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, neighborMap]
+    [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, neighborMap, isVisible]
   );
-
   renderLoopRef.current = renderLoop;
 
   // Trigger RAF whenever external dependencies change
@@ -561,7 +655,19 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const screenY = clientY - rect.top;
       const camera = cameraRef.current;
 
-      return findHitNode(projData.projectedList, screenX, screenY, camera.zoom);
+      // Iterate in reverse (frontmost nodes first by depth)
+      const list = projData.projectedList;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const pNode = list[i];
+        const screenR = pNode.radius * camera.zoom;
+        const hitTargetRadius = Math.max(screenR + 4, 10);
+        const dist = Math.hypot(pNode.screenX - screenX, pNode.screenY - screenY);
+
+        if (dist <= hitTargetRadius) {
+          return pNode.node;
+        }
+      }
+      return null;
     },
     []
   );
@@ -623,18 +729,25 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     // Focus canvas on click for keyboard interaction
     canvasRef.current?.focus();
 
-    gestureRef.current = handleGesturePointerDown({
-      clientX: e.clientX,
-      clientY: e.clientY,
+    // Distinguish primary drag (rotation) from Shift-drag or middle button (pan)
+    const isShiftOrMiddle = e.shiftKey || e.button === 1 || e.button === 2;
+    const mode = isShiftOrMiddle ? 'panning' : 'rotating';
+
+    gestureRef.current = {
+      active: true,
+      mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      startCamera: { ...cameraRef.current },
       pointerId: e.pointerId,
       pointerType: e.pointerType,
-      shiftKey: e.shiftKey,
-      button: e.button,
-      currentCamera: cameraRef.current,
-    });
+      exceededThreshold: false,
+    };
 
+    const target = e.target as HTMLElement;
+    pointerTargetRef.current = target;
     try {
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      target.setPointerCapture(e.pointerId);
     } catch {
       // ignored
     }
@@ -643,18 +756,40 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const handlePointerMove = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
     if (gesture.active && gesture.pointerId === e.pointerId) {
-      const { gesture: nextGesture, camera: nextCamera } = handleGesturePointerMove(
-        gesture,
-        e.clientX,
-        e.clientY,
-        cameraRef.current
-      );
-      gestureRef.current = nextGesture;
+      const dx = e.clientX - gesture.startX;
+      const dy = e.clientY - gesture.startY;
 
-      if (nextGesture.exceededThreshold) {
+      const threshold =
+        gesture.pointerType === 'touch'
+          ? GESTURE_THRESHOLD_TOUCH
+          : gesture.pointerType === 'pen'
+            ? GESTURE_THRESHOLD_PEN
+            : GESTURE_THRESHOLD_MOUSE;
+
+      if (!gesture.exceededThreshold && Math.hypot(dx, dy) > threshold) {
+        gesture.exceededThreshold = true;
+      }
+
+      if (gesture.exceededThreshold) {
+        // Cancel any running camera animation
         cameraAnimRef.current = null;
-        cameraRef.current = nextCamera;
-        requestRender();
+
+        if (gesture.mode === 'rotating') {
+          // Natural rotation: drag right rotates yaw negatively, drag down rotates pitch positively
+          const newYaw = wrapRotationAngle(gesture.startCamera.yaw - dx * ROTATION_SENSITIVITY);
+          const newPitch = clampPitch(gesture.startCamera.pitch + dy * ROTATION_SENSITIVITY);
+          cameraRef.current.yaw = newYaw;
+          cameraRef.current.pitch = newPitch;
+          requestRender();
+        } else if (gesture.mode === 'panning') {
+          if (keepGraphCentered) {
+            onToggleCenterLock?.();
+            onAnnounce?.('Center lock unlocked (free pan)');
+          }
+          cameraRef.current.panX = gesture.startCamera.panX + dx * PAN_SENSITIVITY;
+          cameraRef.current.panY = gesture.startCamera.panY + dy * PAN_SENSITIVITY;
+          requestRender();
+        }
       }
       return;
     }
@@ -671,14 +806,20 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const cleanUpPointerGesture = useCallback(
     (e?: React.PointerEvent) => {
       const gesture = gestureRef.current;
-      if (e && gesture.pointerId === e.pointerId) {
+      const target = (e?.target as HTMLElement) || pointerTargetRef.current;
+      if (target && gesture.pointerId !== null) {
         try {
-          (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+          if (target.hasPointerCapture(gesture.pointerId)) {
+            target.releasePointerCapture(gesture.pointerId);
+          }
         } catch {
           // ignored
         }
       }
-      gestureRef.current = resetGestureState(cameraRef.current);
+      pointerTargetRef.current = null;
+      gesture.active = false;
+      gesture.pointerId = null;
+      gesture.mode = 'idle';
     },
     []
   );
@@ -716,17 +857,20 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   };
 
   const handleLostPointerCapture = () => {
-    gestureRef.current = resetGestureState(cameraRef.current);
+    gestureRef.current.active = false;
+    gestureRef.current.pointerId = null;
+    gestureRef.current.mode = 'idle';
+    pointerTargetRef.current = null;
   };
 
   // Window blur / visibility change cleanup
   useEffect(() => {
     const handleBlur = () => {
-      gestureRef.current = resetGestureState(cameraRef.current);
+      cleanUpPointerGesture();
     };
     window.addEventListener('blur', handleBlur);
     return () => window.removeEventListener('blur', handleBlur);
-  }, []);
+  }, [cleanUpPointerGesture]);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -745,14 +889,26 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     const factor = computeContinuousZoomFactor(normDelta);
 
     cameraAnimRef.current = null;
-    cameraRef.current = applyZoomAroundCursor(
-      cameraRef.current,
-      factor,
-      cursorX,
-      cursorY,
-      MIN_ZOOM,
-      MAX_ZOOM
-    );
+    if (keepGraphCentered) {
+      cameraRef.current = applyZoomAroundCenter(
+        cameraRef.current,
+        factor,
+        rect.width,
+        rect.height,
+        insets,
+        MIN_ZOOM,
+        MAX_ZOOM
+      );
+    } else {
+      cameraRef.current = applyZoomAroundCursor(
+        cameraRef.current,
+        factor,
+        cursorX,
+        cursorY,
+        MIN_ZOOM,
+        MAX_ZOOM
+      );
+    }
     requestRender();
   };
 
@@ -769,37 +925,73 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      if (shift) cur.panX -= 30;
-      else cur.yaw = wrapRotationAngle(cur.yaw + 0.05);
+      if (shift) {
+        if (keepGraphCentered) {
+          onToggleCenterLock?.();
+          onAnnounce?.('Center lock unlocked (free pan)');
+        }
+        cur.panX -= 30;
+      } else {
+        cur.yaw = wrapRotationAngle(cur.yaw + 0.05);
+      }
       requestRender();
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
-      if (shift) cur.panX += 30;
-      else cur.yaw = wrapRotationAngle(cur.yaw - 0.05);
+      if (shift) {
+        if (keepGraphCentered) {
+          onToggleCenterLock?.();
+          onAnnounce?.('Center lock unlocked (free pan)');
+        }
+        cur.panX += 30;
+      } else {
+        cur.yaw = wrapRotationAngle(cur.yaw - 0.05);
+      }
       requestRender();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      if (shift) cur.panY -= 30;
-      else cur.pitch = clampPitch(cur.pitch - 0.05);
+      if (shift) {
+        if (keepGraphCentered) {
+          onToggleCenterLock?.();
+          onAnnounce?.('Center lock unlocked (free pan)');
+        }
+        cur.panY -= 30;
+      } else {
+        cur.pitch = clampPitch(cur.pitch - 0.05);
+      }
       requestRender();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      if (shift) cur.panY += 30;
-      else cur.pitch = clampPitch(cur.pitch + 0.05);
+      if (shift) {
+        if (keepGraphCentered) {
+          onToggleCenterLock?.();
+          onAnnounce?.('Center lock unlocked (free pan)');
+        }
+        cur.panY += 30;
+      } else {
+        cur.pitch = clampPitch(cur.pitch + 0.05);
+      }
       requestRender();
     } else if (e.key === '+' || e.key === '=') {
       e.preventDefault();
       const rect = canvasRef.current?.getBoundingClientRect();
-      const cx = (rect?.width || 800) / 2;
-      const cy = (rect?.height || 600) / 2;
-      cameraRef.current = applyZoomAroundCursor(cur, 1.15, cx, cy);
+      const w = rect?.width || 800;
+      const h = rect?.height || 600;
+      if (keepGraphCentered) {
+        cameraRef.current = applyZoomAroundCenter(cur, 1.15, w, h, insets);
+      } else {
+        cameraRef.current = applyZoomAroundCursor(cur, 1.15, w / 2, h / 2);
+      }
       requestRender();
     } else if (e.key === '-' || e.key === '_') {
       e.preventDefault();
       const rect = canvasRef.current?.getBoundingClientRect();
-      const cx = (rect?.width || 800) / 2;
-      const cy = (rect?.height || 600) / 2;
-      cameraRef.current = applyZoomAroundCursor(cur, 1 / 1.15, cx, cy);
+      const w = rect?.width || 800;
+      const h = rect?.height || 600;
+      if (keepGraphCentered) {
+        cameraRef.current = applyZoomAroundCenter(cur, 1 / 1.15, w, h, insets);
+      } else {
+        cameraRef.current = applyZoomAroundCursor(cur, 1 / 1.15, w / 2, h / 2);
+      }
       requestRender();
     }
   };
@@ -817,8 +1009,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             ? 'move'
             : 'grabbing'
           : hoveredNodeId
-          ? 'pointer'
-          : 'grab',
+            ? 'pointer'
+            : 'grab',
       }}
     >
       <canvas
@@ -833,6 +1025,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           width: '100%',
           height: '100%',
           touchAction: 'none',
+          outline: 'none',
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

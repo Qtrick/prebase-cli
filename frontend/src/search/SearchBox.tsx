@@ -40,13 +40,17 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
       return;
     }
 
-    const matched = files
-      .filter(
-        (f) =>
-          f.filename.toLowerCase().includes(q) ||
-          f.relative_path.toLowerCase().includes(q)
-      )
-      .slice(0, 10);
+    const matched: FileNode[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (
+        f.filename.toLowerCase().includes(q) ||
+        f.relative_path.toLowerCase().includes(q)
+      ) {
+        matched.push(f);
+        if (matched.length >= 10) break;
+      }
+    }
 
     setResults(matched);
     setSelectedIndex(0);
@@ -81,7 +85,8 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (results[selectedIndex]) {
-        handleSelect(results[selectedIndex], { reveal: true });
+        // Normal selection from search must not unnecessarily reposition or rotate the orb
+        handleSelect(results[selectedIndex], { reveal: false });
       }
     }
   };
@@ -100,6 +105,9 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
           aria-expanded={isOpen && results.length > 0}
           aria-autocomplete="list"
           aria-controls="search-dropdown-list"
+          aria-activedescendant={
+            isOpen && results[selectedIndex] ? `search-item-${results[selectedIndex].id}` : undefined
+          }
           aria-label="Search files"
           onChange={(e) => {
             setQuery(e.target.value);
@@ -129,11 +137,12 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
             return (
               <li
                 key={node.id}
+                id={`search-item-${node.id}`}
                 role="option"
                 aria-selected={isSelected}
                 className={`search-item ${isSelected ? 'active' : ''}`}
                 onMouseEnter={() => setSelectedIndex(index)}
-                onClick={() => handleSelect(node, { reveal: true })}
+                onClick={() => handleSelect(node, { reveal: false })}
               >
                 <div
                   className="search-color-dot"

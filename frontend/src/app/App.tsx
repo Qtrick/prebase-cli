@@ -35,6 +35,7 @@ import {
   Moon,
   ArrowDown,
   Compass,
+  Target,
 } from 'lucide-react';
 import './App.css';
 
@@ -88,6 +89,7 @@ export const App: React.FC = () => {
   selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
+  const [keepGraphCentered, setKeepGraphCentered] = useState(true);
   const [announcement, setAnnouncement] = useState<string>('');
 
   // Temporal state & Anchor Pagination
@@ -364,7 +366,15 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (e.key === '1') {
+      if (e.key === 'c' || e.key === 'C') {
+        if (activeTabRef.current === 'network') {
+          setKeepGraphCentered((prev) => {
+            const next = !prev;
+            setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
+            return next;
+          });
+        }
+      } else if (e.key === '1') {
         setActiveTab('network');
       } else if (e.key === '2') {
         setActiveTab('temporal');
@@ -460,7 +470,9 @@ export const App: React.FC = () => {
   const handleSelectNode = useCallback(
     (node: FileNode | null, options?: { reveal?: boolean }) => {
       setSelectedNode(node);
-      setSelectedEdge(null);
+      if (node) {
+        setSelectedEdge(null);
+      }
       if (node && options?.reveal) {
         setRevealRequest({
           nodeId: node.id,
@@ -482,7 +494,9 @@ export const App: React.FC = () => {
 
   const handleSelectEdge = useCallback((edge: DependencyEdge | null) => {
     setSelectedEdge(edge);
-    setSelectedNode(null);
+    if (edge) {
+      setSelectedNode(null);
+    }
   }, []);
 
   // Cross-Graph: Switch from Network Inspector to Temporal with file history filter
@@ -672,6 +686,26 @@ export const App: React.FC = () => {
           )}
 
           <div className="view-controls">
+            {activeTab === 'network' && networkViewMode === '3d' && (
+              <button
+                id="centerLock"
+                className={`ctrl-btn ${keepGraphCentered ? 'active' : ''}`}
+                onClick={() => {
+                  setKeepGraphCentered((prev) => {
+                    const next = !prev;
+                    setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
+                    return next;
+                  });
+                }}
+                title={keepGraphCentered ? 'Keep graph centered (Active) (Shortcut: C)' : 'Keep graph centered (Shortcut: C)'}
+                role="checkbox"
+                aria-checked={keepGraphCentered}
+                aria-pressed={keepGraphCentered}
+              >
+                <Target size={15} />
+                <span>{keepGraphCentered ? 'Centered' : 'Center Lock'}</span>
+              </button>
+            )}
             <button
               className="ctrl-btn"
               onClick={() => setFitViewCounter((c) => c + 1)}
@@ -741,39 +775,61 @@ export const App: React.FC = () => {
                 <h3>No supported JavaScript/TypeScript files found</h3>
                 <p>Ensure the directory contains .js, .jsx, .ts, or .tsx files.</p>
               </div>
-            ) : networkViewMode === '3d' ? (
-              <NetworkCanvas
-                snapshot={snapshot}
-                selectedNodeId={selectedNode?.id || null}
-                selectedEdgeId={selectedEdge?.id || null}
-                onSelectNode={handleSelectNode}
-                onSelectEdge={handleSelectEdge}
-                revealRequest={revealRequest}
-                fitViewTrigger={fitViewCounter}
-                resetViewTrigger={resetViewCounter}
-                insets={networkInsets}
-                onAnnounce={setAnnouncement}
-              />
             ) : (
-              <RelationshipCanvas
-                snapshot={snapshot}
-                focusNodeId={focusNodeId}
-                selectedNodeId={selectedNode?.id || null}
-                selectedEdgeId={selectedEdge?.id || null}
-                onSelectNode={handleSelectNode}
-                onSelectEdge={handleSelectEdge}
-                onRefocusNode={handleRefocusNode2D}
-                onBackFocus={handleBackFocus2D}
-                canGoBack={focusHistory.length > 0}
-                backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
-                fitViewTrigger={fitViewCounter}
-                resetViewTrigger={resetViewCounter}
-                initialViewport={independent2DViewport}
-                onViewportChange={setIndependent2DViewport}
-                missingFocusPath={missingFocusPath}
-                theme={theme}
-                onAnnounce={setAnnouncement}
-              />
+              <>
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: networkViewMode === '3d' ? 'block' : 'none',
+                  }}
+                  aria-hidden={networkViewMode !== '3d'}
+                >
+                  <NetworkCanvas
+                    snapshot={snapshot}
+                    selectedNodeId={selectedNode?.id || null}
+                    selectedEdgeId={selectedEdge?.id || null}
+                    onSelectNode={handleSelectNode}
+                    onSelectEdge={handleSelectEdge}
+                    revealRequest={revealRequest}
+                    fitViewTrigger={fitViewCounter}
+                    resetViewTrigger={resetViewCounter}
+                    keepGraphCentered={keepGraphCentered}
+                    onToggleCenterLock={() => setKeepGraphCentered((prev) => !prev)}
+                    isVisible={networkViewMode === '3d'}
+                    insets={networkInsets}
+                    onAnnounce={setAnnouncement}
+                  />
+                </div>
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: networkViewMode === '2d' ? 'block' : 'none',
+                  }}
+                  aria-hidden={networkViewMode !== '2d'}
+                >
+                  <RelationshipCanvas
+                    snapshot={snapshot}
+                    focusNodeId={focusNodeId}
+                    selectedNodeId={selectedNode?.id || null}
+                    selectedEdgeId={selectedEdge?.id || null}
+                    onSelectNode={handleSelectNode}
+                    onSelectEdge={handleSelectEdge}
+                    onRefocusNode={handleRefocusNode2D}
+                    onBackFocus={handleBackFocus2D}
+                    canGoBack={focusHistory.length > 0}
+                    backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
+                    fitViewTrigger={fitViewCounter}
+                    resetViewTrigger={resetViewCounter}
+                    initialViewport={independent2DViewport}
+                    onViewportChange={setIndependent2DViewport}
+                    missingFocusPath={missingFocusPath}
+                    theme={theme}
+                    onAnnounce={setAnnouncement}
+                  />
+                </div>
+              </>
             )}
           </div>
         ) : (

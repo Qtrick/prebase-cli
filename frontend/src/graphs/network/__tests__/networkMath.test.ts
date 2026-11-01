@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { layoutOrganic } from '../layout/organicLayout';
-import { projectPoint3D, computeNetworkVisualRadius } from '../render/networkRenderMath';
+import { layoutSphere } from '../layout/sphereLayout';
+import { minimumShellRadius } from '../layout/networkNormalization';
+import { projectPoint3D, computeNetworkVisualRadius, computeGraphCentroid } from '../render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from '../render/networkEdgeVisual';
 import { FileNode } from '../../../types/graph';
 
@@ -175,6 +177,63 @@ describe('Network Layout & Render Math', () => {
       scratchDbPos.z - dbPos.z
     );
     expect(scratchShift).toBeGreaterThan(15);
+  });
+
+  describe('Sphere Layout & Mathematical Precision', () => {
+    it('centers 3D centroid precisely at (0, 0, 0)', () => {
+      const nodes = Array.from({ length: 40 }, (_, i) => ({ id: `node-${i}` }));
+      const links = Array.from({ length: 39 }, (_, i) => ({
+        source: `node-${i}`,
+        target: `node-${i + 1}`,
+      }));
+
+      const positions = layoutSphere(nodes, links);
+      const centroid = computeGraphCentroid(positions.values());
+
+      expect(centroid.x).toBeCloseTo(0, 5);
+      expect(centroid.y).toBeCloseTo(0, 5);
+      expect(centroid.z).toBeCloseTo(0, 5);
+    });
+
+    it('distributes nodes along a Fibonacci spherical shell bounded by minimumShellRadius', () => {
+      const n = 50;
+      const collisionRadius = 24;
+      const minRadius = minimumShellRadius(n, collisionRadius * 2);
+
+      const nodes = Array.from({ length: n }, (_, i) => ({ id: `node-${i}` }));
+      const positions = layoutSphere(nodes, [], { collisionRadius });
+
+      expect(positions.size).toBe(n);
+      for (const pt of positions.values()) {
+        const dist = Math.hypot(pt.x, pt.y, pt.z);
+        // All nodes are distributed on or near the spherical shell
+        expect(dist).toBeGreaterThan(minRadius * 0.5);
+        expect(dist).toBeLessThan(minRadius * 2.5);
+      }
+    });
+
+    it('preserves existing positions strictly on incremental revision', () => {
+      const nodes1 = [
+        { id: 'app', val: 5 },
+        { id: 'lib', val: 3 },
+        { id: 'util', val: 2 },
+      ];
+      const links1 = [{ source: 'app', target: 'lib' }];
+      const pos1 = layoutSphere(nodes1, links1);
+
+      const nodes2 = [...nodes1, { id: 'new-module', val: 1 }];
+      const links2 = [...links1, { source: 'lib', target: 'new-module' }];
+      const pos2 = layoutSphere(nodes2, links2, undefined, pos1);
+
+      expect(pos2.size).toBe(4);
+      for (const node of nodes1) {
+        const p1 = pos1.get(node.id)!;
+        const p2 = pos2.get(node.id)!;
+        expect(p2.x).toBe(p1.x);
+        expect(p2.y).toBe(p1.y);
+        expect(p2.z).toBe(p1.z);
+      }
+    });
   });
 });
 

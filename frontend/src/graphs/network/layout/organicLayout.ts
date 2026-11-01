@@ -45,7 +45,7 @@ export function layoutOrganic(
   const maxR = sphereRadius * 0.82;
   const minDist = Math.max(16, sphereRadius / Math.max(6, Math.sqrt(n) * 1.25));
   const linkIdeal = minDist * 2.2;
-  const zSpread = sphereRadius * 0.15;
+  const zSpread = sphereRadius * 0.72;
 
   // Build adjacency to place new nodes near connected existing nodes
   const neighbors = new Map<string, string[]>();

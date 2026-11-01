@@ -324,6 +324,12 @@ body, html, #root {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
+.ctrl-btn.active {
+  background: rgba(45, 212, 191, 0.15);
+  color: #2dd4bf;
+  border-color: rgba(45, 212, 191, 0.4);
+}
+
 /* Search Box */
 .search-box-container {
   position: relative;
