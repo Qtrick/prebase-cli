@@ -23,6 +23,11 @@ interface InspectorProps {
   onClose: () => void;
   onViewFileHistory?: (filePath: string) => void;
   onRevealNode?: (nodeId: string) => void;
+  networkViewMode?: '3d' | '2d';
+  focusNodeId?: string | null;
+  onExplore2D?: (node: FileNode) => void;
+  onRefocus2D?: (nodeId: string) => void;
+  onSwitchTo3D?: () => void;
 }
 
 export const Inspector: React.FC<InspectorProps> = ({
@@ -33,6 +38,11 @@ export const Inspector: React.FC<InspectorProps> = ({
   onClose,
   onViewFileHistory,
   onRevealNode,
+  networkViewMode = '3d',
+  focusNodeId = null,
+  onExplore2D,
+  onRefocus2D,
+  onSwitchTo3D,
 }) => {
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
@@ -246,14 +256,47 @@ export const Inspector: React.FC<InspectorProps> = ({
 
         {/* Action Buttons */}
         <div className="inspector-action-buttons">
-          {selectedNode && onRevealNode && (
+          {selectedNode && onRevealNode && networkViewMode !== '2d' && (
             <button
               className="reveal-btn"
               onClick={() => onRevealNode(selectedNode.id)}
               title="Locate and center this file in the 3D graph"
             >
               <LocateFixed size={14} />
-              <span>Reveal in Graph</span>
+              <span>Reveal in 3D</span>
+            </button>
+          )}
+
+          {selectedNode && networkViewMode === '3d' && onExplore2D && (
+            <button
+              className="explore-2d-btn"
+              onClick={() => onExplore2D(selectedNode)}
+              title="Open focused 2D relationship neighborhood for this file"
+            >
+              <Compass size={14} />
+              <span>Explore Relationships in 2D</span>
+            </button>
+          )}
+
+          {selectedNode && networkViewMode === '2d' && onRefocus2D && selectedNode.id !== focusNodeId && (
+            <button
+              className="refocus-2d-btn"
+              onClick={() => onRefocus2D(selectedNode.id)}
+              title="Recenter 2D relationship neighborhood on this file"
+            >
+              <Compass size={14} />
+              <span>Focus relationships here</span>
+            </button>
+          )}
+
+          {selectedNode && networkViewMode === '2d' && onSwitchTo3D && (
+            <button
+              className="switch-3d-btn"
+              onClick={onSwitchTo3D}
+              title="Return to 3D Overview while preserving selection"
+            >
+              <Layers size={14} />
+              <span>View in 3D Overview</span>
             </button>
           )}
 
@@ -267,16 +310,6 @@ export const Inspector: React.FC<InspectorProps> = ({
               <span>View File History</span>
             </button>
           )}
-
-          <button
-            className="explore-2d-btn"
-            disabled
-            aria-disabled="true"
-            title="Contextual 2D relationship view is scheduled for Stage 2"
-          >
-            <Compass size={14} />
-            <span>Explore Relationships in 2D (Stage 2)</span>
-          </button>
         </div>
 
         {loading ? (

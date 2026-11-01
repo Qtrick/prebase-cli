@@ -57,6 +57,10 @@ pub enum Commands {
         /// View mode for the network graph (3d or 2d)
         #[arg(long, value_enum, default_value = "3d")]
         view: MapViewMode,
+
+        /// Relative file path to focus in the relationship view or 3D graph
+        #[arg(long, value_name = "RELATIVE_PATH")]
+        focus: Option<String>,
     },
     /// Inspect Git commit history, ancestry DAG, and changed files (Temporal Graph)
     History {
@@ -73,19 +77,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     let args = CliArgs::parse();
-
-    let is_history_command = matches!(args.command, Some(Commands::History { .. }));
-
-    if let Some(Commands::Map {
-        view: MapViewMode::TwoD,
-        ..
-    }) = &args.command
-    {
-        eprintln!(
-            "\x1b[1;31mError:\x1b[0m The 2D relationship view is not yet available in Stage 1 (scheduled for Stage 2). Please use '--view 3d' or run 'prebase map' to open the 3D Network Graph."
-        );
-        std::process::exit(1);
-    }
 
     let target_path = match &args.command {
         Some(Commands::Map { path: Some(p), .. }) => p.clone(),
@@ -137,12 +128,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    let default_view = if is_history_command { "temporal" } else { "3d" };
+    let (target_view, target_focus) = match &args.command {
+        Some(Commands::History { .. }) => ("temporal", None),
+        Some(Commands::Map { view, focus, .. }) => {
+            let v = match view {
+                MapViewMode::ThreeD => "3d",
+                MapViewMode::TwoD => "2d",
+            };
+            (v, focus.as_deref())
+        }
+        None => ("3d", None),
+    };
 
-    let url = format!(
+    let mut url = format!(
         "http://127.0.0.1:{}/?bootstrap={}&view={}",
-        server.port, server.bootstrap_token, default_view
+        server.port, server.bootstrap_token, target_view
     );
+    if let Some(focus_path) = target_focus {
+        url.push_str("&focus=");
+        url.push_str(&percent_encode_query_param(focus_path));
+    }
 
     println!(
         "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34m{}\x1b[0m",
@@ -221,6 +226,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Percent-encode query parameter values according to RFC 3986 (unreserved characters preserved).
+pub fn percent_encode_query_param(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,8 +251,9 @@ mod tests {
     fn test_cli_map_default_view_is_3d() {
         let args = CliArgs::try_parse_from(["prebase", "map"]).unwrap();
         match args.command {
-            Some(Commands::Map { view, .. }) => {
+            Some(Commands::Map { view, focus, .. }) => {
                 assert_eq!(view, MapViewMode::ThreeD);
+                assert_eq!(focus, None);
             }
             _ => panic!("Expected Commands::Map"),
         }
@@ -241,8 +263,9 @@ mod tests {
     fn test_cli_map_explicit_3d_view() {
         let args = CliArgs::try_parse_from(["prebase", "map", "--view", "3d"]).unwrap();
         match args.command {
-            Some(Commands::Map { view, .. }) => {
+            Some(Commands::Map { view, focus, .. }) => {
                 assert_eq!(view, MapViewMode::ThreeD);
+                assert_eq!(focus, None);
             }
             _ => panic!("Expected Commands::Map"),
         }
@@ -252,8 +275,43 @@ mod tests {
     fn test_cli_map_explicit_2d_view_parses() {
         let args = CliArgs::try_parse_from(["prebase", "map", "--view", "2d"]).unwrap();
         match args.command {
-            Some(Commands::Map { view, .. }) => {
+            Some(Commands::Map { view, focus, .. }) => {
                 assert_eq!(view, MapViewMode::TwoD);
+                assert_eq!(focus, None);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
+    fn test_cli_map_2d_with_focus_parses() {
+        let args =
+            CliArgs::try_parse_from(["prebase", "map", "--view", "2d", "--focus", "src/index.ts"])
+                .unwrap();
+        match args.command {
+            Some(Commands::Map { view, focus, .. }) => {
+                assert_eq!(view, MapViewMode::TwoD);
+                assert_eq!(focus, Some("src/index.ts".to_string()));
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
+    fn test_cli_map_focus_spaces_and_unicode() {
+        let args = CliArgs::try_parse_from([
+            "prebase",
+            "map",
+            "--view",
+            "2d",
+            "--focus",
+            "src/my folder/file 🚀.ts",
+        ])
+        .unwrap();
+        match args.command {
+            Some(Commands::Map { view, focus, .. }) => {
+                assert_eq!(view, MapViewMode::TwoD);
+                assert_eq!(focus, Some("src/my folder/file 🚀.ts".to_string()));
             }
             _ => panic!("Expected Commands::Map"),
         }
@@ -263,20 +321,45 @@ mod tests {
     fn test_cli_map_argument_ordering_with_path() {
         let args1 = CliArgs::try_parse_from(["prebase", "map", "src", "--view", "3d"]).unwrap();
         match args1.command {
-            Some(Commands::Map { path, view }) => {
+            Some(Commands::Map { path, view, focus }) => {
                 assert_eq!(path, Some(PathBuf::from("src")));
                 assert_eq!(view, MapViewMode::ThreeD);
+                assert_eq!(focus, None);
             }
             _ => panic!("Expected Commands::Map"),
         }
 
-        let args2 = CliArgs::try_parse_from(["prebase", "map", "--view", "3d", "src"]).unwrap();
+        let args2 = CliArgs::try_parse_from([
+            "prebase",
+            "map",
+            "--view",
+            "2d",
+            "--focus",
+            "src/app.ts",
+            "my-repo",
+        ])
+        .unwrap();
         match args2.command {
-            Some(Commands::Map { path, view }) => {
-                assert_eq!(path, Some(PathBuf::from("src")));
-                assert_eq!(view, MapViewMode::ThreeD);
+            Some(Commands::Map { path, view, focus }) => {
+                assert_eq!(path, Some(PathBuf::from("my-repo")));
+                assert_eq!(view, MapViewMode::TwoD);
+                assert_eq!(focus, Some("src/app.ts".to_string()));
             }
             _ => panic!("Expected Commands::Map"),
         }
+    }
+
+    #[test]
+    fn test_percent_encode_query_param() {
+        assert_eq!(percent_encode_query_param("src/index.ts"), "src%2Findex.ts");
+        assert_eq!(percent_encode_query_param("hello world"), "hello%20world");
+        assert_eq!(
+            percent_encode_query_param("component-name_v1.0~alpha"),
+            "component-name_v1.0~alpha"
+        );
+        assert_eq!(
+            percent_encode_query_param("path/with spaces/and+symbols?"),
+            "path%2Fwith%20spaces%2Fand%2Bsymbols%3F"
+        );
     }
 }

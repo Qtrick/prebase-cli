@@ -26,16 +26,22 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ## Features
 
-### 1. Interactive 3D Network Graph (Dependency Orb)
+### 1. Interactive Network Graphs (3D Overview & Contextual 2D Relationships)
 - **Rotatable 3D Dependency Orb**: Freely rotates in three dimensions around the volumetric center of the graph formation via primary background dragging.
+- **Contextual 2D Relationship Explorer**: Focused 3-to-5 column deterministic neighborhood analysis oriented strictly by dependency direction (`Dependents (Left) -> Focus File (Center) -> Dependencies (Right)`).
+- **Depth & Direction Controls**: Toggle between 1-hop direct neighbors and 2-hop extended context; filter by Dependents-only, Dependencies-only, or Both.
+- **Direction-Aware Bézier Routing**: Curved spline paths with explicit directional arrowheads, visual encoding of relationship kinds (solid = runtime import, dashed = type-only, dotted = dynamic import, violet = export), and vertical clearance for mutual dependency cycles.
+- **Seamless Dual-Mode Switching**: Instant transitions via header switcher (`3D Overview | 2D Relationships`) or non-conflicting `V` key shortcut, preserving active selection and independent viewport cameras.
+- **Focus History Navigation**: Double-click or press Enter on any neighbor card to refocus the 2D neighborhood; navigate back through your exploration trail with the in-canvas `← Back` button.
+- **Safety Caps & Omission Stats**: Caps visible nodes (120) and edges (240) deterministically to ensure fast compute times on huge repositories, displaying truthful omission counts.
 - **Intuitive Camera Navigation**: Shift-drag or middle-click pans; wheel or trackpad delivers smooth, continuous cursor-anchored zoom.
 - **Decoupled Selection & Inspection**: Selecting a node or clicking search results updates selection, highlights incident relationships, and inspects metadata with 0ms camera jump.
-- **Visibility-Aware Reveal**: Explicit "Reveal in Graph" action in the Inspector smoothly centers offscreen nodes while strictly preserving camera orientation.
+- **Visibility-Aware Reveal**: Explicit "Reveal in 3D" action in the Inspector smoothly centers offscreen nodes while strictly preserving camera orientation.
 - **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, and `.tsx`.
 - **Module Resolution**: Resolves relative paths, extensionless imports, directory indexes (`index.ts`), and `tsconfig.json` path mappings / baseUrl aliases.
 - **Organic 3D Visual Layout**: Bounded, deterministic 3D force-directed layout highlighting entry points, hubs, and isolated components.
-- **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, and source code previews.
-- **Accessible & Motion-Aware**: Full keyboard navigation (Arrow keys rotate/pan, `+`/`-` zoom, `f` fit, `r` reset, `Escape` clear) and respecting `prefers-reduced-motion`.
+- **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, source code previews, and switch to 2D relationship explorer.
+- **Accessible & Motion-Aware**: Full keyboard navigation (Arrow keys rotate/pan in 3D and navigate cards in 2D, `+`/`-`/`0` zoom, `f` fit, `r` reset, `Escape` clear) and respecting `prefers-reduced-motion`.
 
 ### 2. Git-Powered Temporal Graph
 - **Commit Ancestry DAG**: Visualizes repository commit history, branch tracks, and merge arcs with deterministic topological lane allocation.
@@ -90,6 +96,12 @@ Navigate to any JavaScript or TypeScript repository and execute:
 
 # Explicitly launch the 3D Network Graph view
 ./target/release/prebase map --view 3d
+
+# Launch directly into the Contextual 2D Relationship Explorer
+./target/release/prebase map --view 2d
+
+# Launch directly in 2D mode focused on a specific file
+./target/release/prebase map --view 2d --focus src/components/Card.tsx
 
 # Open directly into the Temporal Graph (Git history)
 ./target/release/prebase history

@@ -250,6 +250,53 @@ body, html, #root {
   pointer-events: auto;
 }
 
+.network-mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(21, 27, 43, 0.85);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+}
+
+[data-theme="light"] .network-mode-switcher {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.mode-btn:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 1px;
+}
+
+.mode-btn.active {
+  background: var(--accent-teal);
+  color: #0d1117;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
 .view-controls {
   display: flex;
   gap: 8px;
@@ -859,21 +906,49 @@ body, html, #root {
   border-color: var(--accent-teal);
 }
 
-.explore-2d-btn {
+.explore-2d-btn,
+.refocus-2d-btn,
+.switch-3d-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   width: 100%;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px dashed rgba(255, 255, 255, 0.15);
-  color: var(--text-muted);
+  background: rgba(45, 212, 191, 0.12);
+  border: 1px solid rgba(45, 212, 191, 0.3);
+  color: var(--accent-teal);
   font-size: 12px;
   font-weight: 500;
   border-radius: 6px;
-  cursor: not-allowed;
-  opacity: 0.6;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.explore-2d-btn:hover,
+.refocus-2d-btn:hover {
+  background: rgba(45, 212, 191, 0.22);
+  border-color: var(--accent-teal);
+  box-shadow: 0 0 10px rgba(45, 212, 191, 0.2);
+}
+
+.switch-3d-btn {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.3);
+  color: var(--accent-sky);
+}
+
+.switch-3d-btn:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: var(--accent-sky);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+}
+
+.explore-2d-btn:focus-visible,
+.refocus-2d-btn:focus-visible,
+.switch-3d-btn:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 1px;
 }
 
 .search-reveal-action {

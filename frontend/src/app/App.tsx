@@ -2,8 +2,18 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth, ViewportInsets } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession } from '../transport/api';
-import { resolveWatcherStatusInfo, reconcileSelectedNodeOnSnapshot } from '../transport/statusInfo';
 import { NetworkCanvas, RevealRequest } from '../graphs/network/NetworkCanvas';
+import { RelationshipCanvas, Viewport2D } from '../graphs/relationship/RelationshipCanvas';
+import {
+  resolveWatcherStatusInfo,
+  reconcileSelectedNodeOnSnapshot,
+} from '../transport/statusInfo';
+import {
+  reconcileFocusNodeOnSnapshot,
+  pushFocusHistory,
+  popFocusHistory,
+  resolveBackTargetName,
+} from '../graphs/relationship/relationshipHistory';
 import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
 import { Inspector } from '../inspector/Inspector';
@@ -24,17 +34,30 @@ import {
   Sun,
   Moon,
   ArrowDown,
+  Compass,
 } from 'lucide-react';
 import './App.css';
 
 export const App: React.FC = () => {
-  // Read initial view from URL (?view=temporal or ?view=network)
-  const initialView = (() => {
+  // Read initial view and focus from URL (?view=temporal | ?view=2d | ?view=3d, ?focus=<path>)
+  const initialParams = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
-    return params.get('view') === 'temporal' ? 'temporal' : 'network';
-  })();
+    const view = params.get('view');
+    const focus = params.get('focus');
+    return {
+      activeTab: view === 'temporal' ? ('temporal' as const) : ('network' as const),
+      networkViewMode: view === '2d' ? ('2d' as const) : ('3d' as const),
+      initialFocusPath: focus ? decodeURIComponent(focus) : null,
+    };
+  }, []);
 
-  const [activeTab, setActiveTab] = useState<'network' | 'temporal'>(initialView);
+  const [activeTab, setActiveTab] = useState<'network' | 'temporal'>(initialParams.activeTab);
+  const [networkViewMode, setNetworkViewMode] = useState<'3d' | '2d'>(initialParams.networkViewMode);
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const [focusHistory, setFocusHistory] = useState<string[]>([]);
+  const [missingFocusPath, setMissingFocusPath] = useState<string | null>(null);
+  const [independent2DViewport, setIndependent2DViewport] = useState<Viewport2D>({ panX: 0, panY: 0, zoom: 1.0 });
+  const focusResolvedRef = useRef(false);
 
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -61,6 +84,8 @@ export const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [selectedNode, setSelectedNode] = useState<FileNode | null>(null);
+  const selectedNodeRef = useRef(selectedNode);
+  selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
   const [announcement, setAnnouncement] = useState<string>('');
@@ -142,6 +167,26 @@ export const App: React.FC = () => {
             latestAppliedRevisionRef.current = snap.revision;
             setSnapshot(snap);
             setLiveRevision(snap.revision);
+
+            // Resolve initial focus target from CLI or URL parameters
+            if (initialParams.initialFocusPath && !focusResolvedRef.current) {
+              focusResolvedRef.current = true;
+              const targetPath = initialParams.initialFocusPath.trim();
+              const matched = snap.nodes.find(
+                (n) =>
+                  n.relative_path === targetPath ||
+                  n.id === targetPath ||
+                  n.filename === targetPath ||
+                  n.relative_path.toLowerCase() === targetPath.toLowerCase()
+              );
+              if (matched) {
+                setSelectedNode(matched);
+                setFocusNodeId(matched.id);
+                setMissingFocusPath(null);
+              } else {
+                setMissingFocusPath(targetPath);
+              }
+            }
           }
         } else if (st.indexing_status === 'Failed') {
           setError('Repository analysis failed. Please check CLI terminal output.');
@@ -157,7 +202,7 @@ export const App: React.FC = () => {
     // Initialize session from bootstrap token first, then start fetching
     initSession().then(() => {
       checkStatus();
-      api.getGitStatus().then(setGitStatus).catch(() => {});
+      api.getGitStatus().then(setGitStatus).catch(() => { });
     });
 
     return () => clearTimeout(timer);
@@ -245,6 +290,12 @@ export const App: React.FC = () => {
 
         // Re-sync selected node if still exists in the new snapshot
         setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
+        // Re-sync 2D focus node if still exists; do not auto-select random node on deletion
+        setFocusNodeId((prev) => {
+          const { nextFocusNodeId, missingNotice } = reconcileFocusNodeOnSnapshot(prev, newSnap.nodes);
+          if (missingNotice) setMissingFocusPath(missingNotice);
+          return nextFocusNodeId;
+        });
       }
     };
 
@@ -257,10 +308,10 @@ export const App: React.FC = () => {
             api
               .getNetwork()
               .then((newSnap) => applySnapshot(newSnap, changed_files))
-              .catch(() => {});
+              .catch(() => { });
           }
         } else if (event.type === 'git.updated') {
-          api.getGitStatus().then(setGitStatus).catch(() => {});
+          api.getGitStatus().then(setGitStatus).catch(() => { });
           if (activeTabRef.current === 'temporal') {
             loadCommitsRef.current(temporalFilterPathRef.current);
           }
@@ -271,9 +322,9 @@ export const App: React.FC = () => {
               api
                 .getNetwork()
                 .then((newSnap) => applySnapshot(newSnap, ['*']))
-                .catch(() => {});
+                .catch(() => { });
             }
-          }).catch(() => {});
+          }).catch(() => { });
         }
       },
       (status) => {
@@ -286,9 +337,9 @@ export const App: React.FC = () => {
               api
                 .getNetwork()
                 .then((newSnap) => applySnapshot(newSnap, ['*']))
-                .catch(() => {});
+                .catch(() => { });
             }
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }
     );
@@ -303,22 +354,31 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
       const isInput = targetTag === 'input' || targetTag === 'textarea';
+      if (isInput) return;
 
       if (e.key === 'Escape') {
-        if (!isInput) {
-          setSelectedNode(null);
-          setSelectedEdge(null);
-          setSelectedCommit(null);
-          setRevealRequest(null);
-        }
+        setSelectedNode(null);
+        setSelectedEdge(null);
+        setSelectedCommit(null);
+        setRevealRequest(null);
         return;
       }
 
-      if (!isInput) {
-        if (e.key === '1') {
-          setActiveTab('network');
-        } else if (e.key === '2') {
-          setActiveTab('temporal');
+      if (e.key === '1') {
+        setActiveTab('network');
+      } else if (e.key === '2') {
+        setActiveTab('temporal');
+      } else if (e.key === 'v' || e.key === 'V') {
+        if (activeTabRef.current === 'network') {
+          setNetworkViewMode((prev) => {
+            const next = prev === '3d' ? '2d' : '3d';
+            const curSelected = selectedNodeRef.current;
+            if (next === '2d' && curSelected) {
+              setFocusNodeId(curSelected.id);
+              setMissingFocusPath(null);
+            }
+            return next;
+          });
         }
       }
     };
@@ -326,6 +386,75 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // Mode switching handlers
+  const handleSwitchNetworkMode = useCallback(
+    (mode: '3d' | '2d') => {
+      if (mode === '2d') {
+        if (selectedNode) {
+          setFocusNodeId(selectedNode.id);
+          setMissingFocusPath(null);
+        }
+      }
+      setNetworkViewMode(mode);
+    },
+    [selectedNode]
+  );
+
+  const handleRefocusNode2D = useCallback(
+    (newNodeId: string) => {
+      setFocusHistory((prev) => pushFocusHistory(prev, focusNodeId, newNodeId));
+      setFocusNodeId(newNodeId);
+      setMissingFocusPath(null);
+      const node = snapshot?.nodes.find((n) => n.id === newNodeId);
+      if (node) {
+        setSelectedNode(node);
+      }
+    },
+    [focusNodeId, snapshot]
+  );
+
+  const handleBackFocus2D = useCallback(() => {
+    const { nextHistory, prevFocusId } = popFocusHistory(focusHistory);
+    if (!prevFocusId) return;
+    setFocusHistory(nextHistory);
+    setFocusNodeId(prevFocusId);
+    setMissingFocusPath(null);
+    const node = snapshot?.nodes.find((n) => n.id === prevFocusId);
+    if (node) {
+      setSelectedNode(node);
+    }
+  }, [focusHistory, snapshot]);
+
+  // URL synchronization: updates view and focus parameters using history.replaceState
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (activeTab === 'temporal') {
+      params.set('view', 'temporal');
+      params.delete('focus');
+    } else {
+      params.set('view', networkViewMode);
+      if (networkViewMode === '2d') {
+        const focused = snapshot?.nodes.find((n) => n.id === focusNodeId);
+        if (focused) {
+          params.set('focus', focused.relative_path);
+        } else if (missingFocusPath) {
+          params.set('focus', missingFocusPath);
+        } else {
+          params.delete('focus');
+        }
+      } else {
+        if (selectedNode) {
+          params.set('focus', selectedNode.relative_path);
+        } else {
+          params.delete('focus');
+        }
+      }
+    }
+    const newSearch = params.toString();
+    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+    window.history.replaceState({}, '', cleanUrl);
+  }, [activeTab, networkViewMode, focusNodeId, selectedNode, snapshot, missingFocusPath]);
 
   // Selection handlers (Decoupled from camera focus!)
   const handleSelectNode = useCallback(
@@ -463,9 +592,9 @@ export const App: React.FC = () => {
             return (
               <div
                 className="live-watcher-badge"
+                title={statusInfo.text}
                 role="status"
                 aria-label={statusInfo.text}
-                title={statusInfo.text}
               >
                 <Radio
                   size={12}
@@ -497,7 +626,13 @@ export const App: React.FC = () => {
           {activeTab === 'network' ? (
             <SearchBox
               files={snapshot?.nodes || []}
-              onSelectNode={(node) => handleSelectNode(node)}
+              onSelectNode={(node, options) => {
+                handleSelectNode(node, options);
+                if (networkViewMode === '2d' && node) {
+                  setFocusNodeId(node.id);
+                  setMissingFocusPath(null);
+                }
+              }}
             />
           ) : (
             <div className="temporal-header-info">
@@ -511,11 +646,36 @@ export const App: React.FC = () => {
             </div>
           )}
 
+          {activeTab === 'network' && (
+            <div className="network-mode-switcher" role="radiogroup" aria-label="Network View Mode">
+              <button
+                className={`mode-btn ${networkViewMode === '3d' ? 'active' : ''}`}
+                onClick={() => handleSwitchNetworkMode('3d')}
+                title="3D Repository Overview (Shortcut: V)"
+                role="radio"
+                aria-checked={networkViewMode === '3d'}
+              >
+                <Layers size={14} />
+                <span>3D Overview</span>
+              </button>
+              <button
+                className={`mode-btn ${networkViewMode === '2d' ? 'active' : ''}`}
+                onClick={() => handleSwitchNetworkMode('2d')}
+                title="Contextual 2D Relationship Explorer (Shortcut: V)"
+                role="radio"
+                aria-checked={networkViewMode === '2d'}
+              >
+                <Compass size={14} />
+                <span>2D Relationships</span>
+              </button>
+            </div>
+          )}
+
           <div className="view-controls">
             <button
               className="ctrl-btn"
               onClick={() => setFitViewCounter((c) => c + 1)}
-              title="Fit View to All Nodes"
+              title={networkViewMode === '2d' ? 'Fit 2D Relationship View' : 'Fit View to All Nodes'}
             >
               <Maximize2 size={15} />
               <span>Fit View</span>
@@ -525,7 +685,7 @@ export const App: React.FC = () => {
               onClick={() => {
                 setResetViewCounter((c) => c + 1);
               }}
-              title="Reset Camera to Standard 3D View"
+              title={networkViewMode === '2d' ? 'Reset 2D Camera' : 'Reset Camera to Standard 3D View'}
             >
               <RotateCcw size={15} />
               <span>Reset</span>
@@ -581,7 +741,7 @@ export const App: React.FC = () => {
                 <h3>No supported JavaScript/TypeScript files found</h3>
                 <p>Ensure the directory contains .js, .jsx, .ts, or .tsx files.</p>
               </div>
-            ) : (
+            ) : networkViewMode === '3d' ? (
               <NetworkCanvas
                 snapshot={snapshot}
                 selectedNodeId={selectedNode?.id || null}
@@ -592,6 +752,26 @@ export const App: React.FC = () => {
                 fitViewTrigger={fitViewCounter}
                 resetViewTrigger={resetViewCounter}
                 insets={networkInsets}
+                onAnnounce={setAnnouncement}
+              />
+            ) : (
+              <RelationshipCanvas
+                snapshot={snapshot}
+                focusNodeId={focusNodeId}
+                selectedNodeId={selectedNode?.id || null}
+                selectedEdgeId={selectedEdge?.id || null}
+                onSelectNode={handleSelectNode}
+                onSelectEdge={handleSelectEdge}
+                onRefocusNode={handleRefocusNode2D}
+                onBackFocus={handleBackFocus2D}
+                canGoBack={focusHistory.length > 0}
+                backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
+                fitViewTrigger={fitViewCounter}
+                resetViewTrigger={resetViewCounter}
+                initialViewport={independent2DViewport}
+                onViewportChange={setIndependent2DViewport}
+                missingFocusPath={missingFocusPath}
+                theme={theme}
                 onAnnounce={setAnnouncement}
               />
             )}
@@ -680,6 +860,15 @@ export const App: React.FC = () => {
           }}
           onViewFileHistory={handleViewFileHistory}
           onRevealNode={handleExplicitRevealNode}
+          networkViewMode={networkViewMode}
+          focusNodeId={focusNodeId}
+          onExplore2D={(node) => {
+            handleSwitchNetworkMode('2d');
+            setFocusNodeId(node.id);
+            setSelectedNode(node);
+          }}
+          onRefocus2D={handleRefocusNode2D}
+          onSwitchTo3D={() => handleSwitchNetworkMode('3d')}
         />
       )}
 
