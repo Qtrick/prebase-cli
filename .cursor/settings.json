@@ -1,0 +1,15 @@
+{
+  "java.import.exclusions": [
+    "**/node_modules/**",
+    "**/.metadata/**",
+    "**/archetype/**",
+    "**/META-INF/maven/**",
+    "**/tests/fixtures/**"
+  ],
+  "java.project.resourceFilters": [
+    "node_modules",
+    ".git",
+    "tests/fixtures"
+  ]
+}
+

@@ -78,7 +78,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   isVisible = true,
   insets,
   onAnnounce,
-}) => {
+}): React.ReactElement => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -457,11 +457,18 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         const camera = cameraRef.current;
 
         // 1. Authoritative projection pass
-        const projData = projectGraph(snapshot.nodes, positions, centroidRef.current, camera, {
+        const projectOptions = {
           entryNodeId: snapshot.nodes[0]?.id,
           selectedNodeId,
           hoveredNodeId,
-        });
+        };
+        const projData = projectGraph(
+          snapshot.nodes,
+          positionsRef.current,
+          centroidRef.current,
+          camera,
+          projectOptions
+        );
         projectedDataRef.current = projData;
 
         const activeHighlightId = selectedNodeId || hoveredNodeId;
@@ -631,7 +638,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   // Trigger RAF whenever external dependencies change
   useEffect(() => {
     requestRender();
-  }, [snapshot, selectedNodeId, selectedEdgeId, hoveredNodeId, requestRender]);
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, requestRender]);
 
   // Clean up RAF on unmount
   useEffect(() => {
