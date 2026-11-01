@@ -96,3 +96,18 @@ export interface Transform {
   k: number;
 }
 
+export interface NetworkCamera {
+  yaw: number;
+  pitch: number;
+  panX: number;
+  panY: number;
+  zoom: number;
+}
+
+export interface ViewportInsets {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+

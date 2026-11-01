@@ -11,6 +11,8 @@ import {
   AlertTriangle,
   ExternalLink,
   Clock,
+  LocateFixed,
+  Compass,
 } from 'lucide-react';
 
 interface InspectorProps {
@@ -20,6 +22,7 @@ interface InspectorProps {
   onSelectNode: (node: FileNode) => void;
   onClose: () => void;
   onViewFileHistory?: (filePath: string) => void;
+  onRevealNode?: (nodeId: string) => void;
 }
 
 export const Inspector: React.FC<InspectorProps> = ({
@@ -29,6 +32,7 @@ export const Inspector: React.FC<InspectorProps> = ({
   onSelectNode,
   onClose,
   onViewFileHistory,
+  onRevealNode,
 }) => {
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
@@ -229,17 +233,51 @@ export const Inspector: React.FC<InspectorProps> = ({
           <span className="tag status-tag">{selectedNode?.analysis_status}</span>
         </div>
 
-        {/* View File History Button */}
-        {selectedNode && onViewFileHistory && (
+        <div className="stats-grid" style={{ marginTop: '10px' }}>
+          <div className="stat-card">
+            <span className="stat-label">Dependencies</span>
+            <span className="stat-value">{selectedNode?.direct_dependency_count ?? 0}</span>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">Dependents</span>
+            <span className="stat-value">{selectedNode?.direct_dependent_count ?? 0}</span>
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="inspector-action-buttons">
+          {selectedNode && onRevealNode && (
+            <button
+              className="reveal-btn"
+              onClick={() => onRevealNode(selectedNode.id)}
+              title="Locate and center this file in the 3D graph"
+            >
+              <LocateFixed size={14} />
+              <span>Reveal in Graph</span>
+            </button>
+          )}
+
+          {selectedNode && onViewFileHistory && (
+            <button
+              className="view-history-btn"
+              onClick={() => onViewFileHistory(selectedNode.relative_path)}
+              title="Inspect historical Git commits for this file"
+            >
+              <Clock size={14} />
+              <span>View File History</span>
+            </button>
+          )}
+
           <button
-            className="view-history-btn"
-            onClick={() => onViewFileHistory(selectedNode.relative_path)}
-            title="Inspect historical Git commits for this file"
+            className="explore-2d-btn"
+            disabled
+            aria-disabled="true"
+            title="Contextual 2D relationship view is scheduled for Stage 2"
           >
-            <Clock size={14} />
-            <span>View File History</span>
+            <Compass size={14} />
+            <span>Explore Relationships in 2D (Stage 2)</span>
           </button>
-        )}
+        </div>
 
         {loading ? (
           <div className="loading-state">Analyzing relationships...</div>

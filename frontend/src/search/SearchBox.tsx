@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FileNode } from '../types/graph';
 import { getFileTypeColor } from '../graphs/network/fileTypeColors';
-import { Search, X } from 'lucide-react';
+import { Search, X, LocateFixed } from 'lucide-react';
 
 interface SearchBoxProps {
   files: FileNode[];
-  onSelectNode: (node: FileNode) => void;
+  onSelectNode: (node: FileNode, options?: { reveal?: boolean }) => void;
 }
 
 export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => {
@@ -63,8 +63,8 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleSelect = (node: FileNode) => {
-    onSelectNode(node);
+  const handleSelect = (node: FileNode, options?: { reveal?: boolean }) => {
+    onSelectNode(node, options);
     setIsOpen(false);
     setQuery('');
   };
@@ -81,7 +81,7 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (results[selectedIndex]) {
-        handleSelect(results[selectedIndex]);
+        handleSelect(results[selectedIndex], { reveal: true });
       }
     }
   };
@@ -89,13 +89,18 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
   return (
     <div ref={containerRef} className="search-box-container">
       <div className="search-input-wrap">
-        <Search size={15} className="search-icon" />
+        <Search size={15} className="search-icon" aria-hidden="true" />
         <input
           ref={inputRef}
           type="text"
           className="search-input"
           placeholder="Search files... (Press / to focus)"
           value={query}
+          role="combobox"
+          aria-expanded={isOpen && results.length > 0}
+          aria-autocomplete="list"
+          aria-controls="search-dropdown-list"
+          aria-label="Search files"
           onChange={(e) => {
             setQuery(e.target.value);
             setIsOpen(true);
@@ -106,26 +111,29 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
         {query && (
           <button
             className="clear-search-btn"
+            aria-label="Clear search"
             onClick={() => {
               setQuery('');
               setIsOpen(false);
             }}
           >
-            <X size={14} />
+            <X size={14} aria-hidden="true" />
           </button>
         )}
       </div>
 
       {isOpen && results.length > 0 && (
-        <ul className="search-dropdown">
+        <ul id="search-dropdown-list" className="search-dropdown" role="listbox" aria-label="Search suggestions">
           {results.map((node, index) => {
             const isSelected = index === selectedIndex;
             return (
               <li
                 key={node.id}
+                role="option"
+                aria-selected={isSelected}
                 className={`search-item ${isSelected ? 'active' : ''}`}
                 onMouseEnter={() => setSelectedIndex(index)}
-                onClick={() => handleSelect(node)}
+                onClick={() => handleSelect(node, { reveal: true })}
               >
                 <div
                   className="search-color-dot"
@@ -138,6 +146,17 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
                 <span className="search-item-degree">
                   {(node.direct_dependency_count || 0) + (node.direct_dependent_count || 0)} links
                 </span>
+                <button
+                  type="button"
+                  className="search-reveal-action"
+                  title={`Focus ${node.filename} in 3D`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelect(node, { reveal: true });
+                  }}
+                >
+                  <LocateFixed size={13} />
+                </button>
               </li>
             );
           })}

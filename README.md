@@ -26,11 +26,16 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ## Features
 
-### 1. Interactive Network Graph
+### 1. Interactive 3D Network Graph (Dependency Orb)
+- **Rotatable 3D Dependency Orb**: Freely rotates in three dimensions around the volumetric center of the graph formation via primary background dragging.
+- **Intuitive Camera Navigation**: Shift-drag or middle-click pans; wheel or trackpad delivers smooth, continuous cursor-anchored zoom.
+- **Decoupled Selection & Inspection**: Selecting a node or clicking search results updates selection, highlights incident relationships, and inspects metadata with 0ms camera jump.
+- **Visibility-Aware Reveal**: Explicit "Reveal in Graph" action in the Inspector smoothly centers offscreen nodes while strictly preserving camera orientation.
 - **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, and `.tsx`.
 - **Module Resolution**: Resolves relative paths, extensionless imports, directory indexes (`index.ts`), and `tsconfig.json` path mappings / baseUrl aliases.
-- **Organic Visual Layout**: 2.5D/3D organic force-directed projection highlighting entry points, hubs, and isolated components.
+- **Organic 3D Visual Layout**: Bounded, deterministic 3D force-directed layout highlighting entry points, hubs, and isolated components.
 - **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, and source code previews.
+- **Accessible & Motion-Aware**: Full keyboard navigation (Arrow keys rotate/pan, `+`/`-` zoom, `f` fit, `r` reset, `Escape` clear) and respecting `prefers-reduced-motion`.
 
 ### 2. Git-Powered Temporal Graph
 - **Commit Ancestry DAG**: Visualizes repository commit history, branch tracks, and merge arcs with deterministic topological lane allocation.
@@ -80,18 +85,23 @@ cd prebase-cli
 Navigate to any JavaScript or TypeScript repository and execute:
 
 ```bash
-# Analyze current directory and open interactive Network Graph
-./target/release/prebase
+# Analyze current directory and open interactive 3D Network Graph (default)
+./target/release/prebase map
+
+# Explicitly launch the 3D Network Graph view
+./target/release/prebase map --view 3d
 
 # Open directly into the Temporal Graph (Git history)
 ./target/release/prebase history
 
 # Analyze an explicit path without automatically opening the browser
-./target/release/prebase /path/to/project --no-open
+./target/release/prebase map /path/to/project --no-open
 
 # Bind to a custom port and disable filesystem watching
-./target/release/prebase --port 8080 --no-watch
+./target/release/prebase map --port 8080 --no-watch
 ```
+
+> **Note on View Modes**: `prebase map --view 3d` launches the rotatable 3D Network Graph. The `--view 2d` relationship view is scheduled for Stage 2. Passing `--view 2d` returns a clear informational terminal message with exit code 1.
 
 ---
 

@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth } from '../types/graph';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth, ViewportInsets } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession } from '../transport/api';
-import { NetworkCanvas } from '../graphs/network/NetworkCanvas';
+import { resolveWatcherStatusInfo, reconcileSelectedNodeOnSnapshot } from '../transport/statusInfo';
+import { NetworkCanvas, RevealRequest } from '../graphs/network/NetworkCanvas';
 import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
 import { Inspector } from '../inspector/Inspector';
@@ -61,7 +62,8 @@ export const App: React.FC = () => {
 
   const [selectedNode, setSelectedNode] = useState<FileNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
-  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
+  const [announcement, setAnnouncement] = useState<string>('');
 
   // Temporal state & Anchor Pagination
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
@@ -79,12 +81,42 @@ export const App: React.FC = () => {
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
   const [watcherHealth, setWatcherHealth] = useState<WatcherHealth>('active');
   const [sseState, setSseState] = useState<'connected' | 'reconnecting' | 'error'>('connected');
+  const [isDelayedReconnecting, setIsDelayedReconnecting] = useState(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const latestAppliedRevisionRef = useRef<number>(0);
 
   // View triggers (true bounding box fit view & reset view)
   const [fitViewCounter, setFitViewCounter] = useState(0);
   const [resetViewCounter, setResetViewCounter] = useState(0);
+
+  // Viewport insets (header floating at top 64px, margins)
+  const networkInsets = useMemo<ViewportInsets>(() => ({
+    top: 64,
+    bottom: 20,
+    left: 20,
+    right: 20,
+  }), []);
+
+  // SSE Reconnecting Grace Period (2.0s delay prevents flashing "Reconnecting..." on brief blips)
+  useEffect(() => {
+    if (sseState === 'reconnecting') {
+      reconnectTimerRef.current = setTimeout(() => {
+        setIsDelayedReconnecting(true);
+      }, 2000);
+    } else {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      setIsDelayedReconnecting(false);
+    }
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+    };
+  }, [sseState]);
 
   // 1. Initial session bootstrap & repository info
   useEffect(() => {
@@ -212,10 +244,7 @@ export const App: React.FC = () => {
         setTimeout(() => setLiveNotice(null), 3500);
 
         // Re-sync selected node if still exists in the new snapshot
-        setSelectedNode((prev) => {
-          if (!prev) return null;
-          return newSnap.nodes.find((n) => n.id === prev.id) || null;
-        });
+        setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
       }
     };
 
@@ -276,10 +305,12 @@ export const App: React.FC = () => {
       const isInput = targetTag === 'input' || targetTag === 'textarea';
 
       if (e.key === 'Escape') {
-        setSelectedNode(null);
-        setSelectedEdge(null);
-        setSelectedCommit(null);
-        setFocusedNodeId(null);
+        if (!isInput) {
+          setSelectedNode(null);
+          setSelectedEdge(null);
+          setSelectedCommit(null);
+          setRevealRequest(null);
+        }
         return;
       }
 
@@ -296,13 +327,28 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Selection handlers
-  const handleSelectNode = useCallback((node: FileNode | null) => {
-    setSelectedNode(node);
-    setSelectedEdge(null);
-    if (node) {
-      setFocusedNodeId(node.id);
-    }
+  // Selection handlers (Decoupled from camera focus!)
+  const handleSelectNode = useCallback(
+    (node: FileNode | null, options?: { reveal?: boolean }) => {
+      setSelectedNode(node);
+      setSelectedEdge(null);
+      if (node && options?.reveal) {
+        setRevealRequest({
+          nodeId: node.id,
+          timestamp: performance.now(),
+          onlyIfOutside: true,
+        });
+      }
+    },
+    []
+  );
+
+  const handleExplicitRevealNode = useCallback((nodeId: string) => {
+    setRevealRequest({
+      nodeId,
+      timestamp: performance.now(),
+      onlyIfOutside: false,
+    });
   }, []);
 
   const handleSelectEdge = useCallback((edge: DependencyEdge | null) => {
@@ -324,7 +370,11 @@ export const App: React.FC = () => {
     setSelectedCommit(null);
     setSelectedNode(node);
     setSelectedEdge(null);
-    setFocusedNodeId(node.id);
+    setRevealRequest({
+      nodeId: node.id,
+      timestamp: performance.now(),
+      onlyIfOutside: false,
+    });
   }, []);
 
   return (
@@ -401,34 +451,31 @@ export const App: React.FC = () => {
             )}
           </div>
 
-          <div className="live-watcher-badge">
-            <Radio
-              size={12}
-              className={watcherHealth === 'active' && sseState === 'connected' ? 'pulse-icon' : ''}
-              color={
-                watcherHealth === 'disabled'
-                  ? '#64748b'
-                  : watcherHealth === 'degraded'
-                  ? '#f59e0b'
-                  : sseState === 'connected'
-                  ? '#2dd4bf'
-                  : sseState === 'reconnecting'
-                  ? '#f59e0b'
-                  : '#ef4444'
-              }
-            />
-            <span>
-              {watcherHealth === 'disabled'
-                ? 'Watcher Disabled (--no-watch)'
-                : watcherHealth === 'degraded'
-                ? 'Watcher Degraded'
-                : sseState === 'connected'
-                ? 'Live Watcher Active'
-                : sseState === 'reconnecting'
-                ? 'Reconnecting...'
-                : 'Watcher Disconnected'}
-            </span>
-          </div>
+          {/* Live Watcher & SSE Stream Status (Decoupled & Grace Period aware) */}
+          {(() => {
+            const statusInfo = resolveWatcherStatusInfo(
+              watcherHealth,
+              sseState,
+              liveRevision,
+              isDelayedReconnecting
+            );
+
+            return (
+              <div
+                className="live-watcher-badge"
+                role="status"
+                aria-label={statusInfo.text}
+                title={statusInfo.text}
+              >
+                <Radio
+                  size={12}
+                  className={statusInfo.pulse ? 'pulse-icon' : ''}
+                  color={statusInfo.color}
+                />
+                <span>{statusInfo.text}</span>
+              </div>
+            );
+          })()}
 
           {snapshot && (
             <div className="stats-summary">
@@ -476,13 +523,9 @@ export const App: React.FC = () => {
             <button
               className="ctrl-btn"
               onClick={() => {
-                setSelectedNode(null);
-                setSelectedEdge(null);
-                setSelectedCommit(null);
-                setFocusedNodeId(null);
                 setResetViewCounter((c) => c + 1);
               }}
-              title="Reset Camera View"
+              title="Reset Camera to Standard 3D View"
             >
               <RotateCcw size={15} />
               <span>Reset</span>
@@ -545,9 +588,11 @@ export const App: React.FC = () => {
                 selectedEdgeId={selectedEdge?.id || null}
                 onSelectNode={handleSelectNode}
                 onSelectEdge={handleSelectEdge}
-                focusedNodeId={focusedNodeId}
+                revealRequest={revealRequest}
                 fitViewTrigger={fitViewCounter}
                 resetViewTrigger={resetViewCounter}
+                insets={networkInsets}
+                onAnnounce={setAnnouncement}
               />
             )}
           </div>
@@ -634,8 +679,14 @@ export const App: React.FC = () => {
             setSelectedEdge(null);
           }}
           onViewFileHistory={handleViewFileHistory}
+          onRevealNode={handleExplicitRevealNode}
         />
       )}
+
+      {/* Screen Reader Live Region for Accessibility Announcements */}
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
     </div>
   );
 };

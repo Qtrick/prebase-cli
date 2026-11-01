@@ -37,12 +37,26 @@ pub struct CliArgs {
     pub command: Option<Commands>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum MapViewMode {
+    /// 3D Network Graph dependency orb (default)
+    #[value(name = "3d")]
+    ThreeD,
+    /// Contextual 2D relationship view (Stage 2)
+    #[value(name = "2d")]
+    TwoD,
+}
+
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Commands {
     /// Open repository directly into the interactive Network Graph
     Map {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+
+        /// View mode for the network graph (3d or 2d)
+        #[arg(long, value_enum, default_value = "3d")]
+        view: MapViewMode,
     },
     /// Inspect Git commit history, ancestry DAG, and changed files (Temporal Graph)
     History {
@@ -62,10 +76,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let is_history_command = matches!(args.command, Some(Commands::History { .. }));
 
+    if let Some(Commands::Map {
+        view: MapViewMode::TwoD,
+        ..
+    }) = &args.command
+    {
+        eprintln!(
+            "\x1b[1;31mError:\x1b[0m The 2D relationship view is not yet available in Stage 1 (scheduled for Stage 2). Please use '--view 3d' or run 'prebase map' to open the 3D Network Graph."
+        );
+        std::process::exit(1);
+    }
+
     let target_path = match &args.command {
-        Some(Commands::Map { path: Some(p) }) => p.clone(),
+        Some(Commands::Map { path: Some(p), .. }) => p.clone(),
         Some(Commands::History { path: Some(p) }) => p.clone(),
-        Some(Commands::History { path: None }) => {
+        Some(Commands::Map { path: None, .. }) | Some(Commands::History { path: None }) => {
             args.path.clone().unwrap_or_else(|| PathBuf::from("."))
         }
         _ => args.path.clone().unwrap_or_else(|| PathBuf::from(".")),
@@ -112,11 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    let default_view = if is_history_command {
-        "temporal"
-    } else {
-        "network"
-    };
+    let default_view = if is_history_command { "temporal" } else { "3d" };
 
     let url = format!(
         "http://127.0.0.1:{}/?bootstrap={}&view={}",
@@ -198,4 +219,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("PreBase shut down cleanly. Goodbye!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_map_default_view_is_3d() {
+        let args = CliArgs::try_parse_from(["prebase", "map"]).unwrap();
+        match args.command {
+            Some(Commands::Map { view, .. }) => {
+                assert_eq!(view, MapViewMode::ThreeD);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
+    fn test_cli_map_explicit_3d_view() {
+        let args = CliArgs::try_parse_from(["prebase", "map", "--view", "3d"]).unwrap();
+        match args.command {
+            Some(Commands::Map { view, .. }) => {
+                assert_eq!(view, MapViewMode::ThreeD);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
+    fn test_cli_map_explicit_2d_view_parses() {
+        let args = CliArgs::try_parse_from(["prebase", "map", "--view", "2d"]).unwrap();
+        match args.command {
+            Some(Commands::Map { view, .. }) => {
+                assert_eq!(view, MapViewMode::TwoD);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
+    fn test_cli_map_argument_ordering_with_path() {
+        let args1 = CliArgs::try_parse_from(["prebase", "map", "src", "--view", "3d"]).unwrap();
+        match args1.command {
+            Some(Commands::Map { path, view }) => {
+                assert_eq!(path, Some(PathBuf::from("src")));
+                assert_eq!(view, MapViewMode::ThreeD);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+
+        let args2 = CliArgs::try_parse_from(["prebase", "map", "--view", "3d", "src"]).unwrap();
+        match args2.command {
+            Some(Commands::Map { path, view }) => {
+                assert_eq!(path, Some(PathBuf::from("src")));
+                assert_eq!(view, MapViewMode::ThreeD);
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
 }
