@@ -1,0 +1,33 @@
+---
+description: Persistent Git safety, engineering workflow, and agent governance rules for PreBase development.
+globs: *
+alwaysApply: true
+---
+
+# PreBase Development Governance & Git Safety Rules
+
+## 1. Absolute Git Safety — Zero Unauthorized Commits
+- **STRICT PROHIBITION**: Never run `git add`, `git commit`, `git push`, `git merge`, `git rebase`, `git tag`, or destructive `git reset`/`git checkout`/`git restore` commands.
+- The user personally reviews all changes and owns final Git commit authority.
+- At the end of every task or session, leave changes uncommitted in the working tree.
+- Provide a suggested Conventional Commit message as **plain text only**. Never execute it automatically.
+- Read-only git inspection (`git status`, `git diff`, `git log`) is allowed.
+
+## 2. Engineering Workflow
+Follow the strict development cycle:
+$$\text{AUDIT} \to \text{RESEARCH} \to \text{PLAN} \to \text{IMPLEMENT} \to \text{TEST} \to \text{REVIEW} \to \text{FIX} \to \text{RETEST}$$
+- Verify actual behavior in the running application and browser via Playwright.
+- Do not stop at passing unit tests when UI/visual interaction is involved.
+
+## 3. Specialists and Review Loop
+- Consult and employ specialist roles:
+  - `code-reviewer-editor`: diff correctness, resource leaks, accessibility, precision editing.
+  - `test-writer`: design meaningful edge-case and behavioral regression tests.
+  - `test-runner`: execute checks and report truthful test baselines.
+  - `security-reviewer`: trust boundaries, SSE streaming, origin validation, path sanitization.
+- Apply `UI/UX Pro Max` and frontend design principles (`ui-ensemble`, `pen-design`) to guarantee visual polish and interaction feel.
+- Apply `Ponytail Code Reduction`: radical simplicity, zero gratuitous dependencies, reuse existing utilities, delete before adding, smallest working diff.
+
+## 4. Source Safety
+- Historical references in `.reference/` are for inspection only. Never commit, bundle, or distribute `.reference/` files.
+

@@ -13,6 +13,7 @@ import {
   computeGraphCentroid,
   normalizeDepthScale,
   computeDepthAlpha,
+  computeNetworkVisualRadius,
   projectPoint3D,
   projectGraph,
   computeNetworkFitTransform,
@@ -247,6 +248,25 @@ describe('Network Camera & 3D Projection Math', () => {
       expect(normalizeDepthScale(0.0)).toBe(0);
       expect(normalizeDepthScale(10.0)).toBe(1);
       expect(normalizeDepthScale(NaN)).toBe(0.5);
+    });
+
+    it('computes depth alpha with default minAlpha = 0.45 and maxAlpha = 1.0 Prebasecode parity', () => {
+      expect(computeDepthAlpha(0.65)).toBeCloseTo(0.45, 6);
+      expect(computeDepthAlpha(0.0)).toBeCloseTo(0.45, 6);
+      expect(computeDepthAlpha(1.50)).toBeCloseTo(1.0, 6);
+      expect(computeDepthAlpha(3.0)).toBeCloseTo(1.0, 6);
+      expect(computeDepthAlpha(1.0)).toBeCloseTo(0.45 + (0.35 / 0.85) * 0.55, 6);
+    });
+
+    it('clamps computeNetworkVisualRadius depth factor strictly within [0.78, 1.28]', () => {
+      const node = createNode('depth-factor-test');
+      const rMin = computeNetworkVisualRadius(node, 0.65);
+      const rMax = computeNetworkVisualRadius(node, 1.50);
+      expect(rMax / rMin).toBeCloseTo(1.24 / 0.78, 4);
+
+      // Extreme values clamped within bounds
+      expect(computeNetworkVisualRadius(node, 0.01)).toBeCloseTo(rMin, 6);
+      expect(computeNetworkVisualRadius(node, 100.0)).toBeCloseTo(rMax, 6);
     });
   });
 
@@ -577,11 +597,32 @@ describe('Network Camera & 3D Projection Math', () => {
       expect(transform.zoom).toBe(1.2);
     });
 
+    it('computeCenterLockedTransform handles null bounds and asymmetric bounds gracefully', () => {
+      // Null bounds: defaults to usable center
+      const nullTransform = computeCenterLockedTransform(null, 800, 600, 1.5);
+      expect(nullTransform.panX).toBe(400);
+      expect(nullTransform.panY).toBe(300);
+      expect(nullTransform.zoom).toBe(1.5);
+
+      // Asymmetric bounds with offset midpoint
+      const asymmBounds = { minX: 50, maxX: 150, minY: -30, maxY: 70 }; // midX = 100, midY = 20
+      const asymmTransform = computeCenterLockedTransform(asymmBounds, 800, 600, 2.0);
+      expect(asymmTransform.panX).toBe(400 - 100 * 2.0); // 200
+      expect(asymmTransform.panY).toBe(300 - 20 * 2.0);  // 260
+    });
+
     it('isCenterDeadZone detects sub-pixel jitter threshold', () => {
       const current = { panX: 400.2, panY: 300.1 };
       const target = { panX: 400.0, panY: 300.0 };
       expect(isCenterDeadZone(current, target, 0.5)).toBe(true);
       expect(isCenterDeadZone(current, target, 0.1)).toBe(false);
+    });
+
+    it('isCenterDeadZone respects exact 0.5px inclusive boundary and directional thresholding', () => {
+      const origin = { panX: 500.0, panY: 500.0 };
+      expect(isCenterDeadZone(origin, { panX: 500.5, panY: 500.5 }, 0.5)).toBe(true);
+      expect(isCenterDeadZone(origin, { panX: 500.501, panY: 500.0 }, 0.5)).toBe(false);
+      expect(isCenterDeadZone(origin, { panX: 500.0, panY: 500.501 }, 0.5)).toBe(false);
     });
 
     it('computeOrbitRevealCamera rotates front hemisphere node to screen center facing forward', () => {

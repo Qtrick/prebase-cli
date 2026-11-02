@@ -49,6 +49,7 @@ interface RelationshipCanvasProps {
   missingFocusPath?: string | null;
   theme?: 'dark' | 'light';
   onAnnounce?: (message: string) => void;
+  isVisible?: boolean;
 }
 
 // Truncation cache to prevent calling measureText in while loops on every frame
@@ -110,6 +111,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   missingFocusPath = null,
   theme = 'dark',
   onAnnounce,
+  isVisible = true,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -311,6 +313,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   const rafIdRef = useRef<number | null>(null);
 
   const renderFrame = useCallback(() => {
+    if (!isVisible) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -541,16 +544,26 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   }, [dimensions, selectedNodeId, selectedEdgeId, keyboardNodeId, palette, isLight]);
 
   const requestRender = useCallback(() => {
-    if (rafIdRef.current !== null) return;
+    if (!isVisible || rafIdRef.current !== null) return;
     rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = null;
       renderFrame();
     });
-  }, [renderFrame]);
+  }, [isVisible, renderFrame]);
 
   useEffect(() => {
+    if (isVisible && containerRef.current) {
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      if (w > 0 && h > 0 && (w !== dimensions.width || h !== dimensions.height)) {
+        setDimensions({ width: w, height: h });
+      }
+    }
     requestRender();
   }, [
+    isVisible,
+    dimensions.width,
+    dimensions.height,
     requestRender,
     viewport,
     layout,
@@ -561,6 +574,13 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     keyboardNodeId,
     palette,
   ]);
+
+  useEffect(() => {
+    if (!isVisible && rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, [isVisible]);
 
   useEffect(() => {
     return () => {

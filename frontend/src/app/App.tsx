@@ -104,6 +104,7 @@ export const App: React.FC = () => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Live SSE sync & watcher state
+  const [sessionInitialized, setSessionInitialized] = useState(false);
   const [liveRevision, setLiveRevision] = useState<number>(0);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
   const [watcherHealth, setWatcherHealth] = useState<WatcherHealth>('active');
@@ -202,10 +203,16 @@ export const App: React.FC = () => {
     };
 
     // Initialize session from bootstrap token first, then start fetching
-    initSession().then(() => {
-      checkStatus();
-      api.getGitStatus().then(setGitStatus).catch(() => { });
-    });
+    initSession()
+      .then(() => {
+        setSessionInitialized(true);
+        checkStatus();
+        api.getGitStatus().then(setGitStatus).catch(() => { });
+      })
+      .catch(() => {
+        setSessionInitialized(true);
+        checkStatus();
+      });
 
     return () => clearTimeout(timer);
   }, []);
@@ -275,6 +282,8 @@ export const App: React.FC = () => {
 
   // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
+    if (!sessionInitialized) return;
+
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
       if (newSnap.revision >= latestAppliedRevisionRef.current) {
         latestAppliedRevisionRef.current = newSnap.revision;
@@ -349,7 +358,7 @@ export const App: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, []); // Run ONCE on mount — eliminates EventSource reconnect churn on every tab/filter/revision update
+  }, [sessionInitialized]); // Subscribes once session token is initialized
 
   // 4. Global Keyboard Shortcuts
   useEffect(() => {
@@ -827,6 +836,7 @@ export const App: React.FC = () => {
                     missingFocusPath={missingFocusPath}
                     theme={theme}
                     onAnnounce={setAnnouncement}
+                    isVisible={networkViewMode === '2d'}
                   />
                 </div>
               </>

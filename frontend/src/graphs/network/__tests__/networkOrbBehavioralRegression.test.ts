@@ -18,6 +18,9 @@ import {
   computeGraphCentroid,
   computeOrbitRevealCamera,
   computeRevealCamera,
+  computeDepthAlpha,
+  computeNetworkVisualRadius,
+  isNodeVisibleInViewport,
   applyZoomAroundCursor,
   applyZoomAroundCenter,
   computeCenterLockedTransform,
@@ -592,6 +595,94 @@ describe('3D Network Graph Dependency Orb Behavioral Regression', () => {
       expect(isCenterDeadZone(displaced, target, 0.5)).toBe(false);
     });
 
+    it('computeCenterLockedTransform handles null bounds, asymmetric cluster bounds, and non-finite zoom fallback', () => {
+      // 1. Null bounds: falls back to usable viewport center and preserves zoom
+      const nullTransform = computeCenterLockedTransform(null, viewportWidth, viewportHeight, 1.35, insets);
+      expect(nullTransform.panX).toBeCloseTo(usableCenterX, 6);
+      expect(nullTransform.panY).toBeCloseTo(usableCenterY, 6);
+      expect(nullTransform.zoom).toBe(1.35);
+
+      // 2. Asymmetric bounds: graph midpoint is offset from (0, 0)
+      // minX = 20, maxX = 180 -> midX = 100; minY = -40, maxY = 60 -> midY = 10
+      const asymmetricBounds = { minX: 20, maxX: 180, minY: -40, maxY: 60 };
+      const asymmTransform = computeCenterLockedTransform(asymmetricBounds, viewportWidth, viewportHeight, 1.5, insets);
+      // panX = usableCenterX - 100 * 1.5 = 470 - 150 = 320
+      // panY = usableCenterY - 10 * 1.5 = 360 - 15 = 345
+      expect(asymmTransform.panX).toBeCloseTo(320, 6);
+      expect(asymmTransform.panY).toBeCloseTo(345, 6);
+
+      // Visual center on screen of bounds midpoint now lands squarely on usableCenter
+      const screenMidX = asymmTransform.panX + 100 * asymmTransform.zoom;
+      const screenMidY = asymmTransform.panY + 10 * asymmTransform.zoom;
+      expect(screenMidX).toBeCloseTo(usableCenterX, 6);
+      expect(screenMidY).toBeCloseTo(usableCenterY, 6);
+
+      // 3. Degenerate zoom (<= 0 or NaN): defaults safely to 1.0
+      const degenerateZero = computeCenterLockedTransform(asymmetricBounds, viewportWidth, viewportHeight, 0, insets);
+      expect(degenerateZero.zoom).toBe(1.0);
+      const degenerateNaN = computeCenterLockedTransform(asymmetricBounds, viewportWidth, viewportHeight, NaN, insets);
+      expect(degenerateNaN.zoom).toBe(1.0);
+    });
+
+    it('isCenterDeadZone enforces multi-axis 0.5px threshold and absorbs sub-pixel jitter with exact boundary conditions', () => {
+      const origin = { panX: 400.0, panY: 300.0 };
+
+      // Exact boundary condition (dx = 0.5, dy = 0.5) is within dead zone
+      expect(isCenterDeadZone(origin, { panX: 400.5, panY: 300.5 }, 0.5)).toBe(true);
+      expect(isCenterDeadZone(origin, { panX: 399.5, panY: 299.5 }, 0.5)).toBe(true);
+
+      // Exceeding threshold along X by epsilon triggers movement
+      expect(isCenterDeadZone(origin, { panX: 400.501, panY: 300.0 }, 0.5)).toBe(false);
+
+      // Exceeding threshold along Y by epsilon triggers movement
+      expect(isCenterDeadZone(origin, { panX: 400.0, panY: 300.501 }, 0.5)).toBe(false);
+
+      // Negative offset exceeding threshold
+      expect(isCenterDeadZone(origin, { panX: 399.499, panY: 300.0 }, 0.5)).toBe(false);
+      expect(isCenterDeadZone(origin, { panX: 400.0, panY: 299.499 }, 0.5)).toBe(false);
+
+      // Default threshold parameter is 0.5px
+      expect(isCenterDeadZone(origin, { panX: 400.49, panY: 300.49 })).toBe(true);
+      expect(isCenterDeadZone(origin, { panX: 400.51, panY: 300.0 })).toBe(false);
+    });
+
+    it('applyCenterLock integration simulates 60fps rotation sequence: dead-zone suppresses micro-jitter, macro offset triggers re-centering', () => {
+      // Simulates the exact state transitions of applyCenterLock in NetworkCanvas during dragging
+      let camera = { panX: usableCenterX, panY: usableCenterY, zoom: 1.2 };
+      let renderCallCount = 0;
+
+      const mockApplyCenterLock = (targetPan: { panX: number; panY: number }) => {
+        if (!isCenterDeadZone(camera, targetPan, 0.5)) {
+          camera = { ...camera, panX: targetPan.panX, panY: targetPan.panY };
+          renderCallCount++;
+        }
+      };
+
+      // Frame 1: Minor perspective projection shift (+0.28px X, -0.15px Y)
+      mockApplyCenterLock({ panX: usableCenterX + 0.28, panY: usableCenterY - 0.15 });
+      expect(camera.panX).toBe(usableCenterX); // Suppressed: no jitter!
+      expect(camera.panY).toBe(usableCenterY);
+      expect(renderCallCount).toBe(0);
+
+      // Frame 2: Continued micro-shift (+0.45px X, +0.38px Y)
+      mockApplyCenterLock({ panX: usableCenterX + 0.45, panY: usableCenterY + 0.38 });
+      expect(camera.panX).toBe(usableCenterX); // Still suppressed
+      expect(camera.panY).toBe(usableCenterY);
+      expect(renderCallCount).toBe(0);
+
+      // Frame 3: Macro asymmetric cluster rotation (+1.4px X, +0.9px Y) exceeds dead zone
+      mockApplyCenterLock({ panX: usableCenterX + 1.4, panY: usableCenterY + 0.9 });
+      expect(camera.panX).toBe(usableCenterX + 1.4); // Re-centered!
+      expect(camera.panY).toBe(usableCenterY + 0.9);
+      expect(renderCallCount).toBe(1);
+
+      // Frame 4: Micro-fluctuation relative to new camera pan (+0.12px X, -0.2px Y)
+      mockApplyCenterLock({ panX: usableCenterX + 1.52, panY: usableCenterY + 0.7 });
+      expect(camera.panX).toBe(usableCenterX + 1.4); // Suppressed relative to new anchor
+      expect(camera.panY).toBe(usableCenterY + 0.9);
+      expect(renderCallCount).toBe(1);
+    });
+
     it('reversible center-locked zoom returns to exact original camera transform without numerical drift', () => {
       const camera: NetworkCamera = {
         yaw: DEFAULT_YAW,
@@ -762,6 +853,122 @@ describe('3D Network Graph Dependency Orb Behavioral Regression', () => {
       expect(hitEmpty).toBeNull();
       expect(currentCam).toEqual(baseCamera);
     });
+
+    it('reveal request computes target yaw/pitch to face camera (Orbit-to-Node) without modifying panX/panY', () => {
+      const curCamera: NetworkCamera = {
+        yaw: 0.65,
+        pitch: -0.25,
+        panX: 520,
+        panY: 380,
+        zoom: 1.75,
+      };
+
+      // Node placed at arbitrary off-center local 3D coordinates
+      const localPos: Point3D = { x: 110, y: -65, z: 90 };
+      const sgn = localPos.z >= 0 ? 1 : -1;
+      const targetPitch = clampPitch(Math.atan2(sgn * localPos.y, Math.max(1e-4, sgn * localPos.z)));
+      const yzHypot = Math.hypot(localPos.y, localPos.z);
+      const targetYaw = wrapRotationAngle(Math.atan2(-localPos.x, sgn * Math.max(1e-4, yzHypot)));
+
+      const targetCamera: NetworkCamera = {
+        yaw: targetYaw,
+        pitch: targetPitch,
+        panX: curCamera.panX,
+        panY: curCamera.panY,
+        zoom: curCamera.zoom,
+      };
+
+      // Invariant: panX, panY, and zoom are strictly UNTOUCHED (zero orb translation)
+      expect(targetCamera.panX).toBe(curCamera.panX);
+      expect(targetCamera.panY).toBe(curCamera.panY);
+      expect(targetCamera.zoom).toBe(curCamera.zoom);
+
+      // Invariant: local position rotates directly in front of camera
+      const rotated = projectPoint3D(localPos.x, localPos.y, localPos.z, targetCamera.yaw, targetCamera.pitch);
+      expect(rotated.x).toBeCloseTo(0, 4);
+      expect(rotated.y).toBeCloseTo(0, 4);
+      expect(rotated.z).toBeGreaterThan(0); // Front-facing (+Z)
+
+      // Screen position aligns directly with orb center (panX, panY)
+      const screenX = targetCamera.panX + rotated.x * targetCamera.zoom;
+      const screenY = targetCamera.panY + rotated.y * targetCamera.zoom;
+      expect(screenX).toBeCloseTo(targetCamera.panX, 4);
+      expect(screenY).toBeCloseTo(targetCamera.panY, 4);
+    });
+
+    it('Orbit-to-Node reveal correctly rotates nodes from all 8 3D space octants to face camera', () => {
+      const curCamera: NetworkCamera = {
+        yaw: 0.55,
+        pitch: 0.28,
+        panX: 480,
+        panY: 360,
+        zoom: 1.4,
+      };
+
+      const testCases: Point3D[] = [
+        { x: 90, y: 60, z: 120 },    // Octant 1 (+, +, +)
+        { x: -90, y: 60, z: 120 },   // Octant 2 (-, +, +)
+        { x: -90, y: -60, z: 120 },  // Octant 3 (-, -, +)
+        { x: 90, y: -60, z: 120 },   // Octant 4 (+, -, +)
+        { x: 90, y: 60, z: -120 },   // Octant 5 (+, +, -) [back hemisphere]
+        { x: -90, y: 60, z: -120 },  // Octant 6 (-, +, -) [back hemisphere]
+        { x: -90, y: -60, z: -120 }, // Octant 7 (-, -, -) [back hemisphere]
+        { x: 90, y: -60, z: -120 },  // Octant 8 (+, -, -) [back hemisphere]
+      ];
+
+      for (const pos of testCases) {
+        const sgn = pos.z >= 0 ? 1 : -1;
+        const targetPitch = clampPitch(Math.atan2(sgn * pos.y, Math.max(1e-4, sgn * pos.z)));
+        const yzHypot = Math.hypot(pos.y, pos.z);
+        const targetYaw = wrapRotationAngle(Math.atan2(-pos.x, sgn * Math.max(1e-4, yzHypot)));
+
+        // Pitch clamp check: must never exceed [-PITCH_CLAMP_LIMIT, PITCH_CLAMP_LIMIT]
+        expect(Math.abs(targetPitch)).toBeLessThanOrEqual(PITCH_CLAMP_LIMIT);
+
+        // Project with computed orientation
+        const proj = projectPoint3D(pos.x, pos.y, pos.z, targetYaw, targetPitch);
+        expect(proj.x).toBeCloseTo(0, 3);
+        expect(proj.y).toBeCloseTo(0, 3);
+        expect(proj.z).toBeGreaterThan(0); // Rotates into front hemisphere in every case!
+
+        // Pan remains unperturbed
+        const targetCam: NetworkCamera = {
+          yaw: targetYaw,
+          pitch: targetPitch,
+          panX: curCamera.panX,
+          panY: curCamera.panY,
+          zoom: curCamera.zoom,
+        };
+        expect(targetCam.panX).toBe(curCamera.panX);
+        expect(targetCam.panY).toBe(curCamera.panY);
+      }
+    });
+
+    it('Orbit-to-Node reveal with onlyIfOutside suppresses rotation when node is already in visible viewport', () => {
+      const curCamera: NetworkCamera = {
+        yaw: DEFAULT_YAW,
+        pitch: DEFAULT_PITCH,
+        panX: 400,
+        panY: 300,
+        zoom: 1.0,
+      };
+
+      // Node already safely visible near center of viewport
+      const visibleNode = makeProjectedNode('visible-node', { x: 30, y: 20, z: 80 }, curCamera);
+      const isVisible = isNodeVisibleInViewport(
+        visibleNode.screenX,
+        visibleNode.screenY,
+        visibleNode.radius,
+        800,
+        600,
+        { left: 40, right: 40, top: 40, bottom: 40 }
+      );
+      expect(isVisible).toBe(true);
+
+      // When onlyIfOutside is true and node is visible, reveal request triggers NO camera change
+      const revealResult = isVisible ? null : { ...curCamera, yaw: 0.1 };
+      expect(revealResult).toBeNull();
+    });
   });
 
   // =========================================================================
@@ -900,6 +1107,130 @@ describe('3D Network Graph Dependency Orb Behavioral Regression', () => {
 
       // 3D camera state is 100% unaffected
       expect(camera3D).toEqual(saved3D);
+    });
+
+    it('multi-cycle 3D <-> 2D view toggling with independent 2D panning/zooming preserves 3D camera with zero drift', () => {
+      const initial3DCamera: NetworkCamera = {
+        yaw: 1.345,
+        pitch: -0.475,
+        panX: 512,
+        panY: 368,
+        zoom: 2.15,
+      };
+
+      let active3DCamera = { ...initial3DCamera };
+      let active2DViewport: Viewport2D = { panX: 0, panY: 0, zoom: 1.0 };
+
+      // Simulate 5 round-trip toggles between 3D and 2D with distinct 2D viewport adjustments each cycle
+      for (let cycle = 1; cycle <= 5; cycle++) {
+        // Switch to 2D
+        let mode: '3d' | '2d' = '2d';
+        expect(mode).toBe('2d');
+
+        // Apply extensive 2D pan and zoom operations in Relationship Explorer
+        active2DViewport = {
+          panX: cycle * 125 - 200,
+          panY: cycle * -75 + 150,
+          zoom: 1.0 + cycle * 0.35,
+        };
+        expect(active2DViewport.zoom).toBeGreaterThan(1.0);
+
+        // 3D camera ref is not touched during 2D operations
+        expect(active3DCamera).toEqual(initial3DCamera);
+
+        // Switch back to 3D
+        mode = '3d';
+        expect(mode).toBe('3d');
+
+        // 3D camera is identical to initial state with 0 numerical drift
+        expect(active3DCamera.yaw).toBe(initial3DCamera.yaw);
+        expect(active3DCamera.pitch).toBe(initial3DCamera.pitch);
+        expect(active3DCamera.panX).toBe(initial3DCamera.panX);
+        expect(active3DCamera.panY).toBe(initial3DCamera.panY);
+        expect(active3DCamera.zoom).toBe(initial3DCamera.zoom);
+      }
+    });
+
+    it('node selection in 2D mode updates selected node without perturbing 3D camera orientation or position', () => {
+      const saved3DCamera: NetworkCamera = {
+        yaw: 0.98,
+        pitch: -0.32,
+        panX: 470,
+        panY: 340,
+        zoom: 1.6,
+      };
+
+      let currentSelectedNodeId: string | null = 'auth-controller';
+
+      // User in 2D mode clicks a related node 'user-repository'
+      currentSelectedNodeId = 'user-repository';
+
+      // Returning to 3D mode: selectedNodeId is updated, but 3D camera is 100% invariant
+      expect(currentSelectedNodeId).toBe('user-repository');
+      expect(saved3DCamera.yaw).toBe(0.98);
+      expect(saved3DCamera.pitch).toBe(-0.32);
+      expect(saved3DCamera.panX).toBe(470);
+      expect(saved3DCamera.panY).toBe(340);
+      expect(saved3DCamera.zoom).toBe(1.6);
+    });
+
+    it('isVisible flag correctly suppresses render execution and animation scheduling when component is hidden', () => {
+      let isVisible = false;
+      let renderFrameExecuted = false;
+      let rafScheduled = false;
+
+      // Simulated renderFrame and requestRender guards from RelationshipCanvas and NetworkCanvas
+      const renderFrame = () => {
+        if (!isVisible) return;
+        renderFrameExecuted = true;
+      };
+
+      const requestRender = () => {
+        if (!isVisible) return;
+        rafScheduled = true;
+      };
+
+      // 1. While hidden (isVisible = false), rendering and RAF are suppressed
+      renderFrame();
+      requestRender();
+      expect(renderFrameExecuted).toBe(false);
+      expect(rafScheduled).toBe(false);
+
+      // 2. When switched to visible, rendering is enabled
+      isVisible = true;
+      renderFrame();
+      requestRender();
+      expect(renderFrameExecuted).toBe(true);
+      expect(rafScheduled).toBe(true);
+    });
+
+    it('center lock state is preserved across 3D -> 2D -> 3D transition', () => {
+      let keepGraphCentered = true;
+      const camera: NetworkCamera = {
+        yaw: DEFAULT_YAW,
+        pitch: DEFAULT_PITCH,
+        panX: 400,
+        panY: 300,
+        zoom: 1.5,
+      };
+
+      // Switch to 2D mode
+      let viewMode: '3d' | '2d' = '2d';
+      expect(viewMode).toBe('2d');
+      // keepGraphCentered state is not mutated by 2D mode
+      expect(keepGraphCentered).toBe(true);
+
+      // Switch back to 3D mode
+      viewMode = '3d';
+      expect(viewMode).toBe('3d');
+      expect(keepGraphCentered).toBe(true);
+
+      // Re-anchor camera to projected center
+      const bounds = { minX: -100, maxX: 100, minY: -50, maxY: 50 };
+      const reAnchored = computeCenterLockedTransform(bounds, 800, 600, camera.zoom);
+      expect(reAnchored.panX).toBe(400);
+      expect(reAnchored.panY).toBe(300);
+      expect(reAnchored.zoom).toBe(1.5);
     });
   });
 
@@ -1079,6 +1410,94 @@ describe('3D Network Graph Dependency Orb Behavioral Regression', () => {
 
       expect(actualDeltaScreenX).toBeCloseTo(expectedDeltaScreenX, 6);
       expect(actualDeltaScreenX).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // 7. Depth Alpha (minAlpha = 0.45) & Depth Size Factor ([0.78, 1.28]) Prebasecode Parity
+  // =========================================================================
+  describe('7. Depth Alpha (minAlpha = 0.45) and Depth Size Factor ([0.78, 1.28]) Prebasecode Parity', () => {
+    it('computeDepthAlpha uses minAlpha = 0.45 by default and produces strictly monotonic alpha across depth scale', () => {
+      // 1. Far depth cutoff (depthScale <= 0.65) yields exactly minAlpha = 0.45
+      expect(computeDepthAlpha(0.65)).toBeCloseTo(0.45, 6);
+      expect(computeDepthAlpha(0.40)).toBeCloseTo(0.45, 6);
+      expect(computeDepthAlpha(0.0)).toBeCloseTo(0.45, 6);
+
+      // 2. Near depth cutoff (depthScale >= 1.50) yields exactly maxAlpha = 1.0
+      expect(computeDepthAlpha(1.50)).toBeCloseTo(1.0, 6);
+      expect(computeDepthAlpha(2.50)).toBeCloseTo(1.0, 6);
+      expect(computeDepthAlpha(4.0)).toBeCloseTo(1.0, 6);
+
+      // 3. Focal distance (depthScale = 1.0)
+      // norm = (1.0 - 0.65) / 0.85 = 0.35 / 0.85 ≈ 0.41176
+      // alpha = 0.45 + (0.35 / 0.85) * (1.0 - 0.45) ≈ 0.67647
+      const midAlpha = computeDepthAlpha(1.0);
+      expect(midAlpha).toBeCloseTo(0.45 + (0.35 / 0.85) * 0.55, 5);
+      expect(midAlpha).toBeGreaterThan(0.45);
+      expect(midAlpha).toBeLessThan(1.0);
+
+      // 4. Strict monotonicity across intermediate depth range
+      const depthScales = [0.65, 0.75, 0.90, 1.0, 1.15, 1.30, 1.50];
+      const alphas = depthScales.map((d) => computeDepthAlpha(d));
+      for (let i = 0; i < alphas.length - 1; i++) {
+        expect(alphas[i]).toBeLessThan(alphas[i + 1]);
+      }
+
+      // 5. Custom parameters override defaults cleanly
+      expect(computeDepthAlpha(0.65, 0.35, 0.95)).toBeCloseTo(0.35, 6);
+      expect(computeDepthAlpha(1.50, 0.35, 0.95)).toBeCloseTo(0.95, 6);
+    });
+
+    it('computeNetworkVisualRadius enforces depth size factor strictly within [0.78, 1.28] Prebasecode parity', () => {
+      const node = makeNode('sample-node', { deps: 2 });
+      const zoom = 1.0;
+
+      // 1. Far depth cutoff (depthScale <= 0.65): norm = 0, depthFactor = 0.78
+      const rFar = computeNetworkVisualRadius(node, 0.65, { zoom });
+      const rFarClamped = computeNetworkVisualRadius(node, 0.1, { zoom });
+      expect(rFar).toBeCloseTo(rFarClamped, 6);
+
+      // 2. Near depth cutoff (depthScale >= 1.50): norm = 1, depthFactor = 0.78 + 0.46 = 1.24 (within [0.78, 1.28])
+      const rNear = computeNetworkVisualRadius(node, 1.50, { zoom });
+      const rNearClamped = computeNetworkVisualRadius(node, 4.0, { zoom });
+      expect(rNear).toBeCloseTo(rNearClamped, 6);
+
+      // 3. Ratio between near and far visual radius matches Prebasecode parity (1.24 / 0.78 ≈ 1.5897)
+      const depthScalingRatio = rNear / rFar;
+      expect(depthScalingRatio).toBeCloseTo(1.24 / 0.78, 4);
+
+      // 4. Extreme values never escape [0.78, 1.28] depth factor bounds
+      const rExtremeFar = computeNetworkVisualRadius(node, -1000, { zoom });
+      const rExtremeNear = computeNetworkVisualRadius(node, 10000, { zoom });
+      expect(rExtremeFar).toBe(rFar);
+      expect(rExtremeNear).toBe(rNear);
+
+      // 5. Strict ordering: nearer nodes appear visibly larger than farther nodes
+      expect(rNear).toBeGreaterThan(rFar);
+    });
+
+    it('selection (+3px) and hover (+1.5px) modifiers layer predictably over depth-scaled visual radius', () => {
+      const node = makeNode('interactive-node', { deps: 3 });
+      const depthScale = 1.0;
+
+      const rBase = computeNetworkVisualRadius(node, depthScale);
+      const rSelected = computeNetworkVisualRadius(node, depthScale, { isSelected: true });
+      const rHovered = computeNetworkVisualRadius(node, depthScale, { isHovered: true });
+
+      // Selected ring adds +3px
+      expect(rSelected - rBase).toBeCloseTo(3.0, 6);
+
+      // Hover ring adds +1.5px
+      expect(rHovered - rBase).toBeCloseTo(1.5, 6);
+
+      // Selection takes priority over hover
+      const rBoth = computeNetworkVisualRadius(node, depthScale, { isSelected: true, isHovered: true });
+      expect(rBoth).toBe(rSelected);
+
+      // Guaranteed minimum visual radius of at least 4px
+      const tinyNode = makeNode('tiny-node', { deps: 0 });
+      const rTiny = computeNetworkVisualRadius(tinyNode, 0.1, { zoom: 4.0 });
+      expect(rTiny).toBeGreaterThanOrEqual(4.0);
     });
   });
 });

@@ -30,6 +30,8 @@ import {
   applyZoomAroundCenter,
   normalizeWheelZoomDelta,
   computeContinuousZoomFactor,
+  computeCenterLockedTransform,
+  isCenterDeadZone,
   ProjectedGraph,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
@@ -172,22 +174,39 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     };
   }, [keepGraphCentered]);
 
-  // When Center Lock is enabled or restored, anchor camera directly at the usable viewport center
-  useEffect(() => {
-    if (keepGraphCentered && containerRef.current) {
+  // Maintain stable centering from projected bounds during rotation and viewport changes (Prebasecode applyCenterLock parity)
+  const applyCenterLock = useCallback(
+    (immediate = false) => {
+      if (!keepGraphCentered || !containerRef.current) return;
+      if (cameraAnimRef.current && !immediate) return;
+
       const width = containerRef.current.clientWidth || 800;
       const height = containerRef.current.clientHeight || 600;
-      const insetLeft = insets?.left ?? 0;
-      const insetRight = insets?.right ?? 0;
-      const insetTop = insets?.top ?? 0;
-      const insetBottom = insets?.bottom ?? 0;
-      const usableCenterX = insetLeft + Math.max(100, width - insetLeft - insetRight) / 2;
-      const usableCenterY = insetTop + Math.max(100, height - insetTop - insetBottom) / 2;
-      cameraRef.current.panX = usableCenterX;
-      cameraRef.current.panY = usableCenterY;
-      requestRender();
+      const bounds = projectedDataRef.current?.bounds ?? null;
+
+      const target = computeCenterLockedTransform(
+        bounds,
+        width,
+        height,
+        cameraRef.current.zoom,
+        insets
+      );
+
+      if (!isCenterDeadZone(cameraRef.current, target, 0.5)) {
+        cameraRef.current.panX = target.panX;
+        cameraRef.current.panY = target.panY;
+        requestRender();
+      }
+    },
+    [keepGraphCentered, insets, requestRender]
+  );
+
+  // When Center Lock is enabled or insets change, re-anchor camera to projected center
+  useEffect(() => {
+    if (keepGraphCentered) {
+      applyCenterLock(true);
     }
-  }, [keepGraphCentered, insets, requestRender]);
+  }, [keepGraphCentered, insets, applyCenterLock]);
 
   // Compute graph layout positions once per snapshot revision
   useEffect(() => {
@@ -331,22 +350,20 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return;
     }
 
-    // Center node in usable viewport
-    const insetLeft = insets?.left ?? 0;
-    const insetRight = insets?.right ?? 0;
-    const insetTop = insets?.top ?? 0;
-    const insetBottom = insets?.bottom ?? 0;
-    const usableCenterX = insetLeft + Math.max(100, width - insetLeft - insetRight) / 2;
-    const usableCenterY = insetTop + Math.max(100, height - insetTop - insetBottom) / 2;
-
     const cur = cameraRef.current;
-    const targetPanX = usableCenterX - projectedNode.projected.x * cur.zoom;
-    const targetPanY = usableCenterY - projectedNode.projected.y * cur.zoom;
+    const localPos = projectedNode.localPos;
+    // Orbit to Node: smoothly rotate 3D orb around its stable center until the node faces front
+    const sgn = localPos.z >= 0 ? 1 : -1;
+    const targetPitch = clampPitch(Math.atan2(sgn * localPos.y, Math.max(1e-4, sgn * localPos.z)));
+    const yzHypot = Math.hypot(localPos.y, localPos.z);
+    const targetYaw = wrapRotationAngle(Math.atan2(-localPos.x, sgn * Math.max(1e-4, yzHypot)));
 
     const targetCamera: NetworkCamera = {
-      ...cur,
-      panX: targetPanX,
-      panY: targetPanY,
+      yaw: targetYaw,
+      pitch: targetPitch,
+      panX: cur.panX,
+      panY: cur.panY,
+      zoom: cur.zoom,
     };
 
     if (prefersReducedMotion) {
@@ -387,21 +404,24 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0 && (width !== prevWidth || height !== prevHeight)) {
-          // Adjust pan smoothly so graph centroid remains centered
-          const dx = (width - prevWidth) / 2;
-          const dy = (height - prevHeight) / 2;
-          cameraRef.current.panX += dx;
-          cameraRef.current.panY += dy;
+          if (keepGraphCentered) {
+            applyCenterLock(true);
+          } else {
+            const dx = (width - prevWidth) / 2;
+            const dy = (height - prevHeight) / 2;
+            cameraRef.current.panX += dx;
+            cameraRef.current.panY += dy;
+            requestRender();
+          }
           prevWidth = width;
           prevHeight = height;
-          requestRender();
         }
       }
     });
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, [requestRender]);
+  }, [keepGraphCentered, applyCenterLock, requestRender]);
 
   // Main RAF Render Loop
   const renderLoop = useCallback(
@@ -635,10 +655,15 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   );
   renderLoopRef.current = renderLoop;
 
-  // Trigger RAF whenever external dependencies change
+  // Trigger RAF whenever external dependencies or visibility change
   useEffect(() => {
-    requestRender();
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, requestRender]);
+    if (isVisible) {
+      requestRender();
+    } else if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, isVisible, requestRender]);
 
   // Clean up RAF on unmount
   useEffect(() => {
@@ -739,6 +764,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     // Distinguish primary drag (rotation) from Shift-drag or middle button (pan)
     const isShiftOrMiddle = e.shiftKey || e.button === 1 || e.button === 2;
     const mode = isShiftOrMiddle ? 'panning' : 'rotating';
+    if (canvasRef.current) {
+      canvasRef.current.style.cursor = isShiftOrMiddle ? 'move' : 'grabbing';
+    }
 
     gestureRef.current = {
       active: true,
@@ -787,6 +815,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const newPitch = clampPitch(gesture.startCamera.pitch + dy * ROTATION_SENSITIVITY);
           cameraRef.current.yaw = newYaw;
           cameraRef.current.pitch = newPitch;
+          if (keepGraphCentered) {
+            applyCenterLock(true);
+          }
           requestRender();
         } else if (gesture.mode === 'panning') {
           if (keepGraphCentered) {
@@ -827,6 +858,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       gesture.active = false;
       gesture.pointerId = null;
       gesture.mode = 'idle';
+      if (canvasRef.current) {
+        canvasRef.current.style.cursor = '';
+      }
     },
     []
   );
@@ -864,10 +898,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   };
 
   const handleLostPointerCapture = () => {
-    gestureRef.current.active = false;
-    gestureRef.current.pointerId = null;
-    gestureRef.current.mode = 'idle';
-    pointerTargetRef.current = null;
+    cleanUpPointerGesture();
   };
 
   // Window blur / visibility change cleanup
@@ -940,6 +971,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         cur.panX -= 30;
       } else {
         cur.yaw = wrapRotationAngle(cur.yaw + 0.05);
+        if (keepGraphCentered) {
+          applyCenterLock(true);
+        }
       }
       requestRender();
     } else if (e.key === 'ArrowRight') {
@@ -952,6 +986,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         cur.panX += 30;
       } else {
         cur.yaw = wrapRotationAngle(cur.yaw - 0.05);
+        if (keepGraphCentered) {
+          applyCenterLock(true);
+        }
       }
       requestRender();
     } else if (e.key === 'ArrowUp') {
@@ -964,6 +1001,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         cur.panY -= 30;
       } else {
         cur.pitch = clampPitch(cur.pitch - 0.05);
+        if (keepGraphCentered) {
+          applyCenterLock(true);
+        }
       }
       requestRender();
     } else if (e.key === 'ArrowDown') {
@@ -976,6 +1016,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         cur.panY += 30;
       } else {
         cur.pitch = clampPitch(cur.pitch + 0.05);
+        if (keepGraphCentered) {
+          applyCenterLock(true);
+        }
       }
       requestRender();
     } else if (e.key === '+' || e.key === '=') {
@@ -1032,7 +1075,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           width: '100%',
           height: '100%',
           touchAction: 'none',
-          outline: 'none',
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

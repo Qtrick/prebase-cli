@@ -124,10 +124,10 @@ export const api = {
     onEvent: (event: ServerEvent) => void,
     onStatusChange?: (status: 'connected' | 'reconnecting' | 'error') => void
   ): (() => void) => {
-    // Authenticate via HttpOnly session cookie on same-origin EventSource,
-    // avoiding query parameter token leakage in URLs and logs (Defect 5.13).
-    const url = '/api/v1/events';
-    const eventSource = new EventSource(url);
+    // Authenticate via HttpOnly session cookie and query token fallback for EventSource
+    const token = getSessionToken();
+    const url = token ? `/api/v1/events?token=${encodeURIComponent(token)}` : '/api/v1/events';
+    const eventSource = new EventSource(url, { withCredentials: true });
 
     eventSource.onopen = () => {
       if (onStatusChange) onStatusChange('connected');

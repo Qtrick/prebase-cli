@@ -79,7 +79,7 @@ export function normalizeDepthScale(depthScale: number): number {
   return Math.max(0, Math.min(1, (depthScale - 0.65) / 0.85));
 }
 
-export function computeDepthAlpha(depthScale: number, minAlpha = 0.55, maxAlpha = 1.0): number {
+export function computeDepthAlpha(depthScale: number, minAlpha = 0.45, maxAlpha = 1.0): number {
   const norm = normalizeDepthScale(depthScale);
   return minAlpha + norm * (maxAlpha - minAlpha);
 }
@@ -143,7 +143,7 @@ export function computeNetworkVisualRadius(
   const baseR = 5.0 + Math.sqrt(weight) * 2.5;
 
   const norm = normalizeDepthScale(depthScale);
-  const depthFactor = 0.85 + norm * 0.35;
+  const depthFactor = Math.max(0.78, Math.min(1.28, 0.78 + norm * 0.46));
 
   // Zoom compensation
   const zoomFactor = Math.max(0.6, Math.min(1.4, 1 / Math.sqrt(zoom)));
@@ -253,7 +253,7 @@ export function computeNetworkFitTransform(
   viewportHeight: number,
   insets?: ViewportInsets,
   padding = 64,
-  centerAtPivot = true
+  centerAtPivot = false
 ): { panX: number; panY: number; zoom: number } {
   const insetLeft = insets?.left ?? 0;
   const insetRight = insets?.right ?? 0;

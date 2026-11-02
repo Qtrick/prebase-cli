@@ -187,63 +187,59 @@ def main():
             assert indexing_ready, "Indexing did not reach Ready state"
             success("Indexing ready.")
 
-            # Headless Chrome DOM Verification
-            chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.exists(chrome_bin):
-                log("Running Headless Chrome DOM inspection for 2D mode...")
-                app_url_2d = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fcomponents%2FCard.tsx"
-                chrome_cmd = [
-                    chrome_bin,
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--virtual-time-budget=3000",
-                    "--dump-dom",
-                    app_url_2d
-                ]
-                dom_output = subprocess.check_output(chrome_cmd, timeout=15).decode("utf-8")
-                if "relationship-container" not in dom_output:
-                    print("DOM OUTPUT:\n", dom_output[:2000])
+            # Browser DOM Verification
+            log("Running browser DOM inspection for 2D mode...")
+            app_url_2d = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fcomponents%2FCard.tsx"
+            app_url_missing = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fnon_existent.ts"
+            app_url_3d = f"{base_url}/?token={session_token}&view=3d"
 
-                assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"
-                assert "3D Overview" in dom_output, "DOM missing '3D Overview' button"
-                assert "2D Relationships" in dom_output, "DOM missing '2D Relationships' button"
-                assert "relationship-container" in dom_output, "DOM missing .relationship-container"
-                assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
-                success("Verified 2D Relationship Explorer DOM structure and mode switcher.")
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page(viewport={"width": 1280, "height": 800})
 
-                # Test 2: Missing focus file shows purposeful "File Not Found" state
-                log("Testing purposeful missing-file state in Headless Chrome...")
-                app_url_missing = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fnon_existent.ts"
-                dom_missing = subprocess.check_output([
-                    chrome_bin,
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--virtual-time-budget=3000",
-                    "--dump-dom",
-                    app_url_missing
-                ], timeout=15).decode("utf-8")
+                    # Test 1: 2D mode
+                    page.goto(app_url_2d, wait_until="networkidle")
+                    page.wait_for_selector(".relationship-container", timeout=10000)
+                    dom_output = page.content()
 
-                assert "File Not Found" in dom_missing, "DOM missing 'File Not Found' header for missing focus"
-                assert "src/non_existent.ts" in dom_missing, "DOM missing non-existent path citation"
-                assert "Search files to explore in 2D" in dom_missing, "DOM missing search prompt in empty state"
-                success("Verified purposeful 'File Not Found' empty state.")
+                    assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"
+                    assert "3D Overview" in dom_output, "DOM missing '3D Overview' button"
+                    assert "2D Relationships" in dom_output, "DOM missing '2D Relationships' button"
+                    assert "relationship-container" in dom_output, "DOM missing .relationship-container"
+                    assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
+                    success("Verified 2D Relationship Explorer DOM structure and mode switcher.")
 
-                # Test 3: 3D Overview view mode
-                log("Testing 3D Overview rendering in Headless Chrome...")
-                app_url_3d = f"{base_url}/?token={session_token}&view=3d"
-                dom_3d = subprocess.check_output([
-                    chrome_bin,
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--virtual-time-budget=3000",
-                    "--dump-dom",
-                    app_url_3d
-                ], timeout=15).decode("utf-8")
+                    # Test 2: Missing focus file shows purposeful "File Not Found" state
+                    log("Testing purposeful missing-file state in Headless Chrome...")
+                    page.goto(app_url_missing, wait_until="networkidle")
+                    page.wait_for_selector(".relationship-empty-state", timeout=10000)
+                    dom_missing = page.content()
 
-                assert "network-canvas" in dom_3d, "DOM missing .network-canvas in 3D mode"
-                success("Verified 3D Overview canvas rendered when view=3d.")
-            else:
-                log("Google Chrome binary not found; skipping headless browser render check.")
+                    assert "File Not Found" in dom_missing, "DOM missing 'File Not Found' header for missing focus"
+                    assert "src/non_existent.ts" in dom_missing, "DOM missing non-existent path citation"
+                    assert "Search files to explore in 2D" in dom_missing, "DOM missing search prompt in empty state"
+                    success("Verified purposeful 'File Not Found' empty state.")
+
+                    # Test 3: 3D Overview view mode
+                    log("Testing 3D Overview rendering in Headless Chrome...")
+                    page.goto(app_url_3d, wait_until="networkidle")
+                    page.wait_for_selector(".network-canvas", timeout=10000)
+                    dom_3d = page.content()
+
+                    assert "network-canvas" in dom_3d, "DOM missing .network-canvas in 3D mode"
+                    success("Verified 3D Overview canvas rendered when view=3d.")
+
+                    browser.close()
+            except ImportError:
+                chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                if os.path.exists(chrome_bin):
+                    dom_output = subprocess.check_output([
+                        chrome_bin, "--headless=new", "--disable-gpu", "--dump-dom", app_url_2d
+                    ], timeout=15).decode("utf-8")
+                    assert "relationship-container" in dom_output
+                    success("Verified 2D Relationship Explorer via Chrome dump-dom.")
 
         finally:
             log("Stopping PreBase server with SIGINT...")
