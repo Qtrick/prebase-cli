@@ -13,6 +13,9 @@ import {
   Clock,
   LocateFixed,
   Compass,
+  Copy,
+  Check,
+  PanelRightClose,
 } from 'lucide-react';
 
 interface InspectorProps {
@@ -28,6 +31,8 @@ interface InspectorProps {
   onExplore2D?: (node: FileNode) => void;
   onRefocus2D?: (nodeId: string) => void;
   onSwitchTo3D?: () => void;
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export const Inspector: React.FC<InspectorProps> = ({
@@ -43,12 +48,43 @@ export const Inspector: React.FC<InspectorProps> = ({
   onExplore2D,
   onRefocus2D,
   onSwitchTo3D,
+  isCollapsed = false,
+  onToggleCollapse,
 }) => {
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
+  const [copiedPath, setCopiedPath] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   const requestTokenRef = useRef(0);
+  const pathCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codeCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleCopyPath = (path: string) => {
+    if (!navigator?.clipboard) return;
+    navigator.clipboard.writeText(path).then(() => {
+      setCopiedPath(true);
+      if (pathCopyTimerRef.current) clearTimeout(pathCopyTimerRef.current);
+      pathCopyTimerRef.current = setTimeout(() => setCopiedPath(false), 2000);
+    }).catch(() => {});
+  };
+
+  const handleCopyCode = (code: string) => {
+    if (!navigator?.clipboard) return;
+    navigator.clipboard.writeText(code).then(() => {
+      setCopiedCode(true);
+      if (codeCopyTimerRef.current) clearTimeout(codeCopyTimerRef.current);
+      codeCopyTimerRef.current = setTimeout(() => setCopiedCode(false), 2000);
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pathCopyTimerRef.current) clearTimeout(pathCopyTimerRef.current);
+      if (codeCopyTimerRef.current) clearTimeout(codeCopyTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedNode) {
@@ -97,11 +133,21 @@ export const Inspector: React.FC<InspectorProps> = ({
   if (!selectedNode && !selectedEdge) {
     if (!snapshot) return null;
     return (
-      <aside className="inspector-panel">
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
         <div className="inspector-header">
           <h3>Repository Overview</h3>
+          {onToggleCollapse && (
+            <button
+              className="icon-action-btn"
+              onClick={onToggleCollapse}
+              title="Collapse inspector"
+              aria-label="Collapse inspector"
+            >
+              <PanelRightClose size={15} />
+            </button>
+          )}
         </div>
-        <div className="inspector-content">
+        <div key="overview" className="inspector-content animate-reveal">
           <div className="stat-card">
             <span className="stat-label">Repository ID</span>
             <span className="stat-value mono">{snapshot.repository_id}</span>
@@ -158,18 +204,30 @@ export const Inspector: React.FC<InspectorProps> = ({
   // Selected Edge View
   if (selectedEdge) {
     return (
-      <aside className="inspector-panel">
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
         <div className="inspector-header">
           <div className="node-title-group">
             <Layers size={16} color="#2dd4bf" />
             <h3 className="file-name">Dependency Relationship</h3>
           </div>
-          <button className="close-btn" onClick={onClose} title="Close inspector">
-            <X size={16} />
-          </button>
+          <div className="header-action-group">
+            {onToggleCollapse && (
+              <button
+                className="icon-action-btn"
+                onClick={onToggleCollapse}
+                title="Collapse inspector"
+                aria-label="Collapse inspector"
+              >
+                <PanelRightClose size={15} />
+              </button>
+            )}
+            <button className="close-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
-        <div className="inspector-content">
+        <div key={selectedEdge.id} className="inspector-content animate-reveal">
           <div className="relationship-card">
             <div
               className="rel-endpoint clickable"
@@ -218,7 +276,7 @@ export const Inspector: React.FC<InspectorProps> = ({
 
   // Selected Node View
   return (
-    <aside className="inspector-panel">
+    <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
       <div className="inspector-header">
         <div className="node-title-group">
           <div
@@ -227,13 +285,37 @@ export const Inspector: React.FC<InspectorProps> = ({
           />
           <h3 className="file-name">{selectedNode?.filename}</h3>
         </div>
-        <button className="close-btn" onClick={onClose} title="Close inspector">
-          <X size={16} />
-        </button>
+        <div className="header-action-group">
+          {onToggleCollapse && (
+            <button
+              className="icon-action-btn"
+              onClick={onToggleCollapse}
+              title="Collapse inspector"
+              aria-label="Collapse inspector"
+            >
+              <PanelRightClose size={15} />
+            </button>
+          )}
+          <button className="close-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
-      <div className="inspector-content">
-        <div className="file-path-bar mono">{selectedNode?.relative_path}</div>
+      <div key={selectedNode?.id} className="inspector-content animate-reveal">
+        <div className="file-path-wrap">
+          <div className="file-path-bar mono">{selectedNode?.relative_path}</div>
+          {selectedNode?.relative_path && (
+            <button
+              className="path-copy-btn"
+              onClick={() => handleCopyPath(selectedNode.relative_path)}
+              title={copiedPath ? 'Copied!' : 'Copy path to clipboard'}
+              aria-label="Copy path"
+            >
+              {copiedPath ? <Check size={13} color="#2dd4bf" /> : <Copy size={13} />}
+            </button>
+          )}
+        </div>
 
         <div className="meta-tags">
           <span className="tag language-tag">{selectedNode?.language}</span>
@@ -377,7 +459,17 @@ export const Inspector: React.FC<InspectorProps> = ({
             {/* Source preview snippet */}
             {sourcePreview && (
               <div className="source-preview-section">
-                <h4>Source Preview</h4>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <h4 style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Source Preview</h4>
+                  <button
+                    className="path-copy-btn"
+                    onClick={() => handleCopyCode(sourcePreview)}
+                    title={copiedCode ? 'Copied code!' : 'Copy source snippet'}
+                    aria-label="Copy source code"
+                  >
+                    {copiedCode ? <Check size={12} color="#2dd4bf" /> : <Copy size={12} />}
+                  </button>
+                </div>
                 <pre className="source-code-block">
                   <code>{sourcePreview.slice(0, 1200)}</code>
                   {sourcePreview.length > 1200 && '...'}

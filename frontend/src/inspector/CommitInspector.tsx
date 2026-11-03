@@ -13,6 +13,7 @@ import {
   Check,
   Loader2,
   AlertCircle,
+  PanelRightClose,
 } from 'lucide-react';
 
 interface CommitInspectorProps {
@@ -20,6 +21,8 @@ interface CommitInspectorProps {
   snapshot: GraphSnapshot | null;
   onClose: () => void;
   onNavigateToNetwork: (node: FileNode) => void;
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export const CommitInspector: React.FC<CommitInspectorProps> = ({
@@ -27,6 +30,8 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   snapshot,
   onClose,
   onNavigateToNetwork,
+  isCollapsed = false,
+  onToggleCollapse,
 }) => {
   const [details, setDetails] = useState<CommitDetails | null>(null);
   const [loading, setLoading] = useState(false);
@@ -74,10 +79,11 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   }, [selectedCommit]);
 
   const handleCopyHash = () => {
-    if (!selectedCommit) return;
-    navigator.clipboard.writeText(selectedCommit.hash);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (!selectedCommit || !navigator?.clipboard) return;
+    navigator.clipboard.writeText(selectedCommit.hash).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
   };
 
   const handleFileClick = (file: FileChange) => {
@@ -99,19 +105,31 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   if (!selectedCommit) return null;
 
   return (
-    <aside className="inspector-panel">
+    <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
       {/* Header */}
       <div className="inspector-header">
-        <div className="inspector-title">
+        <div className="inspector-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <GitCommit size={16} color="#38bdf8" />
           <span className="mono">{selectedCommit.short_hash}</span>
         </div>
-        <button className="icon-btn" onClick={onClose} title="Close inspector">
-          <X size={16} />
-        </button>
+        <div className="header-action-group">
+          {onToggleCollapse && (
+            <button
+              className="icon-action-btn"
+              onClick={onToggleCollapse}
+              title="Collapse inspector"
+              aria-label="Collapse inspector"
+            >
+              <PanelRightClose size={15} />
+            </button>
+          )}
+          <button className="close-btn" onClick={onClose} title="Close inspector">
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
-      <div className="inspector-content">
+      <div key={selectedCommit.hash} className="inspector-content animate-reveal">
         {/* Notice toast if file clicked isn't in working tree */}
         {notice && (
           <div className="notice-banner">

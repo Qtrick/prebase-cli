@@ -36,6 +36,7 @@ import {
   ArrowDown,
   Compass,
   Target,
+  PanelRightOpen,
 } from 'lucide-react';
 import './App.css';
 
@@ -58,11 +59,13 @@ export const App: React.FC = () => {
   const [focusHistory, setFocusHistory] = useState<string[]>([]);
   const [missingFocusPath, setMissingFocusPath] = useState<string | null>(null);
   const [independent2DViewport, setIndependent2DViewport] = useState<Viewport2D>({ panX: 0, panY: 0, zoom: 1.0 });
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const focusResolvedRef = useRef(false);
 
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('prebase_theme') as 'dark' | 'light') || 'dark';
+    const stored = localStorage.getItem('prebase_theme');
+    return stored === 'light' ? 'light' : 'dark';
   });
 
   const toggleTheme = useCallback(() => {
@@ -786,12 +789,9 @@ export const App: React.FC = () => {
               </div>
             ) : (
               <>
+              <div className="graph-mode-stage" style={{ position: 'relative', width: '100%', height: '100%' }}>
                 <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: networkViewMode === '3d' ? 'block' : 'none',
-                  }}
+                  className={`canvas-view-layer ${networkViewMode === '3d' ? 'active' : 'inactive'}`}
                   aria-hidden={networkViewMode !== '3d'}
                 >
                   <NetworkCanvas
@@ -808,14 +808,11 @@ export const App: React.FC = () => {
                     isVisible={networkViewMode === '3d'}
                     insets={networkInsets}
                     onAnnounce={setAnnouncement}
+                    theme={theme}
                   />
                 </div>
                 <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: networkViewMode === '2d' ? 'block' : 'none',
-                  }}
+                  className={`canvas-view-layer ${networkViewMode === '2d' ? 'active' : 'inactive'}`}
                   aria-hidden={networkViewMode !== '2d'}
                 >
                   <RelationshipCanvas
@@ -839,6 +836,7 @@ export const App: React.FC = () => {
                     isVisible={networkViewMode === '2d'}
                   />
                 </div>
+              </div>
               </>
             )}
           </div>
@@ -913,6 +911,8 @@ export const App: React.FC = () => {
           snapshot={snapshot}
           onClose={() => setSelectedCommit(null)}
           onNavigateToNetwork={handleNavigateToNetwork}
+          isCollapsed={inspectorCollapsed}
+          onToggleCollapse={() => setInspectorCollapsed((c) => !c)}
         />
       ) : (
         <Inspector
@@ -935,7 +935,22 @@ export const App: React.FC = () => {
           }}
           onRefocus2D={handleRefocusNode2D}
           onSwitchTo3D={() => handleSwitchNetworkMode('3d')}
+          isCollapsed={inspectorCollapsed}
+          onToggleCollapse={() => setInspectorCollapsed((c) => !c)}
         />
+      )}
+
+      {/* Floating Reopen Inspector Button when Collapsed */}
+      {inspectorCollapsed && (
+        <button
+          className="inspector-reopen-btn"
+          onClick={() => setInspectorCollapsed(false)}
+          title="Open inspector"
+          aria-label="Open inspector"
+        >
+          <PanelRightOpen size={14} />
+          <span>Inspect</span>
+        </button>
       )}
 
       {/* Screen Reader Live Region for Accessibility Announcements */}

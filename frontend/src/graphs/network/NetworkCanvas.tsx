@@ -33,6 +33,11 @@ import {
   computeCenterLockedTransform,
   isCenterDeadZone,
   ProjectedGraph,
+  shouldDrawNodeLabel,
+  calculateReleaseSpeed,
+  shouldInitiateInertia,
+  clampLaunchVelocity,
+  stepRotationalInertia,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
@@ -57,6 +62,7 @@ interface NetworkCanvasProps {
   isVisible?: boolean;
   insets?: ViewportInsets;
   onAnnounce?: (message: string) => void;
+  theme?: 'dark' | 'light';
 }
 
 interface CameraAnimation {
@@ -80,6 +86,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   isVisible = true,
   insets,
   onAnnounce,
+  theme = 'dark',
 }): React.ReactElement => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -109,6 +116,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const rafIdRef = useRef<number | null>(null);
   const cameraAnimRef = useRef<CameraAnimation | null>(null);
   const renderLoopRef = useRef<(timestamp: number) => void>(() => {});
+
+  // Damped rotational inertia physics
+  const inertiaRafRef = useRef<number | null>(null);
+  const velocityRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+  const lastPointerTimeRef = useRef<number>(0);
+  const lastPointerPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   const requestRender = useCallback(() => {
     isDirtyRef.current = true;
@@ -255,6 +269,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, currentCam);
       const fit = computeNetworkFitTransform(proj.bounds, width, height, insets);
 
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
+
       if (prefersReducedMotion) {
         cameraRef.current = {
           ...currentCam,
@@ -305,6 +324,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         panY: fit.panY,
         zoom: fit.zoom,
       };
+
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
 
       if (prefersReducedMotion) {
         cameraRef.current = targetCamera;
@@ -365,6 +389,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       panY: cur.panY,
       zoom: cur.zoom,
     };
+
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
 
     if (prefersReducedMotion) {
       cameraRef.current = targetCamera;
@@ -577,17 +606,25 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.save();
           ctx.globalAlpha = isDimmed ? 0.2 : depthAlpha;
 
+          const isLight = theme === 'light';
+
           // Selection / Hover outer ring
           if (isSelected) {
             ctx.beginPath();
-            ctx.arc(pNode.screenX, pNode.screenY, screenR + 4.5, 0, Math.PI * 2);
-            ctx.strokeStyle = '#2dd4bf';
-            ctx.lineWidth = 2.5;
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 6, 0, Math.PI * 2);
+            ctx.strokeStyle = isLight ? 'rgba(13, 148, 136, 0.45)' : 'rgba(45, 212, 191, 0.45)';
+            ctx.lineWidth = 3.0;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 3, 0, Math.PI * 2);
+            ctx.strokeStyle = isLight ? '#0d9488' : '#2dd4bf';
+            ctx.lineWidth = 2.0;
             ctx.stroke();
           } else if (isHovered) {
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 3.5, 0, Math.PI * 2);
-            ctx.strokeStyle = '#38bdf8';
+            ctx.strokeStyle = isLight ? '#0284c7' : '#38bdf8';
             ctx.lineWidth = 2.0;
             ctx.stroke();
           }
@@ -602,25 +639,35 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.fill();
 
           ctx.strokeStyle = isSelected
-            ? '#2dd4bf'
+            ? (isLight ? '#0d9488' : '#2dd4bf')
             : isHovered
-              ? '#38bdf8'
-              : 'rgba(15, 23, 42, 0.85)';
+              ? (isLight ? '#0284c7' : '#38bdf8')
+              : (isLight ? 'rgba(255, 255, 255, 0.9)' : 'rgba(15, 23, 42, 0.85)');
           ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
           ctx.stroke();
           ctx.restore();
         }
 
-        // 4. Draw Node Labels
+        // 4. Draw Node Labels (Intelligent Layered Hierarchy)
+        const isLight = theme === 'light';
         for (let i = 0; i < sortedNodes.length; i++) {
           const pNode = sortedNodes[i];
           const isSelected = selectedNodeId === pNode.id;
           const isHovered = hoveredNodeId === pNode.id;
-          const isHub =
-            pNode.node.direct_dependency_count + pNode.node.direct_dependent_count >= 4;
-          const shouldDrawLabel = isSelected || isHovered || camera.zoom > 0.85 || isHub;
+          const isConnectedToSelected = selectedNodeId ? neighborMap.has(pNode.id) : false;
+          const totalDegree =
+            pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
 
-          if (!shouldDrawLabel) continue;
+          const shouldDraw = shouldDrawNodeLabel({
+            isSelected,
+            isHovered,
+            isConnectedToSelected,
+            projectedZ: pNode.projected.z,
+            totalDegree,
+            zoom: camera.zoom,
+          });
+
+          if (!shouldDraw) continue;
 
           const screenR = pNode.radius * camera.zoom;
           const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
@@ -633,12 +680,16 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const labelY = pNode.screenY + screenR + 4;
           const text = pNode.node.filename;
 
-          // Halo text background for legibility
-          ctx.strokeStyle = 'rgba(10, 14, 23, 0.9)';
+          // Theme-adaptive halo stroke for maximum legibility
+          ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
           ctx.lineWidth = 3.5;
           ctx.strokeText(text, pNode.screenX, labelY);
 
-          ctx.fillStyle = isSelected ? '#2dd4bf' : isHovered ? '#38bdf8' : '#e2e8f0';
+          ctx.fillStyle = isSelected
+            ? (isLight ? '#0d9488' : '#2dd4bf')
+            : isHovered
+              ? (isLight ? '#0284c7' : '#38bdf8')
+              : (isLight ? '#0f172a' : '#f1f5f9');
           ctx.fillText(text, pNode.screenX, labelY);
           ctx.restore();
         }
@@ -651,26 +702,36 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },
-    [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, neighborMap, isVisible]
+    [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, neighborMap, isVisible, theme]
   );
   renderLoopRef.current = renderLoop;
 
-  // Trigger RAF whenever external dependencies or visibility change
+  // Trigger RAF whenever external dependencies, visibility, or theme change
   useEffect(() => {
     if (isVisible) {
       requestRender();
-    } else if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
+    } else {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
     }
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, isVisible, requestRender]);
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, isVisible, theme, requestRender]);
 
-  // Clean up RAF on unmount
+  // Clean up RAF and inertia on unmount
   useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
+      }
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
       }
     };
   }, []);
@@ -761,6 +822,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     // Focus canvas on click for keyboard interaction
     canvasRef.current?.focus();
 
+    // Cancel any running camera animation or rotational inertia immediately
+    cameraAnimRef.current = null;
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
+
+    lastPointerTimeRef.current = performance.now();
+    lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+    velocityRef.current = { vx: 0, vy: 0 };
+
     // Distinguish primary drag (rotation) from Shift-drag or middle button (pan)
     const isShiftOrMiddle = e.shiftKey || e.button === 1 || e.button === 2;
     const mode = isShiftOrMiddle ? 'panning' : 'rotating';
@@ -803,11 +875,24 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
       if (!gesture.exceededThreshold && Math.hypot(dx, dy) > threshold) {
         gesture.exceededThreshold = true;
+        if (!hasInteracted) setHasInteracted(true);
       }
 
       if (gesture.exceededThreshold) {
         // Cancel any running camera animation
         cameraAnimRef.current = null;
+
+        // Track pointer velocity for gentle, natural release inertia
+        const now = performance.now();
+        const dt = now - lastPointerTimeRef.current;
+        if (dt > 0 && dt < 120) {
+          velocityRef.current = {
+            vx: (e.clientX - lastPointerPosRef.current.x) / dt,
+            vy: (e.clientY - lastPointerPosRef.current.y) / dt,
+          };
+        }
+        lastPointerTimeRef.current = now;
+        lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
 
         if (gesture.mode === 'rotating') {
           // Natural rotation: drag right rotates yaw negatively, drag down rotates pitch positively
@@ -868,6 +953,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const handlePointerUp = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
     const wasDragging = gesture.exceededThreshold;
+    const mode = gesture.mode;
 
     cleanUpPointerGesture(e);
 
@@ -889,6 +975,49 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           onSelectNode(null);
           onSelectEdge(null);
         }
+      }
+    } else if (mode === 'rotating') {
+      // Natural interruptible rotational inertia upon release
+      const now = performance.now();
+      const timeSinceLastMove = now - lastPointerTimeRef.current;
+      const speed = calculateReleaseSpeed(velocityRef.current.vx, velocityRef.current.vy, timeSinceLastMove);
+
+      if (shouldInitiateInertia(speed, prefersReducedMotion)) {
+        let { vx, vy } = clampLaunchVelocity(velocityRef.current);
+        let lastT = performance.now();
+
+        const coast = (t: number) => {
+          const delta = Math.min(32, t - lastT);
+          lastT = t;
+
+          const step = stepRotationalInertia({
+            vx,
+            vy,
+            camera: cameraRef.current,
+            deltaMs: delta,
+          });
+
+          vx = step.vx;
+          vy = step.vy;
+          cameraRef.current = step.camera;
+
+          if (step.isDone) {
+            inertiaRafRef.current = null;
+            return;
+          }
+
+          if (keepGraphCentered) {
+            applyCenterLock(true);
+          }
+          requestRender();
+
+          inertiaRafRef.current = requestAnimationFrame(coast);
+        };
+
+        if (inertiaRafRef.current !== null) {
+          cancelAnimationFrame(inertiaRafRef.current);
+        }
+        inertiaRafRef.current = requestAnimationFrame(coast);
       }
     }
   };
@@ -914,6 +1043,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
+    if (!hasInteracted) setHasInteracted(true);
 
     const rect = canvas.getBoundingClientRect();
     const cursorX = e.clientX - rect.left;
@@ -952,6 +1087,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
   // Keyboard accessibility
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
+
     if (e.key === 'Escape') {
       onSelectNode(null);
       onSelectEdge(null);
@@ -963,6 +1103,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       if (shift) {
         if (keepGraphCentered) {
           onToggleCenterLock?.();
@@ -978,6 +1119,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       requestRender();
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       if (shift) {
         if (keepGraphCentered) {
           onToggleCenterLock?.();
@@ -993,6 +1135,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       requestRender();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       if (shift) {
         if (keepGraphCentered) {
           onToggleCenterLock?.();
@@ -1008,6 +1151,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       requestRender();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       if (shift) {
         if (keepGraphCentered) {
           onToggleCenterLock?.();
@@ -1023,6 +1167,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       requestRender();
     } else if (e.key === '+' || e.key === '=') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       const rect = canvasRef.current?.getBoundingClientRect();
       const w = rect?.width || 800;
       const h = rect?.height || 600;
@@ -1034,6 +1179,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       requestRender();
     } else if (e.key === '-' || e.key === '_') {
       e.preventDefault();
+      if (!hasInteracted) setHasInteracted(true);
       const rect = canvasRef.current?.getBoundingClientRect();
       const w = rect?.width || 800;
       const h = rect?.height || 600;
@@ -1084,6 +1230,18 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         onWheel={handleWheel}
         onKeyDown={handleKeyDown}
       />
+
+      <div
+        className={`interaction-hint-badge ${hasInteracted ? 'hidden' : ''}`}
+        aria-hidden="true"
+      >
+        <div className="hint-dot" />
+        <span>Drag to rotate</span>
+        <span style={{ opacity: 0.35 }}>•</span>
+        <span>Shift+drag to pan</span>
+        <span style={{ opacity: 0.35 }}>•</span>
+        <span>Scroll to zoom</span>
+      </div>
     </div>
   );
 };

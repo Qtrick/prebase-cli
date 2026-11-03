@@ -736,4 +736,123 @@ export function resetGestureState(camera?: NetworkCamera): NetworkGestureState {
   };
 }
 
+// ============================================================================
+// Label Hierarchy and Visibility Rules
+// ============================================================================
 
+export interface NodeLabelVisibilityParams {
+  isSelected: boolean;
+  isHovered: boolean;
+  isConnectedToSelected: boolean;
+  projectedZ: number;
+  totalDegree: number;
+  zoom: number;
+}
+
+export function shouldDrawNodeLabel(params: NodeLabelVisibilityParams): boolean {
+  const { isSelected, isHovered, isConnectedToSelected, projectedZ, totalDegree, zoom } = params;
+  if (isSelected || isHovered) {
+    return true;
+  }
+  const isFrontFacing = projectedZ >= -15;
+  if (isConnectedToSelected && (isFrontFacing || zoom > 1.2)) {
+    return true;
+  }
+  const isHub = totalDegree >= 4;
+  if (zoom <= 1.3) {
+    return isHub && isFrontFacing;
+  } else if (zoom <= 2.2) {
+    return isFrontFacing && (totalDegree >= 2 || projectedZ > 20);
+  } else {
+    return isFrontFacing || projectedZ > -40;
+  }
+}
+
+// ============================================================================
+// Rotational Inertia Physics Calculations
+// ============================================================================
+
+export function calculateReleaseSpeed(
+  vx: number,
+  vy: number,
+  timeSinceLastMove: number,
+  timeoutMs = 75
+): number {
+  if (timeSinceLastMove > timeoutMs) return 0;
+  return Math.hypot(vx, vy);
+}
+
+export function shouldInitiateInertia(
+  speed: number,
+  prefersReducedMotion: boolean,
+  minSpeedThreshold = 0.15
+): boolean {
+  return speed > minSpeedThreshold && !prefersReducedMotion;
+}
+
+export function clampLaunchVelocity(
+  velocity: { vx: number; vy: number },
+  maxSpeed = 2.2
+): { vx: number; vy: number } {
+  return {
+    vx: Math.max(-maxSpeed, Math.min(maxSpeed, velocity.vx)),
+    vy: Math.max(-maxSpeed, Math.min(maxSpeed, velocity.vy)),
+  };
+}
+
+export interface StepInertiaParams {
+  vx: number;
+  vy: number;
+  camera: NetworkCamera;
+  deltaMs: number;
+  friction?: number;
+  epsilon?: number;
+  rotationSensitivity?: number;
+}
+
+export interface StepInertiaResult {
+  vx: number;
+  vy: number;
+  camera: NetworkCamera;
+  isDone: boolean;
+}
+
+export function stepRotationalInertia(params: StepInertiaParams): StepInertiaResult {
+  const {
+    vx,
+    vy,
+    camera,
+    deltaMs,
+    friction = 0.88,
+    epsilon = 0.015,
+    rotationSensitivity = ROTATION_SENSITIVITY,
+  } = params;
+
+  // Natural exponential friction decay normalized to 16ms frame intervals
+  const decay = Math.pow(friction, deltaMs / 16);
+  const nextVx = vx * decay;
+  const nextVy = vy * decay;
+
+  if (Math.hypot(nextVx, nextVy) < epsilon) {
+    return {
+      vx: 0,
+      vy: 0,
+      camera,
+      isDone: true,
+    };
+  }
+
+  const nextYaw = wrapRotationAngle(camera.yaw - nextVx * deltaMs * rotationSensitivity);
+  const nextPitch = clampPitch(camera.pitch + nextVy * deltaMs * rotationSensitivity);
+
+  return {
+    vx: nextVx,
+    vy: nextVy,
+    camera: {
+      ...camera,
+      yaw: nextYaw,
+      pitch: nextPitch,
+    },
+    isDone: false,
+  };
+}

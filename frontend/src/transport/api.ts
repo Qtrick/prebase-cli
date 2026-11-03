@@ -98,8 +98,10 @@ export const api = {
     request<FileInspection>(`/api/v1/files/${encodeURIComponent(fileId)}`, signal),
   inspectEdge: (edgeId: string, signal?: AbortSignal) =>
     request<DependencyEdge>(`/api/v1/edges/${encodeURIComponent(edgeId)}`, signal),
-  getSource: (filePath: string, signal?: AbortSignal) =>
-    request<{ path: string; content: string }>(`/api/v1/source/${filePath}`, signal),
+  getSource: (filePath: string, signal?: AbortSignal) => {
+    const encoded = filePath.split('/').map(encodeURIComponent).join('/');
+    return request<{ path: string; content: string }>(`/api/v1/source/${encoded}`, signal);
+  },
 
   // Temporal & Git
   getHistory: (limit = 50, cursor?: string | null, signal?: AbortSignal) => {

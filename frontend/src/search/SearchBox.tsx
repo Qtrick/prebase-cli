@@ -99,10 +99,10 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
           ref={inputRef}
           type="text"
           className="search-input"
-          placeholder="Search files... (Press / to focus)"
+          placeholder="Search files..."
           value={query}
           role="combobox"
-          aria-expanded={isOpen && results.length > 0}
+          aria-expanded={isOpen && (results.length > 0 || query.trim().length > 0)}
           aria-autocomplete="list"
           aria-controls="search-dropdown-list"
           aria-activedescendant={
@@ -116,6 +116,7 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
         />
+        {!query && <span className="search-kbd-hint">/</span>}
         {query && (
           <button
             className="clear-search-btn"
@@ -130,45 +131,50 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
         )}
       </div>
 
-      {isOpen && results.length > 0 && (
+      {isOpen && (
         <ul id="search-dropdown-list" className="search-dropdown" role="listbox" aria-label="Search suggestions">
-          {results.map((node, index) => {
-            const isSelected = index === selectedIndex;
-            return (
-              <li
-                key={node.id}
-                id={`search-item-${node.id}`}
-                role="option"
-                aria-selected={isSelected}
-                className={`search-item ${isSelected ? 'active' : ''}`}
-                onMouseEnter={() => setSelectedIndex(index)}
-                onClick={() => handleSelect(node, { reveal: false })}
-              >
-                <div
-                  className="search-color-dot"
-                  style={{ backgroundColor: getFileTypeColor(node.relative_path) }}
-                />
-                <div className="search-item-info">
-                  <span className="search-item-name">{node.filename}</span>
-                  <span className="search-item-path mono">{node.relative_path}</span>
-                </div>
-                <span className="search-item-degree">
-                  {(node.direct_dependency_count || 0) + (node.direct_dependent_count || 0)} links
-                </span>
-                <button
-                  type="button"
-                  className="search-reveal-action"
-                  title={`Focus ${node.filename} in 3D`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleSelect(node, { reveal: true });
-                  }}
+          {results.length === 0 && query.trim().length > 0 ? (
+            <li className="search-empty-state" role="status">No files matching "{query}"</li>
+          ) : (
+            results.map((node, index) => {
+              const isSelected = index === selectedIndex;
+              return (
+                <li
+                  key={node.id}
+                  id={`search-item-${node.id}`}
+                  role="option"
+                  aria-selected={isSelected}
+                  className={`search-item ${isSelected ? 'active' : ''}`}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  onClick={() => handleSelect(node, { reveal: false })}
                 >
-                  <LocateFixed size={13} />
-                </button>
-              </li>
-            );
-          })}
+                  <div
+                    className="search-color-dot"
+                    style={{ backgroundColor: getFileTypeColor(node.relative_path) }}
+                  />
+                  <div className="search-item-info">
+                    <span className="search-item-name">{node.filename}</span>
+                    <span className="search-item-path mono">{node.relative_path}</span>
+                  </div>
+                  <span className="search-item-degree">
+                    {(node.direct_dependency_count || 0) + (node.direct_dependent_count || 0)} links
+                  </span>
+                  <button
+                    type="button"
+                    className="search-reveal-action"
+                    title={`Focus ${node.filename} in 3D`}
+                    aria-label={`Focus ${node.filename} in 3D`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSelect(node, { reveal: true });
+                    }}
+                  >
+                    <LocateFixed size={13} />
+                  </button>
+                </li>
+              );
+            })
+          )}
         </ul>
       )}
     </div>
