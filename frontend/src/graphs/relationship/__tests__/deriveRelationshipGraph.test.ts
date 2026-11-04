@@ -77,11 +77,11 @@ describe('deriveRelationshipGraph', () => {
       expect(relM.isDirectNeighbor).toBe(true);
       expect(relM.hopDistance).toBe(1);
 
-      // Verify Column metadata
+      // Verify Column metadata (in clear beginner-friendly language)
       expect(result.columns.map((c) => c.columnIndex)).toEqual([-1, 0, 1]);
-      expect(result.columns[0].title).toBe('Dependents');
-      expect(result.columns[1].title).toBe('Focus File');
-      expect(result.columns[2].title).toBe('Dependencies');
+      expect(result.columns[0].title).toBe('Files that use this file');
+      expect(result.columns[1].title).toBe('Selected File');
+      expect(result.columns[2].title).toBe('Files this file uses');
     });
   });
 

@@ -13,6 +13,8 @@ import {
   projectGraph,
   computeNetworkFitTransform,
 } from '../render/networkRenderMath';
+import { findEntryPointCandidate } from '../../../utils/entryPointDetection';
+import { getAreaIdForPath } from '../../../utils/repositoryAreas';
 
 export type NetworkLayoutMode = 'sphere' | 'organic';
 
@@ -34,6 +36,7 @@ export interface SnapshotRevisionResult {
  * - If the repository ID is new/different, the graph layout is computed using the 3D Sphere
  *   layout (or organic if specified) to form the iconic dependency orb, and an initial fit
  *   view transform is applied.
+ * - Area-aware sorting ensures files in the same directory cluster in contiguous spherical sectors.
  */
 export function processSnapshotRevision(
   currentState: SnapshotRevisionState,
@@ -55,10 +58,23 @@ export function processSnapshotRevision(
   const isNewRepo =
     currentState.repositoryId !== snapshot.repository_id || currentState.positions.size === 0;
 
-  const layoutNodes = snapshot.nodes.map((n, idx) => ({
+  const entryCandidate = findEntryPointCandidate(snapshot.nodes);
+  const entryNodeId = entryCandidate?.nodeId ?? null;
+
+  // Group nodes by architectural area so adjacent spiral indices land in the same spherical sector
+  const sortedNodes = [...snapshot.nodes].sort((a, b) => {
+    const areaA = getAreaIdForPath(a.relative_path);
+    const areaB = getAreaIdForPath(b.relative_path);
+    if (areaA !== areaB) {
+      return areaA.localeCompare(areaB);
+    }
+    return a.relative_path.localeCompare(b.relative_path);
+  });
+
+  const layoutNodes = sortedNodes.map((n) => ({
     id: n.id,
     val: (n.direct_dependency_count || 0) + (n.direct_dependent_count || 0) + 1,
-    isEntry: idx === 0 || n.filename === 'index.ts' || n.filename === 'main.ts',
+    isEntry: entryNodeId !== null && n.id === entryNodeId,
   }));
 
   const layoutLinks = snapshot.edges.map((e) => ({

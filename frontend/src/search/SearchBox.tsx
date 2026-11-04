@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { FileNode } from '../types/graph';
 import { getFileTypeColor } from '../graphs/network/fileTypeColors';
 import { Search, X, LocateFixed } from 'lucide-react';
@@ -8,10 +8,81 @@ interface SearchBoxProps {
   onSelectNode: (node: FileNode, options?: { reveal?: boolean }) => void;
 }
 
+/**
+ * Checks whether the current element or event target is an active editable field
+ * (input, textarea, select, or contenteditable) to avoid stealing user typing.
+ */
+export function isEditableElement(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName?.toLowerCase() ?? '';
+  return (
+    tag === 'input' ||
+    tag === 'textarea' ||
+    tag === 'select' ||
+    (el as HTMLElement).isContentEditable === true
+  );
+}
+
+/**
+ * Deterministically ranks search matches by relevance:
+ * 1. Exact filename match (score 100)
+ * 2. Filename prefix match (score 75)
+ * 3. Filename substring match (score 50)
+ * 4. Path segment / substring match (score 25)
+ * Tie-breakers: shorter path length, then alphabetical relative_path.
+ */
+export function rankSearchResults(files: readonly FileNode[], query: string, limit = 10): FileNode[] {
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    // When empty, return top connected hub files as helpful starting points
+    return [...files]
+      .sort(
+        (a, b) =>
+          (b.direct_dependency_count + b.direct_dependent_count) -
+          (a.direct_dependency_count + a.direct_dependent_count)
+      )
+      .slice(0, 8);
+  }
+
+  const scored: { file: FileNode; score: number }[] = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const fn = file.filename.toLowerCase();
+    const rel = file.relative_path.toLowerCase();
+    const dotIdx = fn.lastIndexOf('.');
+    const fnBase = dotIdx > 0 ? fn.slice(0, dotIdx) : fn;
+
+    let score = 0;
+    if (fn === q || fnBase === q) {
+      score = 100;
+    } else if (fn.startsWith(q) || fnBase.startsWith(q)) {
+      score = 75;
+    } else if (fn.includes(q)) {
+      score = 50;
+    } else if (rel.includes(q)) {
+      score = 25;
+    }
+
+    if (score > 0) {
+      scored.push({ file, score });
+    }
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (a.file.relative_path.length !== b.file.relative_path.length) {
+      return a.file.relative_path.length - b.file.relative_path.length;
+    }
+    return a.file.relative_path.localeCompare(b.file.relative_path);
+  });
+
+  return scored.slice(0, limit).map((s) => s.file);
+}
+
 export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => {
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
-  const [results, setResults] = useState<FileNode[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -19,7 +90,14 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
   // Keyboard shortcut: '/' or 'Cmd+K' to focus search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === '/' && document.activeElement !== inputRef.current) || (e.key === 'k' && (e.metaKey || e.ctrlKey))) {
+      // Never steal focus if the user is already typing in an editable field
+      if (e.key === '/') {
+        if (!isEditableElement(document.activeElement)) {
+          e.preventDefault();
+          inputRef.current?.focus();
+          setIsOpen(true);
+        }
+      } else if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         inputRef.current?.focus();
         setIsOpen(true);
@@ -32,29 +110,15 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Filter files on query change
+  // Compute ranked search results
+  const results = useMemo(() => {
+    return rankSearchResults(files, query, 10);
+  }, [files, query]);
+
+  // Reset selected index on query change
   useEffect(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) {
-      setResults(files.slice(0, 8));
-      return;
-    }
-
-    const matched: FileNode[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      if (
-        f.filename.toLowerCase().includes(q) ||
-        f.relative_path.toLowerCase().includes(q)
-      ) {
-        matched.push(f);
-        if (matched.length >= 10) break;
-      }
-    }
-
-    setResults(matched);
     setSelectedIndex(0);
-  }, [query, files]);
+  }, [query]);
 
   // Click outside to dismiss
   useEffect(() => {
@@ -180,4 +244,3 @@ export const SearchBox: React.FC<SearchBoxProps> = ({ files, onSelectNode }) => 
     </div>
   );
 };
-

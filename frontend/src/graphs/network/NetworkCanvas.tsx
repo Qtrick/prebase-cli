@@ -41,6 +41,8 @@ import {
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
+import { findEntryPointCandidate } from '../../utils/entryPointDetection';
+import { getAreaIdForPath } from '../../utils/repositoryAreas';
 
 export interface RevealRequest {
   nodeId: string;
@@ -52,6 +54,7 @@ interface NetworkCanvasProps {
   snapshot: GraphSnapshot;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
+  selectedAreaId?: string | null;
   onSelectNode: (node: FileNode | null) => void;
   onSelectEdge: (edge: DependencyEdge | null) => void;
   revealRequest?: RevealRequest | null;
@@ -76,6 +79,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   snapshot,
   selectedNodeId,
   selectedEdgeId,
+  selectedAreaId = null,
   onSelectNode,
   onSelectEdge,
   revealRequest,
@@ -92,6 +96,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [showLegend, setShowLegend] = useState(false);
   const [positions, setPositions] = useState<Map<string, Point3D>>(new Map());
   const positionsRef = useRef<Map<string, Point3D>>(positions);
   positionsRef.current = positions;
@@ -115,7 +120,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const isDirtyRef = useRef<boolean>(true);
   const rafIdRef = useRef<number | null>(null);
   const cameraAnimRef = useRef<CameraAnimation | null>(null);
-  const renderLoopRef = useRef<(timestamp: number) => void>(() => {});
+  const renderLoopRef = useRef<(timestamp: number) => void>(() => { });
 
   // Damped rotational inertia physics
   const inertiaRafRef = useRef<number | null>(null);
@@ -269,11 +274,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, currentCam);
       const fit = computeNetworkFitTransform(proj.bounds, width, height, insets);
 
-      if (inertiaRafRef.current !== null) {
-        cancelAnimationFrame(inertiaRafRef.current);
-        inertiaRafRef.current = null;
-      }
-
       if (prefersReducedMotion) {
         cameraRef.current = {
           ...currentCam,
@@ -324,11 +324,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         panY: fit.panY,
         zoom: fit.zoom,
       };
-
-      if (inertiaRafRef.current !== null) {
-        cancelAnimationFrame(inertiaRafRef.current);
-        inertiaRafRef.current = null;
-      }
 
       if (prefersReducedMotion) {
         cameraRef.current = targetCamera;
@@ -390,11 +385,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       zoom: cur.zoom,
     };
 
-    if (inertiaRafRef.current !== null) {
-      cancelAnimationFrame(inertiaRafRef.current);
-      inertiaRafRef.current = null;
-    }
-
     if (prefersReducedMotion) {
       cameraRef.current = targetCamera;
       requestRender();
@@ -420,6 +410,24 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     }
     return map;
   }, [snapshot.edges]);
+
+  // Grounded entry point detection (never defaults arbitrarily to nodes[0])
+  const entryCandidate = useMemo(() => {
+    return findEntryPointCandidate(snapshot.nodes);
+  }, [snapshot.nodes]);
+
+  // Track duplicate filenames for directory disambiguation
+  const duplicateFilenames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const node of snapshot.nodes) {
+      counts.set(node.filename, (counts.get(node.filename) || 0) + 1);
+    }
+    const dupes = new Set<string>();
+    for (const [name, count] of counts.entries()) {
+      if (count > 1) dupes.add(name);
+    }
+    return dupes;
+  }, [snapshot.nodes]);
 
   // Container resize observer
   useEffect(() => {
@@ -507,7 +515,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
         // 1. Authoritative projection pass
         const projectOptions = {
-          entryNodeId: snapshot.nodes[0]?.id,
+          entryNodeId: entryCandidate?.nodeId,
           selectedNodeId,
           hoveredNodeId,
         };
@@ -546,20 +554,31 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           );
           if (!desc) continue;
 
-          edgesToDraw.push({ p1, p2, desc, isEdgeSelected });
+          // If an architectural area is selected and there is no active node highlight,
+          // dim edges that don't connect to or from this area
+          let areaAlphaMultiplier = 1.0;
+          if (selectedAreaId && !activeHighlightId) {
+            const srcArea = getAreaIdForPath(p1.node.relative_path);
+            const tgtArea = getAreaIdForPath(p2.node.relative_path);
+            if (srcArea !== selectedAreaId && tgtArea !== selectedAreaId) {
+              areaAlphaMultiplier = 0.08;
+            }
+          }
+
+          edgesToDraw.push({ p1, p2, desc, isEdgeSelected, areaAlphaMultiplier });
         }
 
         edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
 
         for (let i = 0; i < edgesToDraw.length; i++) {
-          const { p1, p2, desc, isEdgeSelected } = edgesToDraw[i];
+          const { p1, p2, desc, isEdgeSelected, areaAlphaMultiplier } = edgesToDraw[i];
           ctx.save();
           ctx.beginPath();
           ctx.moveTo(p1.screenX, p1.screenY);
           ctx.lineTo(p2.screenX, p2.screenY);
           ctx.strokeStyle = isEdgeSelected ? '#38bdf8' : desc.color;
           ctx.lineWidth = isEdgeSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
-          ctx.globalAlpha = isEdgeSelected ? 1.0 : desc.alpha;
+          ctx.globalAlpha = (isEdgeSelected ? 1.0 : desc.alpha) * areaAlphaMultiplier;
           if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
           ctx.stroke();
 
@@ -598,13 +617,19 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const pNode = sortedNodes[i];
           const isSelected = selectedNodeId === pNode.id;
           const isHovered = hoveredNodeId === pNode.id;
-          const isDimmed = Boolean(connectedNodes && !connectedNodes.has(pNode.id));
+
+          let isDimmed = false;
+          if (connectedNodes) {
+            isDimmed = !connectedNodes.has(pNode.id);
+          } else if (selectedAreaId) {
+            isDimmed = getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId;
+          }
 
           const screenR = pNode.radius * camera.zoom;
           const depthAlpha = computeDepthAlpha(pNode.projected.depthScale);
 
           ctx.save();
-          ctx.globalAlpha = isDimmed ? 0.2 : depthAlpha;
+          ctx.globalAlpha = isDimmed ? 0.18 : depthAlpha;
 
           const isLight = theme === 'light';
 
@@ -632,10 +657,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           // Node glyph body
           ctx.beginPath();
           ctx.arc(pNode.screenX, pNode.screenY, screenR, 0, Math.PI * 2);
-          ctx.fillStyle =
-            pNode.id === snapshot.nodes[0]?.id
-              ? ENTRY_NODE_COLOR
-              : getFileTypeColor(pNode.node.relative_path);
+          const isMainEntry = entryCandidate !== null && pNode.id === entryCandidate.nodeId;
+          ctx.fillStyle = isMainEntry
+            ? ENTRY_NODE_COLOR
+            : getFileTypeColor(pNode.node.relative_path);
           ctx.fill();
 
           ctx.strokeStyle = isSelected
@@ -648,13 +673,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.restore();
         }
 
-        // 4. Draw Node Labels (Intelligent Layered Hierarchy)
+        // 4. Draw Node Labels (Intelligent Layered Hierarchy + Screen-Space Collision Suppression)
         const isLight = theme === 'light';
+        const placedLabelRects: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+
         for (let i = 0; i < sortedNodes.length; i++) {
           const pNode = sortedNodes[i];
           const isSelected = selectedNodeId === pNode.id;
           const isHovered = hoveredNodeId === pNode.id;
-          const isConnectedToSelected = selectedNodeId ? neighborMap.has(pNode.id) : false;
+          // Bugfix 4.1: neighborMap.get(selectedNodeId)?.has(pNode.id)
+          const isConnectedToSelected =
+            selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
           const totalDegree =
             pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
 
@@ -669,16 +698,53 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
           if (!shouldDraw) continue;
 
+          // Disambiguate duplicate filenames with parent directory prefix
+          let text = pNode.node.filename;
+          if (duplicateFilenames.has(pNode.node.filename)) {
+            const parts = pNode.node.relative_path.split('/');
+            if (parts.length > 1) {
+              text = `${parts[parts.length - 2]}/${pNode.node.filename}`;
+            }
+          }
+
           const screenR = pNode.radius * camera.zoom;
           const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
 
           ctx.save();
           ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+          const textWidth = ctx.measureText(text).width;
+          const labelY = pNode.screenY + screenR + 4;
+          const rect = {
+            x1: pNode.screenX - textWidth / 2 - 4,
+            y1: labelY - 2,
+            x2: pNode.screenX + textWidth / 2 + 4,
+            y2: labelY + fontSize + 2,
+          };
+
+          const isPriority = isSelected || isHovered;
+          if (!isPriority) {
+            let collides = false;
+            for (let j = 0; j < placedLabelRects.length; j++) {
+              const r = placedLabelRects[j];
+              if (
+                rect.x1 < r.x2 &&
+                rect.x2 > r.x1 &&
+                rect.y1 < r.y2 &&
+                rect.y2 > r.y1
+              ) {
+                collides = true;
+                break;
+              }
+            }
+            if (collides) {
+              ctx.restore();
+              continue;
+            }
+          }
+          placedLabelRects.push(rect);
+
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
-
-          const labelY = pNode.screenY + screenR + 4;
-          const text = pNode.node.filename;
 
           // Theme-adaptive halo stroke for maximum legibility
           ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
@@ -702,25 +768,31 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },
-    [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, neighborMap, isVisible, theme]
+    [
+      snapshot,
+      positions,
+      selectedNodeId,
+      selectedEdgeId,
+      hoveredNodeId,
+      selectedAreaId,
+      entryCandidate,
+      duplicateFilenames,
+      neighborMap,
+      isVisible,
+      theme,
+    ]
   );
   renderLoopRef.current = renderLoop;
 
-  // Trigger RAF whenever external dependencies, visibility, or theme change
+  // Trigger RAF whenever external dependencies or visibility change
   useEffect(() => {
     if (isVisible) {
       requestRender();
-    } else {
-      if (rafIdRef.current !== null) {
-        cancelAnimationFrame(rafIdRef.current);
-        rafIdRef.current = null;
-      }
-      if (inertiaRafRef.current !== null) {
-        cancelAnimationFrame(inertiaRafRef.current);
-        inertiaRafRef.current = null;
-      }
+    } else if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
     }
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, isVisible, theme, requestRender]);
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, isVisible, theme, requestRender]);
 
   // Clean up RAF and inertia on unmount
   useEffect(() => {
@@ -953,7 +1025,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const handlePointerUp = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
     const wasDragging = gesture.exceededThreshold;
-    const mode = gesture.mode;
 
     cleanUpPointerGesture(e);
 
@@ -976,7 +1047,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           onSelectEdge(null);
         }
       }
-    } else if (mode === 'rotating') {
+    } else if (gesture.mode === 'rotating') {
       // Natural interruptible rotational inertia upon release
       const now = performance.now();
       const timeSinceLastMove = now - lastPointerTimeRef.current;
@@ -1230,6 +1301,88 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         onWheel={handleWheel}
         onKeyDown={handleKeyDown}
       />
+
+      {/* Floating Beginner Legend & Guide Toggle Button */}
+      <button
+        type="button"
+        className={`graph-legend-toggle-btn ${showLegend ? 'active' : ''}`}
+        onClick={() => setShowLegend((prev) => !prev)}
+        aria-expanded={showLegend}
+        aria-label="Toggle Codebase Orb Guide and Legend"
+        title="Toggle Codebase Orb Guide and Legend"
+      >
+        <span className="legend-icon" aria-hidden="true">💡</span>
+        <span>Graph Guide</span>
+      </button>
+
+      {/* Dismissible Graph Legend Card */}
+      {showLegend && (
+        <div
+          className="graph-legend-card"
+          role="region"
+          aria-label="Network Graph Legend and Architectural Guide"
+        >
+          <div className="graph-legend-header">
+            <h4>Codebase Orb Guide</h4>
+            <button
+              type="button"
+              className="graph-legend-close"
+              onClick={() => setShowLegend(false)}
+              aria-label="Close guide"
+            >
+              ×
+            </button>
+          </div>
+          <p className="legend-desc">
+            Files in the same directory cluster in the same spherical sector. Connected lines represent code imports.
+          </p>
+          <div className="legend-section">
+            <span className="legend-label">File Colors</span>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#38bdf8' }} />
+              <span>TypeScript / JavaScript</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#f97316' }} />
+              <span>Rust / Systems</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#a855f7' }} />
+              <span>Styles & CSS</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#eab308' }} />
+              <span>Config & Data</span>
+            </div>
+            {entryCandidate && (
+              <div className="legend-row">
+                <span className="legend-swatch" style={{ background: ENTRY_NODE_COLOR }} />
+                <span>Primary Entry Candidate</span>
+              </div>
+            )}
+          </div>
+          <div className="legend-section">
+            <span className="legend-label">Connections</span>
+            <div className="legend-row">
+              <span className="legend-line solid" />
+              <span>Solid: Direct static import (arrow points to imported file)</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-line dashed" />
+              <span>Dashed: Dynamic or type-only dependency</span>
+            </div>
+          </div>
+          <div className="legend-section">
+            <span className="legend-label">Controls</span>
+            <div className="legend-keys">
+              <span><strong>Drag:</strong> Rotate orb</span>
+              <span><strong>Shift+drag:</strong> Pan</span>
+              <span><strong>Scroll:</strong> Zoom in/out</span>
+              <span><strong>Click file:</strong> Inspect relations</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div
         className={`interaction-hint-badge ${hasInteracted ? 'hidden' : ''}`}

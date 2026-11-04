@@ -529,14 +529,14 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const displayPath = getTruncatedText(ctx, node.node.relative_path, maxTextW, pathFont, true);
       ctx.fillText(displayPath, textX, pathY);
 
-      // Badges for Focus Node (dependencies and dependents counts)
+      // Badges for Focus Node (dependencies and dependents counts in clear, plain language)
       if (isFocus) {
-        ctx.font = '600 9px monospace';
+        ctx.font = '600 9px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = isLight ? '#0284c7' : '#38bdf8';
-        ctx.fillText(`IN: ${node.node.direct_dependent_count}`, left + node.width - 10, top + 20);
+        ctx.fillText(`Used by: ${node.node.direct_dependent_count}`, left + node.width - 10, top + 20);
         ctx.fillStyle = isLight ? '#0d9488' : '#2dd4bf';
-        ctx.fillText(`OUT: ${node.node.direct_dependency_count}`, left + node.width - 10, top + 36);
+        ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 10, top + 36);
       }
     }
 

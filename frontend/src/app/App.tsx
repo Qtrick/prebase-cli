@@ -91,6 +91,7 @@ export const App: React.FC = () => {
   const selectedNodeRef = useRef(selectedNode);
   selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
+  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
   const [keepGraphCentered, setKeepGraphCentered] = useState(true);
   const [announcement, setAnnouncement] = useState<string>('');
@@ -511,6 +512,14 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const handleSelectArea = useCallback((areaId: string | null) => {
+    setSelectedAreaId(areaId);
+    if (areaId) {
+      setSelectedNode(null);
+      setSelectedEdge(null);
+    }
+  }, []);
+
   // Cross-Graph: Switch from Network Inspector to Temporal with file history filter
   const handleViewFileHistory = useCallback((filePath: string) => {
     setTemporalFilterPath(filePath);
@@ -798,6 +807,7 @@ export const App: React.FC = () => {
                     snapshot={snapshot}
                     selectedNodeId={selectedNode?.id || null}
                     selectedEdgeId={selectedEdge?.id || null}
+                    selectedAreaId={selectedAreaId}
                     onSelectNode={handleSelectNode}
                     onSelectEdge={handleSelectEdge}
                     revealRequest={revealRequest}
@@ -918,11 +928,14 @@ export const App: React.FC = () => {
         <Inspector
           selectedNode={selectedNode}
           selectedEdge={selectedEdge}
+          selectedAreaId={selectedAreaId}
+          onSelectArea={handleSelectArea}
           snapshot={snapshot}
           onSelectNode={handleSelectNode}
           onClose={() => {
             setSelectedNode(null);
             setSelectedEdge(null);
+            setSelectedAreaId(null);
           }}
           onViewFileHistory={handleViewFileHistory}
           onRevealNode={handleExplicitRevealNode}

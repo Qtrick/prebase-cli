@@ -363,8 +363,8 @@ export function deriveRelationshipGraph(
     columns.push({
       role: 'dependent-2',
       columnIndex: -2,
-      title: '2nd-Hop Dependents',
-      subtitle: 'Files importing dependents',
+      title: 'Files using dependents',
+      subtitle: '2nd-hop dependents · Indirectly affected',
       nodes: finalNodes.filter((n) => n.role === 'dependent-2'),
       omittedCount: omittedSecondHopDependents,
       totalCount: allSecondHopDependents.length,
@@ -375,8 +375,8 @@ export function deriveRelationshipGraph(
     columns.push({
       role: 'dependent-1',
       columnIndex: -1,
-      title: 'Dependents',
-      subtitle: 'Files that import this file',
+      title: 'Files that use this file',
+      subtitle: 'Direct dependents · Incoming',
       nodes: finalNodes.filter((n) => n.role === 'dependent-1'),
       omittedCount: omittedDirectDependents,
       totalCount: allDirectDependents.length,
@@ -386,7 +386,7 @@ export function deriveRelationshipGraph(
   columns.push({
     role: 'focus',
     columnIndex: 0,
-    title: 'Focus File',
+    title: 'Selected File',
     subtitle: focusNode.relative_path,
     nodes: [focusRelNode],
     omittedCount: 0,
@@ -397,8 +397,8 @@ export function deriveRelationshipGraph(
     columns.push({
       role: 'dependency-1',
       columnIndex: 1,
-      title: 'Dependencies',
-      subtitle: 'Files imported by this file',
+      title: 'Files this file uses',
+      subtitle: 'Direct dependencies · Outgoing',
       nodes: finalNodes.filter((n) => n.role === 'dependency-1'),
       omittedCount: omittedDirectDependencies,
       totalCount: allDirectDependencies.length,
@@ -409,8 +409,8 @@ export function deriveRelationshipGraph(
     columns.push({
       role: 'dependency-2',
       columnIndex: 2,
-      title: '2nd-Hop Dependencies',
-      subtitle: 'Files imported by dependencies',
+      title: 'Files used by dependencies',
+      subtitle: '2nd-hop dependencies · Indirectly used',
       nodes: finalNodes.filter((n) => n.role === 'dependency-2'),
       omittedCount: omittedSecondHopDependencies,
       totalCount: allSecondHopDependencies.length,
