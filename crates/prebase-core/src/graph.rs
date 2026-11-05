@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::model::{
     AnalysisCoverage, AnalysisIssue, DependencyEdge, DependencyEvidence, FileNode, GraphSnapshot,
-    NodeAnalysisStatus, RelationshipKind, ResolutionStatus, CURRENT_SCHEMA_VERSION,
+    RelationshipKind, ResolutionStatus, CURRENT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -136,9 +136,6 @@ impl CanonicalGraph {
             .map(|mut n| {
                 n.direct_dependency_count = dep_counts.get(&n.id).copied().unwrap_or(0);
                 n.direct_dependent_count = dependent_counts.get(&n.id).copied().unwrap_or(0);
-                if n.analysis_status == NodeAnalysisStatus::Pending {
-                    n.analysis_status = NodeAnalysisStatus::Analyzed;
-                }
                 n
             })
             .collect();

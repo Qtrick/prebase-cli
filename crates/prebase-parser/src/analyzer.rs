@@ -94,7 +94,7 @@ impl RepositoryAnalyzer {
                 analysis_status: if file.is_supported_language {
                     NodeAnalysisStatus::Pending
                 } else {
-                    NodeAnalysisStatus::Analyzed
+                    NodeAnalysisStatus::Unsupported
                 },
                 direct_dependency_count: 0,
                 direct_dependent_count: 0,
@@ -117,6 +117,9 @@ impl RepositoryAnalyzer {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Could not read file {}: {e}", file.relative_path);
+                    if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                        node.analysis_status = NodeAnalysisStatus::Failed;
+                    }
                     issues.push(AnalysisIssue {
                         file_path: file.relative_path.clone(),
                         issue_kind: "FileReadError".to_string(),
@@ -132,6 +135,9 @@ impl RepositoryAnalyzer {
                 Ok(imps) => imps,
                 Err(e) => {
                     warn!("Parser error in {}: {e}", file.relative_path);
+                    if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                        node.analysis_status = NodeAnalysisStatus::Failed;
+                    }
                     issues.push(AnalysisIssue {
                         file_path: file.relative_path.clone(),
                         issue_kind: "ParseError".to_string(),
@@ -143,6 +149,9 @@ impl RepositoryAnalyzer {
                 }
             };
 
+            if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                node.analysis_status = NodeAnalysisStatus::Analyzed;
+            }
             analyzed_counter.fetch_add(1, Ordering::Relaxed);
 
             for imp in parsed_imports {

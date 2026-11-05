@@ -1,12 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { DependencyEdge, FileNode, GraphSnapshot } from '../../../types/graph';
-import { findEntryPointCandidate } from '../../../utils/entryPointDetection';
+import { DependencyEdge, FileNode, GraphSnapshot, RelationshipKind } from '../../../types/graph';
+import { findEntryPointCandidate, findEntryPointCandidates } from '../../../utils/entryPointDetection';
 import {
   deriveRepositoryStructure,
   getAreaIdForPath,
 } from '../../../utils/repositoryAreas';
 import { rankSearchResults, isEditableElement } from '../../../search/SearchBox';
 import { deriveRelationshipGraph } from '../../relationship/deriveRelationshipGraph';
+import { computeDisambiguatedLabels } from '../../../utils/pathDisambiguation';
+import {
+  computeLabelPriorityScore,
+  LabelCollisionGrid,
+} from '../render/networkRenderMath';
+import { getEdgeRelationshipSentence } from '../../../inspector/Inspector';
 
 const makeNode = (
   id: string,
@@ -273,28 +279,11 @@ describe('Graph Readability & Semantic Precision Suite', () => {
         makeNode('u1', 'src/utils/unique.ts'),
       ];
 
-      const counts = new Map<string, number>();
-      for (const node of nodes) {
-        counts.set(node.filename, (counts.get(node.filename) || 0) + 1);
-      }
-      const duplicateFilenames = new Set<string>();
-      for (const [name, count] of counts.entries()) {
-        if (count > 1) duplicateFilenames.add(name);
-      }
+      const labels = computeDisambiguatedLabels(nodes);
 
-      const formatLabel = (node: FileNode) => {
-        if (duplicateFilenames.has(node.filename)) {
-          const parts = node.relative_path.split('/');
-          if (parts.length > 1) {
-            return `${parts[parts.length - 2]}/${node.filename}`;
-          }
-        }
-        return node.filename;
-      };
-
-      expect(formatLabel(nodes[0])).toBe('components/Card.tsx');
-      expect(formatLabel(nodes[1])).toBe('widgets/Card.tsx');
-      expect(formatLabel(nodes[2])).toBe('unique.ts'); // Unique stays simple!
+      expect(labels.get('c1')).toBe('components/Card.tsx');
+      expect(labels.get('c2')).toBe('widgets/Card.tsx');
+      expect(labels.get('u1')).toBe('unique.ts'); // Unique stays simple!
     });
 
     it('prioritizes foreground node labels over colliding background node labels', () => {
@@ -327,6 +316,277 @@ describe('Graph Readability & Semantic Precision Suite', () => {
 
       // Foreground node is placed; background node is suppressed
       expect(placed).toEqual(['fg']);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 7. Grouping Acceptance Test Suite (Section 3.5)
+  // --------------------------------------------------------------------------
+  describe('Grouping Acceptance Test Suite (Section 3.5)', () => {
+    it('accurately groups complex repositories with cross-area, internal, isolated, and similar-name areas', () => {
+      const nodes: FileNode[] = [
+        // Area 1: frontend/src/components
+        makeNode('fc1', 'frontend/src/components/Button.tsx', 1, 0),
+        makeNode('fc2', 'frontend/src/components/Card.tsx', 2, 0),
+        // Area 2: frontend/src/utils
+        makeNode('fu1', 'frontend/src/utils/math.ts', 0, 2),
+        makeNode('fu2', 'frontend/src/utils/strings.ts', 0, 1),
+        // Area 3: backend/src/api
+        makeNode('ba1', 'backend/src/api/server.ts', 1, 0),
+        // Area 4: backend/src/db
+        makeNode('bd1', 'backend/src/db/connection.ts', 0, 1),
+        // Area 5: isolated area with similar name: frontend/src/components-v2
+        makeNode('fcv1', 'frontend/src/components-v2/NewButton.tsx', 0, 0),
+      ];
+
+      const edges: DependencyEdge[] = [
+        // fc1 imports fu1
+        {
+          id: 'fc1->fu1',
+          source_file_id: 'fc1',
+          target_file_id: 'fu1',
+          relationship_kind: 'Import',
+          resolution_status: 'ResolvedInternal',
+          evidence: [
+            {
+              source_file_id: 'fc1',
+              import_specifier: '../utils/math',
+              line: 1,
+              column: 1,
+              relationship_kind: 'Import',
+              is_type_only: false,
+            },
+          ],
+        },
+        // fc2 imports fu1 and fu2
+        {
+          id: 'fc2->fu1',
+          source_file_id: 'fc2',
+          target_file_id: 'fu1',
+          relationship_kind: 'Import',
+          resolution_status: 'ResolvedInternal',
+          evidence: [
+            {
+              source_file_id: 'fc2',
+              import_specifier: '../utils/math',
+              line: 2,
+              column: 1,
+              relationship_kind: 'Import',
+              is_type_only: false,
+            },
+          ],
+        },
+        {
+          id: 'fc2->fu2',
+          source_file_id: 'fc2',
+          target_file_id: 'fu2',
+          relationship_kind: 'Import',
+          resolution_status: 'ResolvedInternal',
+          evidence: [
+            {
+              source_file_id: 'fc2',
+              import_specifier: '../utils/strings',
+              line: 3,
+              column: 1,
+              relationship_kind: 'Import',
+              is_type_only: false,
+            },
+          ],
+        },
+        // ba1 imports bd1
+        {
+          id: 'ba1->bd1',
+          source_file_id: 'ba1',
+          target_file_id: 'bd1',
+          relationship_kind: 'Import',
+          resolution_status: 'ResolvedInternal',
+          evidence: [
+            {
+              source_file_id: 'ba1',
+              import_specifier: '../db/connection',
+              line: 1,
+              column: 1,
+              relationship_kind: 'Import',
+              is_type_only: false,
+            },
+          ],
+        },
+      ];
+
+      const structure = deriveRepositoryStructure(nodes, edges);
+
+      // 1. Correct area membership
+      expect(structure.fileToAreaId.get('fc1')).toBe('frontend/src/components');
+      expect(structure.fileToAreaId.get('fc2')).toBe('frontend/src/components');
+      expect(structure.fileToAreaId.get('fu1')).toBe('frontend/src/utils');
+      expect(structure.fileToAreaId.get('fu2')).toBe('frontend/src/utils');
+      expect(structure.fileToAreaId.get('ba1')).toBe('backend/src/api');
+      expect(structure.fileToAreaId.get('bd1')).toBe('backend/src/db');
+      expect(structure.fileToAreaId.get('fcv1')).toBe('frontend/src/components-v2');
+
+      // Verify similar names do not collide or merge incorrectly
+      expect(structure.areaMap.has('frontend/src/components')).toBe(true);
+      expect(structure.areaMap.has('frontend/src/components-v2')).toBe(true);
+      expect(structure.areaMap.get('frontend/src/components')?.fileCount).toBe(2);
+      expect(structure.areaMap.get('frontend/src/components-v2')?.fileCount).toBe(1);
+
+      // 2. Correct aggregate edge counts
+      const componentsToUtilsEdge = structure.areaEdges.find(
+        (e) => e.sourceAreaId === 'frontend/src/components' && e.targetAreaId === 'frontend/src/utils'
+      );
+      expect(componentsToUtilsEdge).toBeDefined();
+      expect(componentsToUtilsEdge?.edgeCount).toBe(3); // 3 total edges
+      expect(componentsToUtilsEdge?.sourceFilesCount).toBe(2); // fc1 and fc2
+      expect(componentsToUtilsEdge?.targetFilesCount).toBe(2); // fu1 and fu2
+
+      // 3. Correct relationship direction
+      expect(componentsToUtilsEdge?.sourceAreaId).toBe('frontend/src/components');
+      expect(componentsToUtilsEdge?.targetAreaId).toBe('frontend/src/utils');
+
+      // 4. Correct source evidence preserved
+      expect(componentsToUtilsEdge?.contributingFilePairs.length).toBe(3);
+      expect(componentsToUtilsEdge?.contributingFilePairs[0].evidenceSpecifier).toBe('../utils/math');
+
+      // 5. Isolated area has 0 area edges
+      const isolatedArea = structure.areaMap.get('frontend/src/components-v2');
+      expect(isolatedArea?.outgoingAreaEdges.length).toBe(0);
+      expect(isolatedArea?.incomingAreaEdges.length).toBe(0);
+
+      // 6. No fabricated area relationships (e.g. no connection between frontend and backend)
+      const fabricatedEdge = structure.areaEdges.find(
+        (e) =>
+          (e.sourceAreaId.startsWith('frontend') && e.targetAreaId.startsWith('backend')) ||
+          (e.sourceAreaId.startsWith('backend') && e.targetAreaId.startsWith('frontend'))
+      );
+      expect(fabricatedEdge).toBeUndefined();
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 8. Screen-Space Spatial Hash Collision Grid & Label Priority (Section 5)
+  // --------------------------------------------------------------------------
+  describe('Screen-Space Spatial Hash & Label Priority Scoring (Section 5)', () => {
+    it('detects collisions accurately and isolates checks by grid cell', () => {
+      const grid = new LabelCollisionGrid(80);
+
+      const rect1 = { x1: 100, y1: 100, x2: 180, y2: 120 };
+      const rect2Overlapping = { x1: 150, y1: 110, x2: 230, y2: 130 };
+      const rect3FarAway = { x1: 500, y1: 500, x2: 580, y2: 520 };
+
+      grid.insert(rect1);
+
+      expect(grid.collides(rect2Overlapping)).toBe(true);
+      expect(grid.collides(rect3FarAway)).toBe(false);
+
+      grid.insert(rect3FarAway);
+      expect(grid.collides({ x1: 510, y1: 510, x2: 570, y2: 530 })).toBe(true);
+    });
+
+    it('scores selected, hovered, and foreground nodes with higher priority than background nodes', () => {
+      const selectedScore = computeLabelPriorityScore({
+        isSelected: true,
+        isHovered: false,
+        isConnectedToSelected: false,
+        isInFocusedArea: false,
+        projectedZ: -30, // even in background!
+        depthScale: 0.8,
+        totalDegree: 2,
+      });
+
+      const backgroundScore = computeLabelPriorityScore({
+        isSelected: false,
+        isHovered: false,
+        isConnectedToSelected: false,
+        isInFocusedArea: false,
+        projectedZ: -80,
+        depthScale: 0.7,
+        totalDegree: 10,
+      });
+
+      const foregroundScore = computeLabelPriorityScore({
+        isSelected: false,
+        isHovered: false,
+        isConnectedToSelected: false,
+        isInFocusedArea: false,
+        projectedZ: 80,
+        depthScale: 1.2,
+        totalDegree: 2,
+      });
+
+      // Selected node must beat background and regular foreground
+      expect(selectedScore).toBeGreaterThan(foregroundScore);
+      expect(selectedScore).toBeGreaterThan(backgroundScore);
+
+      // Regular foreground node must beat background node
+      expect(foregroundScore).toBeGreaterThan(backgroundScore);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 9. Semantic Relationship Descriptions (Section 8.4)
+  // --------------------------------------------------------------------------
+  describe('Semantic Edge Explanations (Section 8.4)', () => {
+    it('distinguishes Re-export, DynamicImport, TypeOnly, and Direct Import accurately', () => {
+      const baseEdge = (kind: RelationshipKind, isTypeOnly = false): DependencyEdge => ({
+        id: 'a->b',
+        source_file_id: 'src/a.ts',
+        target_file_id: 'src/b.ts',
+        relationship_kind: kind,
+        resolution_status: 'ResolvedInternal',
+        evidence: [
+          {
+            source_file_id: 'src/a.ts',
+            import_specifier: './b',
+            line: 1,
+            column: 1,
+            relationship_kind: kind,
+            is_type_only: isTypeOnly,
+          },
+        ],
+      });
+
+      expect(getEdgeRelationshipSentence(baseEdge('Export'))).toBe(
+        '"src/a.ts" re-exports from "src/b.ts".'
+      );
+      expect(getEdgeRelationshipSentence(baseEdge('DynamicImport'))).toBe(
+        '"src/a.ts" dynamically imports "src/b.ts".'
+      );
+      expect(getEdgeRelationshipSentence(baseEdge('TypeOnly', true))).toBe(
+        '"src/a.ts" imports type definitions from "src/b.ts".'
+      );
+      expect(getEdgeRelationshipSentence(baseEdge('Import', false))).toBe(
+        '"src/a.ts" directly imports from "src/b.ts".'
+      );
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 10. Multiple Entry Candidates and Library Roots (Section 6)
+  // --------------------------------------------------------------------------
+  describe('Multiple Entry Candidates & Crate Roots (Section 6)', () => {
+    it('identifies multiple candidates across client, server, and library crate roots', () => {
+      const nodes: FileNode[] = [
+        makeNode('1', 'src/main.rs', 0, 0, 'rust'),
+        makeNode('2', 'crates/core/src/lib.rs', 0, 0, 'rust'),
+        makeNode('3', 'frontend/src/main.tsx', 0, 0, 'tsx'),
+        makeNode('4', 'src/utils/math.ts', 0, 0, 'typescript'),
+      ];
+
+      const candidates = findEntryPointCandidates(nodes);
+      expect(candidates.length).toBe(3);
+
+      const mainRs = candidates.find((c) => c.relativePath === 'src/main.rs');
+      expect(mainRs).toBeDefined();
+      expect(mainRs?.kind).toBe('executable-startup');
+
+      const libRs = candidates.find((c) => c.relativePath === 'crates/core/src/lib.rs');
+      expect(libRs).toBeDefined();
+      expect(libRs?.kind).toBe('library-crate-root');
+      expect(libRs?.displayTitle).toBe('Library Crate Root Candidate');
+
+      const frontendMain = candidates.find((c) => c.relativePath === 'frontend/src/main.tsx');
+      expect(frontendMain).toBeDefined();
+      expect(frontendMain?.kind).toBe('nested-app-root');
     });
   });
 });

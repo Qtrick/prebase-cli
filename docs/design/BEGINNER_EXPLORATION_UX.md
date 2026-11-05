@@ -49,28 +49,34 @@ The **Beginner Exploration UX** replaces jargon with plain-English mental models
 ### Level 0: Repository Overview
 When no node or edge is selected, the inspector presents:
 1. **"What PreBase Found" Summary**:
-   *"PreBase analyzed 24 files across 4 codebase areas and detected 38 direct internal code connections."*
+   *"PreBase discovered 24 files across 4 architectural areas. Analyzed 20 supported files for internal dependencies and confirmed 38 direct code connections. (4 files are unsupported formats excluded from AST dependency analysis.)"*
+   Provides honest, truthful accounting of discovered vs. analyzed files.
 2. **"Files Worth Exploring First"**:
-   Surfaces 2–4 grounded recommendations:
-   - **Main Entry Point**: Where execution or rendering bootstraps (`src/index.ts`, `src/main.rs`).
-   - **Core Dependency**: Foundational utility files heavily imported across the project.
+   Surfaces 2–4 grounded recommendations with truthful confidence:
+   - **Main Entry Point**: Where execution bootstraps (`src/index.ts`, `src/main.rs`).
+   - **Frequently Imported File**: Core foundational utilities heavily imported across the project (with exact consumer count).
    - **Area Hub**: Files that bridge multiple directories.
 3. **"Explore by Area" Cards**:
-   Lists derived areas (e.g. `src/components`, `src/utils`, `crates/core`) with file counts.
+   Lists adaptively derived areas (e.g. `frontend/src/components`, `backend/src/api`, `crates/core`) with analyzed file counts and connection counts.
 4. **"Analysis Scope & Boundaries"**:
-   An honest explanation: *"PreBase maps direct static code imports within this repository. External packages and runtime dynamic reflection are not connected as internal nodes."*
+   An honest explanation: *"PreBase maps direct static code imports within this repository. Non-code files (Markdown, TOML, JSON) are discovered but excluded from AST analysis. External packages and runtime reflection are not connected as internal nodes."*
 
-### Level 1: Area Inspector View
-Clicking an area card (or area badge on a node) filters the workspace:
+### Level 1: Area Inspector & Inter-Area Connection View
+Clicking an area card (or area badge on a node) opens the comprehensive area exploration view:
 - Nodes outside the area are dimmed to $18\%$ opacity.
-- Edges crossing outside the area are suppressed.
 - The inspector displays:
-  - Canonical path prefix.
-  - Total files in area.
-  - External dependencies (code this area imports from other areas).
-  - External dependents (code other areas import from here).
-  - List of files in the area for one-click inspection.
+  - Canonical area ID and analyzed vs. unsupported file counts.
+  - **Outgoing Connections**: Other codebase areas this area depends on, with contributing connection counts.
+  - **Incoming Connections**: Codebase areas that depend on this area.
+  - **Area Files**: Complete list of files within the area, each with separate **"Inspect"** (updates metadata without moving the 3D camera) and **"Reveal in 3D"** (rotates the orb smoothly to center the file) actions.
   - `← Back to all areas` button.
+
+#### Level 1.5: Inter-Area Connection Drilldown
+Clicking any inter-area relationship card opens the detailed aggregate connection view:
+- Explains the relationship in plain English: *"3 files in components import 2 files in utils across 3 connections."*
+- Lists every contributing source and target file pair.
+- Allows one-click inspection of any contributing file directly from the connection list.
+- Back button returns directly to the parent area view.
 
 ### Level 2: Selected File Inspection
 Selecting any file node displays:
@@ -78,8 +84,11 @@ Selecting any file node displays:
   - *"This file uses 3 internal files and is used by 7 other files."*
   - *"This file is a foundation file used by 5 other files and imports no other indexed files."*
   - *"This file has no direct internal dependencies or dependents in this repository."*
-- **Area Badge**: Displays the parent area and enables one-click focus.
-- **Entry Candidate Badge**: Highlighted if this file is a confirmed entry point.
+- **Truthful Status Badge**:
+  - `Analyzed`: Full AST dependency extraction succeeded.
+  - `Unsupported`: Non-code format (e.g. Markdown, YAML, TOML) clearly stated with explanation.
+  - `Failed`: File could not be parsed, with exact syntax error details provided.
+- **Area Badge**: Displays parent area and enables one-click focus.
 - **Directional Sections**:
   - **Files this file uses** (Direct dependencies, outgoing imports).
   - **Files that use this file** (Direct dependents, incoming consumers).
@@ -91,6 +100,7 @@ Clicking **Explore Relationships in 2D** transitions the viewport to the focused
 - Center Column: **Selected File**
 - Right Column: **Files this file uses** (Direct dependencies · Outgoing)
 - Arrow connectors point strictly left-to-right from importer to dependency.
+- Layout automatically scales with `fitToGraph` (up to $1.6\times$ zoom) to maximize screen canvas utilization.
 
 ---
 

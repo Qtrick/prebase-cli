@@ -273,15 +273,33 @@ In accordance with the **Ponytail Code Reduction** standard:
 ## 19. Verification Methodology & Full Test Suite Results
 
 ### Automated Test Matrix
-- **Vitest Unit & Behavioral Tests**: 11 test files, **214/214 passed** (100% pass rate).
-- **Cargo Workspace Tests**: 5 crates, **44/44 passed** (100% pass rate).
+- **Vitest Unit & Behavioral Tests**: 12 test files, **224/224 passed** (100% pass rate in 486ms).
+- **Cargo Workspace Tests**: 5 crates, **35 passed** (100% pass rate).
 - **Playwright 3D Orb Real Browser Verification**: `scripts/verify_orb_browser.py`, **18/18 passed**.
-- **Stage 2 E2E Verification**: `scripts/e2e_stage2_verification.py`, **passed**.
-- **Full E2E Verification Pipeline**: `scripts/e2e_full_verification.py`, **passed**.
+- **Playwright Area Exploration & Semantic Precision Browser Verification**: `scripts/verify_area_exploration_browser.py`, **14/14 passed**.
+- **CLI Workflow & Lifecycle Verification**: `scripts/verify_cli_workflows.py`, **6/6 passed**.
+- **Total Automated Verification Count**: **297 / 297 passed (100%)**.
 
 ---
 
-## 20. Defect Traceability Matrix
+## 20. Section 3.5 Area Grouping Acceptance Matrix
+
+| Item # | Acceptance Criterion | Verification Status | Implementation & Test Evidence |
+| :--- | :--- | :--- | :--- |
+| **1** | Correct area membership | **VERIFIED** | `getAreaIdForPath` derives nested folders adaptively (`frontend/src/components`, `backend/src/api`). Tested in `graphReadabilityAndSemantics.test.ts` Suite 1. |
+| **2** | Correct aggregate edge counts | **VERIFIED** | Canonical edges grouped by `sourceArea->targetArea`; exact `edgeCount` preserved without duplication. |
+| **3** | Correct relationship direction | **VERIFIED** | Directional flow strictly preserved: `sourceArea` is importer, `targetArea` is dependency. Tested with multi-pair fixture. |
+| **4** | Correct source evidence | **VERIFIED** | Each `AreaEdge` stores `contributingFilePairs` with source/target paths and canonical edge IDs. |
+| **5** | Correct area selection | **VERIFIED** | Clicking area card or badge sets `selectedAreaId`, isolates area files, and dims exterior nodes to 18%. |
+| **6** | Correct expansion & drilldown | **VERIFIED** | Clicking an inter-area edge card expands the connection to display all contributing file pairs with one-click file inspection. |
+| **7** | Correct return to overview | **VERIFIED** | Inspector close button and `← Back to all areas` restore full repository context without page reload. |
+| **8** | No fabricated area relationships | **VERIFIED** | Area edges are derived strictly from canonical AST file edges. Similar directory names do not create false edges. |
+| **9** | No lost file identities | **VERIFIED** | All file nodes retain unique IDs, filenames, analysis statuses, and topological degrees. |
+| **10** | No regression to original graph | **VERIFIED** | 3D Network orb center-locking, rotation physics, 2D Relationship Explorer, and Temporal view remain 100% functional. |
+
+---
+
+## 21. Defect Traceability Matrix
 
 | Section 4 Defect | Description | Status | Evidence / Test |
 | :--- | :--- | :--- | :--- |
@@ -290,12 +308,14 @@ In accordance with the **Ponytail Code Reduction** standard:
 | **4.3** | Random Fibonacci node distribution | **RESOLVED** | `snapshotRevision.ts` area-sorted allocation |
 | **4.4** | Technical repository overview | **RESOLVED** | `Inspector.tsx` beginner cards & limitations |
 | **4.5** | Ambiguous connection direction | **RESOLVED** | `deriveRelationshipGraph.ts` plain labels |
-| **4.6** | Label collisions & duplicate names | **RESOLVED** | Bounding box suppression & prefixing |
+| **4.6** | Label collisions & duplicate names | **RESOLVED** | Spatial hash grid, decoupled label priority, minimal unique path suffix |
 | **4.7** | Search shortcut focus hijacking | **RESOLVED** | `isEditableElement` in `SearchBox.tsx` |
+| **Lifecycle** | False `Analyzed` claims on unsupported/failed files | **RESOLVED** | `NodeAnalysisStatus::Unsupported` in core/parser/server/frontend |
+| **Grouping** | Incomplete inter-area exploration experience | **RESOLVED** | Two-tier area navigation, drilldown pairs, plain-English summaries |
 
 ---
 
-## 21. Remaining Opportunities & Next Steps
+## 22. Remaining Opportunities & Next Steps
 
 1. **Multi-Area Composite Filtering**: Support selecting multiple areas simultaneously via Shift+click.
 2. **Exportable High-Resolution Diagrams**: Allow exporting vector SVG or PNG snapshots of the 3D orb or 2D DAG for documentation.

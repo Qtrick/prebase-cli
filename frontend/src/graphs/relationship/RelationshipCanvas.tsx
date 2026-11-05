@@ -195,13 +195,15 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         return;
       }
 
-      const padding = 80;
+      // Dynamic adaptive padding and scale factor for optimal workspace utilization
+      const padding = Math.min(64, Math.max(32, Math.min(width, height) * 0.06));
       const availableW = Math.max(100, width - padding * 2);
       const availableH = Math.max(100, height - padding * 2);
 
       const zoomX = availableW / bounds.width;
       const zoomY = availableH / bounds.height;
-      const nextZoom = Math.min(1.2, Math.max(0.2, Math.min(zoomX, zoomY)));
+      // Allow compact diagrams to comfortably scale up to 1.6x rather than being trapped at 1.2x
+      const nextZoom = Math.min(1.6, Math.max(0.25, Math.min(zoomX, zoomY)));
 
       const nextPanX = width / 2 - bounds.centerX * nextZoom;
       const nextPanY = height / 2 - bounds.centerY * nextZoom;

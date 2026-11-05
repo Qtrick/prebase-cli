@@ -42,7 +42,7 @@
         "file_kind": { "type": "string" },
         "analysis_status": {
           "type": "string",
-          "enum": ["Pending", "Analyzed", "Excluded", "Failed"]
+          "enum": ["Pending", "Analyzed", "Excluded", "Failed", "Unsupported"]
         },
         "direct_dependency_count": { "type": "integer" },
         "direct_dependent_count": { "type": "integer" }

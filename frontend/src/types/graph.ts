@@ -1,5 +1,5 @@
 export type NodeKind = 'Source' | 'Test' | 'Config' | 'Doc' | 'Other';
-export type NodeAnalysisStatus = 'Pending' | 'Analyzed' | 'Excluded' | 'Failed';
+export type NodeAnalysisStatus = 'Pending' | 'Analyzed' | 'Excluded' | 'Failed' | 'Unsupported';
 
 export interface FileNode {
   id: string;

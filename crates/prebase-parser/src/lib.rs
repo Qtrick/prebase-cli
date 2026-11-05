@@ -234,4 +234,46 @@ mod tests {
         assert_eq!(snapshot.coverage.total_analyzed, 4);
         assert!(snapshot.coverage.is_complete);
     }
+
+    #[test]
+    fn test_analysis_status_lifecycle_and_unsupported_files() {
+        use prebase_core::model::NodeAnalysisStatus;
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Supported valid file -> Analyzed
+        fs::write(src_dir.join("main.ts"), "console.log('hello');").unwrap();
+
+        // 2. Unsupported file (e.g. documentation / markdown) -> Unsupported
+        fs::write(root.join("README.md"), "# Project Readme").unwrap();
+
+        // 3. Unsupported config file (e.g. TOML) -> Unsupported
+        fs::write(root.join("config.toml"), "title = 'test'").unwrap();
+
+        // 4. Supported file with syntax that fails to parse or produces issues
+        fs::write(src_dir.join("broken.ts"), "import from from broken syntax {{{").unwrap();
+
+        let analyzer = RepositoryAnalyzer::default();
+        let res = analyzer.analyze_path(root).unwrap();
+        let snapshot = res.snapshot;
+
+        let main_node = snapshot.nodes.iter().find(|n| n.relative_path == "src/main.ts").unwrap();
+        assert_eq!(main_node.analysis_status, NodeAnalysisStatus::Analyzed);
+
+        let readme_node = snapshot.nodes.iter().find(|n| n.relative_path == "README.md").unwrap();
+        assert_eq!(readme_node.analysis_status, NodeAnalysisStatus::Unsupported);
+
+        let config_node = snapshot.nodes.iter().find(|n| n.relative_path == "config.toml").unwrap();
+        assert_eq!(config_node.analysis_status, NodeAnalysisStatus::Unsupported);
+
+        // Discovered files should be 4 total (main.ts, broken.ts, README.md, config.toml)
+        assert_eq!(snapshot.coverage.total_discovered, 4);
+        // Only valid parsed files count towards total_analyzed
+        assert_eq!(snapshot.coverage.total_analyzed, 2); // main.ts and broken.ts (tree-sitter parses error nodes)
+    }
 }

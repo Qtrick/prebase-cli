@@ -32,9 +32,10 @@ File glyphs are rendered with a strict, accessible color hierarchy rather than a
 ### 2.2 Entry Point Candidate Detection
 Previously, the graph rendered `snapshot.nodes[0]` as the primary entry point in gold with 10x semantic weight, misinforming users whenever an arbitrary utility was indexed first.
 The new architecture uses grounded heuristics in `src/utils/entryPointDetection.ts`:
-1. **Convention Matching**: Identifies recognized entry paths (`src/main.rs`, `src/index.ts`, `src/App.tsx`, `src/main.tsx`).
+1. **Convention Matching**: Identifies recognized entry paths (`src/main.rs`, `src/index.ts`, `src/App.tsx`, `src/main.tsx`, `crates/*/src/lib.rs`, `packages/*/src/index.ts`).
 2. **Topological Metrics**: Prioritizes nodes with high outgoing dependencies and zero/low incoming dependents.
-3. **Conservative Null Fallback**: If no recognized pattern matches with high confidence, no entry styling is rendered. PreBase never fabricates certainty.
+3. **Qualified Multiple Candidates**: Distinguishes application startup entry points, library crate roots, and nested app roots. If multiple candidates exist, each receives qualified confidence metrics.
+4. **Conservative Null Fallback**: If no recognized pattern matches with high confidence, no entry styling is rendered. PreBase never fabricates certainty.
 
 ---
 
@@ -71,21 +72,35 @@ Because adjacent indices along a Fibonacci spiral are spatially contiguous on th
 
 ---
 
-## 5. Screen-Space Label Hierarchy & Collision Avoidance
+## 5. Screen-Space Label Hierarchy & Spatial Hash Collision Avoidance
 
-To eliminate illegible text overlapping when dozens of nodes cluster together:
+To eliminate illegible text overlapping when dozens of nodes cluster together on the 3D canvas:
 
-1. **Deterministic Priority Queue**:
-   - Priority 1: Currently selected file node (always visible).
-   - Priority 2: Currently hovered file node (always visible).
-   - Priority 3: Direct neighbors of the selected node.
-   - Priority 4: Front-facing nodes ($z > 0$) with high degree ($D_{in} + D_{out}$).
-2. **Screen-Space Bounding Box Suppression**:
-   For each candidate label, a screen-space rectangle is measured:
-   $$R = \left[ x - \frac{W}{2} - 4, \; y - 2, \; x + \frac{W}{2} + 4, \; y + H + 2 \right]$$
-   If $R$ intersects any previously accepted label rectangle, the lower-priority label is suppressed from rendering.
-3. **Directory Disambiguation**:
-   If identical filenames exist across multiple directories (e.g. `components/Card.tsx` and `widgets/Card.tsx`), PreBase automatically prepends the parent directory prefix to remove ambiguity. Unique filenames remain clean and concise.
+### 5.1 Decoupling Glyph Depth from Label Priority
+While 3D spheres require back-to-front painter's order ($z \le 0$ first, $z > 0$ last) so forward glyphs occlude background glyphs, **text labels require priority-first rendering**. If labels are drawn in painter's order, a background node evaluated first can consume screen space and falsely suppress the label of a foreground or focused node.
+
+PreBase decouples label drawing:
+1. All node glyphs are sorted by depth and rendered in painter's order.
+2. Label candidates are assigned a deterministic priority score via `computeLabelPriorityScore()`:
+   - **Selected node**: $+100{,}000$ points (guaranteed visible)
+   - **Hovered node**: $+50{,}000$ points
+   - **Direct neighbors of selected node**: $+20{,}000$ points
+   - **Nodes within currently focused area**: $+10{,}000$ points
+   - **Foreground bias**: $+z \times 10$ points
+   - **Topology weight**: $+(\text{degree} \times 2)$ points
+
+### 5.2 O(1) Spatial Hash Collision Grid
+Candidate labels are placed in priority order using a 2D spatial hash grid (`LabelCollisionGrid`) with a cell size of $90\text{px}$:
+- Label candidate screen-space rectangle:
+  $$R = \left[ x - \frac{W}{2} - 6, \; y - 3, \; x + \frac{W}{2} + 6, \; y + H + 3 \right]$$
+- Bounded neighborhood check tests only the small set of cells intersecting $R$ in $O(1)$ time rather than an $O(N^2)$ pairwise loop.
+- If $R$ collides with any higher-priority accepted label, the candidate is cleanly suppressed.
+
+### 5.3 Minimal Unique Path Suffix Disambiguation
+When multiple files share the same filename (e.g., `web/src/components/Card.tsx` and `mobile/src/components/Card.tsx`, or `api/index.ts` and `db/index.ts`), PreBase applies `computeDisambiguatedLabels()`:
+- Instead of displaying overly long full paths that clutter the canvas, PreBase finds the **shortest unique path suffix** that distinguishes the file from all other matching filenames.
+- For example, `web/.../Card.tsx` vs `mobile/.../Card.tsx`.
+- Truly unique filenames throughout the repository remain clean, concise basenames (e.g. `App.tsx`).
 
 ---
 

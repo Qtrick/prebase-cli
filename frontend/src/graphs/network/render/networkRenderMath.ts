@@ -856,3 +856,101 @@ export function stepRotationalInertia(params: StepInertiaParams): StepInertiaRes
     isDone: false,
   };
 }
+
+// ============================================================================
+// Screen-Space Spatial Hash Collision Grid & Label Priority
+// ============================================================================
+
+export interface ScreenRect {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export class LabelCollisionGrid {
+  private cellSize: number;
+  private grid: Map<string, ScreenRect[]>;
+
+  constructor(cellSize = 90) {
+    this.cellSize = cellSize;
+    this.grid = new Map();
+  }
+
+  private getCellKeys(rect: ScreenRect): string[] {
+    const minX = Math.floor(rect.x1 / this.cellSize);
+    const maxX = Math.floor(rect.x2 / this.cellSize);
+    const minY = Math.floor(rect.y1 / this.cellSize);
+    const maxY = Math.floor(rect.y2 / this.cellSize);
+
+    const keys: string[] = [];
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        keys.push(`${x},${y}`);
+      }
+    }
+    return keys;
+  }
+
+  collides(rect: ScreenRect): boolean {
+    const keys = this.getCellKeys(rect);
+    for (const key of keys) {
+      const cellRects = this.grid.get(key);
+      if (!cellRects) continue;
+      for (let i = 0; i < cellRects.length; i++) {
+        const r = cellRects[i];
+        if (rect.x1 < r.x2 && rect.x2 > r.x1 && rect.y1 < r.y2 && rect.y2 > r.y1) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  insert(rect: ScreenRect): void {
+    const keys = this.getCellKeys(rect);
+    for (const key of keys) {
+      let cellRects = this.grid.get(key);
+      if (!cellRects) {
+        cellRects = [];
+        this.grid.set(key, cellRects);
+      }
+      cellRects.push(rect);
+    }
+  }
+
+  clear(): void {
+    this.grid.clear();
+  }
+}
+
+export interface LabelPriorityParams {
+  isSelected: boolean;
+  isHovered: boolean;
+  isConnectedToSelected: boolean;
+  isInFocusedArea: boolean;
+  projectedZ: number;
+  depthScale: number;
+  totalDegree: number;
+}
+
+/**
+ * Calculates deterministic label placement priority.
+ * Evaluates foreground and high-context labels first so that background
+ * nodes never claim collision bounding boxes over foreground or focused nodes.
+ */
+export function computeLabelPriorityScore(params: LabelPriorityParams): number {
+  let score = 0;
+  if (params.isSelected) score += 100000;
+  if (params.isHovered) score += 50000;
+  if (params.isConnectedToSelected) score += 20000;
+  if (params.isInFocusedArea) score += 10000;
+
+  // Foreground nodes (+z) receive substantial score boost
+  score += params.projectedZ * 10;
+  score += params.depthScale * 50;
+  score += Math.min(20, params.totalDegree) * 5;
+
+  return score;
+}
+

@@ -47,6 +47,7 @@ pub enum NodeAnalysisStatus {
     Analyzed,
     Excluded,
     Failed,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

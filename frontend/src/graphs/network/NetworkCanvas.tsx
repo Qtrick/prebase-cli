@@ -33,16 +33,21 @@ import {
   computeCenterLockedTransform,
   isCenterDeadZone,
   ProjectedGraph,
+  ProjectedNode,
   shouldDrawNodeLabel,
   calculateReleaseSpeed,
   shouldInitiateInertia,
   clampLaunchVelocity,
   stepRotationalInertia,
+  LabelCollisionGrid,
+  computeLabelPriorityScore,
+  ScreenRect,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
 import { findEntryPointCandidate } from '../../utils/entryPointDetection';
 import { getAreaIdForPath } from '../../utils/repositoryAreas';
+import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 
 export interface RevealRequest {
   nodeId: string;
@@ -416,17 +421,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     return findEntryPointCandidate(snapshot.nodes);
   }, [snapshot.nodes]);
 
-  // Track duplicate filenames for directory disambiguation
-  const duplicateFilenames = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const node of snapshot.nodes) {
-      counts.set(node.filename, (counts.get(node.filename) || 0) + 1);
-    }
-    const dupes = new Set<string>();
-    for (const [name, count] of counts.entries()) {
-      if (count > 1) dupes.add(name);
-    }
-    return dupes;
+  // Disambiguate duplicate filenames using minimal unique path suffixes
+  const disambiguatedLabels = useMemo(() => {
+    return computeDisambiguatedLabels(snapshot.nodes);
   }, [snapshot.nodes]);
 
   // Container resize observer
@@ -673,15 +670,27 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.restore();
         }
 
-        // 4. Draw Node Labels (Intelligent Layered Hierarchy + Screen-Space Collision Suppression)
+        // 4. Draw Node Labels (Decoupled Priority Ordering + Screen-Space Spatial Collision Hash)
         const isLight = theme === 'light';
-        const placedLabelRects: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+        const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
+        ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+
+        interface CandidateLabel {
+          pNode: ProjectedNode;
+          isSelected: boolean;
+          isHovered: boolean;
+          priorityScore: number;
+          text: string;
+          labelY: number;
+          rect: ScreenRect;
+        }
+
+        const candidateLabels: CandidateLabel[] = [];
 
         for (let i = 0; i < sortedNodes.length; i++) {
           const pNode = sortedNodes[i];
           const isSelected = selectedNodeId === pNode.id;
           const isHovered = hoveredNodeId === pNode.id;
-          // Bugfix 4.1: neighborMap.get(selectedNodeId)?.has(pNode.id)
           const isConnectedToSelected =
             selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
           const totalDegree =
@@ -698,65 +707,75 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
           if (!shouldDraw) continue;
 
-          // Disambiguate duplicate filenames with parent directory prefix
-          let text = pNode.node.filename;
-          if (duplicateFilenames.has(pNode.node.filename)) {
-            const parts = pNode.node.relative_path.split('/');
-            if (parts.length > 1) {
-              text = `${parts[parts.length - 2]}/${pNode.node.filename}`;
-            }
-          }
-
+          // Disambiguate duplicate filenames with minimal unique path suffix
+          const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
           const screenR = pNode.radius * camera.zoom;
-          const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
-
-          ctx.save();
-          ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
           const textWidth = ctx.measureText(text).width;
           const labelY = pNode.screenY + screenR + 4;
-          const rect = {
+          const rect: ScreenRect = {
             x1: pNode.screenX - textWidth / 2 - 4,
             y1: labelY - 2,
             x2: pNode.screenX + textWidth / 2 + 4,
             y2: labelY + fontSize + 2,
           };
 
-          const isPriority = isSelected || isHovered;
+          const isInFocusedArea =
+            selectedAreaId !== null && getAreaIdForPath(pNode.node.relative_path) === selectedAreaId;
+
+          const priorityScore = computeLabelPriorityScore({
+            isSelected,
+            isHovered,
+            isConnectedToSelected,
+            isInFocusedArea,
+            projectedZ: pNode.projected.z,
+            depthScale: pNode.projected.depthScale,
+            totalDegree,
+          });
+
+          candidateLabels.push({
+            pNode,
+            isSelected,
+            isHovered,
+            priorityScore,
+            text,
+            labelY,
+            rect,
+          });
+        }
+
+        // Sort candidates by priority score descending:
+        // selected/hovered -> directly connected -> focused area -> visible foreground -> background
+        candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
+
+        const collisionGrid = new LabelCollisionGrid(80);
+
+        for (let i = 0; i < candidateLabels.length; i++) {
+          const cand = candidateLabels[i];
+          const isPriority = cand.isSelected || cand.isHovered;
+
           if (!isPriority) {
-            let collides = false;
-            for (let j = 0; j < placedLabelRects.length; j++) {
-              const r = placedLabelRects[j];
-              if (
-                rect.x1 < r.x2 &&
-                rect.x2 > r.x1 &&
-                rect.y1 < r.y2 &&
-                rect.y2 > r.y1
-              ) {
-                collides = true;
-                break;
-              }
-            }
-            if (collides) {
-              ctx.restore();
+            if (collisionGrid.collides(cand.rect)) {
               continue;
             }
           }
-          placedLabelRects.push(rect);
+          collisionGrid.insert(cand.rect);
 
+          ctx.save();
+          ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
 
           // Theme-adaptive halo stroke for maximum legibility
           ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
           ctx.lineWidth = 3.5;
-          ctx.strokeText(text, pNode.screenX, labelY);
+          ctx.strokeText(cand.text, cand.pNode.screenX, cand.labelY);
 
-          ctx.fillStyle = isSelected
+          ctx.fillStyle = cand.isSelected
             ? (isLight ? '#0d9488' : '#2dd4bf')
-            : isHovered
+            : cand.isHovered
               ? (isLight ? '#0284c7' : '#38bdf8')
               : (isLight ? '#0f172a' : '#f1f5f9');
-          ctx.fillText(text, pNode.screenX, labelY);
+          ctx.fillText(cand.text, cand.pNode.screenX, cand.labelY);
           ctx.restore();
         }
       } finally {
@@ -776,7 +795,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       hoveredNodeId,
       selectedAreaId,
       entryCandidate,
-      duplicateFilenames,
+      disambiguatedLabels,
       neighborMap,
       isVisible,
       theme,

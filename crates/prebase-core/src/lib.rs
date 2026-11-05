@@ -25,7 +25,7 @@ mod tests {
             language: "typescript".into(),
             size_bytes: 100,
             file_kind: FileKind::Source,
-            analysis_status: NodeAnalysisStatus::Pending,
+            analysis_status: NodeAnalysisStatus::Analyzed,
             direct_dependency_count: 0,
             direct_dependent_count: 0,
         };
@@ -36,7 +36,7 @@ mod tests {
             language: "typescript".into(),
             size_bytes: 200,
             file_kind: FileKind::Source,
-            analysis_status: NodeAnalysisStatus::Pending,
+            analysis_status: NodeAnalysisStatus::Analyzed,
             direct_dependency_count: 0,
             direct_dependent_count: 0,
         };
@@ -47,7 +47,7 @@ mod tests {
             language: "typescript".into(),
             size_bytes: 300,
             file_kind: FileKind::Source,
-            analysis_status: NodeAnalysisStatus::Pending,
+            analysis_status: NodeAnalysisStatus::Analyzed,
             direct_dependency_count: 0,
             direct_dependent_count: 0,
         };
@@ -135,7 +135,7 @@ mod tests {
             language: "typescript".into(),
             size_bytes: 100,
             file_kind: FileKind::Source,
-            analysis_status: NodeAnalysisStatus::Pending,
+            analysis_status: NodeAnalysisStatus::Analyzed,
             direct_dependency_count: 0,
             direct_dependent_count: 0,
         });
@@ -146,7 +146,7 @@ mod tests {
             language: "typescript".into(),
             size_bytes: 100,
             file_kind: FileKind::Source,
-            analysis_status: NodeAnalysisStatus::Pending,
+            analysis_status: NodeAnalysisStatus::Analyzed,
             direct_dependency_count: 0,
             direct_dependent_count: 0,
         });
@@ -208,7 +208,7 @@ mod tests {
                 language: "typescript".into(),
                 size_bytes: 50,
                 file_kind: FileKind::Source,
-                analysis_status: NodeAnalysisStatus::Pending,
+                analysis_status: NodeAnalysisStatus::Analyzed,
                 direct_dependency_count: 0,
                 direct_dependent_count: 0,
             });

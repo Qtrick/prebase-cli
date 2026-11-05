@@ -5,6 +5,7 @@ import { getFileTypeColor, ENTRY_NODE_COLOR } from '../graphs/network/fileTypeCo
 import {
   deriveRepositoryStructure,
   getAreaIdForPath,
+  AreaEdge,
 } from '../utils/repositoryAreas';
 import {
   X,
@@ -23,6 +24,9 @@ import {
   Sparkles,
   Info,
   ChevronRight,
+  ArrowLeft,
+  ArrowUpRight,
+  ArrowDownLeft,
 } from 'lucide-react';
 
 interface InspectorProps {
@@ -42,6 +46,21 @@ interface InspectorProps {
   onSwitchTo3D?: () => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+}
+
+export function getEdgeRelationshipSentence(edge: DependencyEdge): string {
+  const isTypeOnly =
+    edge.relationship_kind === 'TypeOnly' || edge.evidence.every((e) => e.is_type_only);
+  if (edge.relationship_kind === 'Export') {
+    return `"${edge.source_file_id}" re-exports from "${edge.target_file_id}".`;
+  }
+  if (edge.relationship_kind === 'DynamicImport') {
+    return `"${edge.source_file_id}" dynamically imports "${edge.target_file_id}".`;
+  }
+  if (isTypeOnly) {
+    return `"${edge.source_file_id}" imports type definitions from "${edge.target_file_id}".`;
+  }
+  return `"${edge.source_file_id}" directly imports from "${edge.target_file_id}".`;
 }
 
 export const Inspector: React.FC<InspectorProps> = ({
@@ -67,10 +86,16 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
+  const [focusedAreaEdge, setFocusedAreaEdge] = useState<AreaEdge | null>(null);
 
   const requestTokenRef = useRef(0);
   const pathCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const codeCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear focused area edge when area changes or selection clears
+  useEffect(() => {
+    setFocusedAreaEdge(null);
+  }, [selectedAreaId]);
 
   const handleCopyPath = (path: string) => {
     if (!navigator?.clipboard) return;
@@ -118,30 +143,27 @@ export const Inspector: React.FC<InspectorProps> = ({
       api
         .inspectFile(selectedNode.id, abortController.signal)
         .then((res) => {
-          if (currentToken === requestTokenRef.current) {
-            setInspection(res);
-            setLoading(false);
-          }
+          if (currentToken !== requestTokenRef.current) return;
+          setInspection(res);
+          setLoading(false);
         })
         .catch((err) => {
-          if (currentToken === requestTokenRef.current) {
-            if (err instanceof Error && err.name === 'AbortError') return;
-            setLoading(false);
-          }
+          if (err.name === 'AbortError') return;
+          if (currentToken !== requestTokenRef.current) return;
+          setInspection(null);
+          setLoading(false);
         });
 
-      // Fetch source snippet
+      // Fetch first 30 lines preview for grounded context
       api
         .getSource(selectedNode.relative_path, abortController.signal)
         .then((res) => {
-          if (currentToken === requestTokenRef.current) {
-            setSourcePreview(res.content);
-          }
+          if (currentToken !== requestTokenRef.current) return;
+          setSourcePreview(res.content);
         })
         .catch(() => {
-          if (currentToken === requestTokenRef.current) {
-            setSourcePreview(null);
-          }
+          if (currentToken !== requestTokenRef.current) return;
+          setSourcePreview(null);
         });
 
       return () => {
@@ -153,7 +175,123 @@ export const Inspector: React.FC<InspectorProps> = ({
     }
   }, [selectedNode]);
 
-  // 1. AREA INSPECTOR VIEW (when an architectural area is focused)
+  // 1A. DETAILED INTER-AREA RELATIONSHIP VIEW
+  if (!selectedNode && !selectedEdge && selectedAreaId && focusedAreaEdge) {
+    const srcArea = repoStructure?.areaMap.get(focusedAreaEdge.sourceAreaId);
+    const tgtArea = repoStructure?.areaMap.get(focusedAreaEdge.targetAreaId);
+    const isOutgoing = focusedAreaEdge.sourceAreaId === selectedAreaId;
+
+    return (
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+        <div className="inspector-header">
+          <div className="node-title-group">
+            <Layers size={16} color="#38bdf8" />
+            <h3 className="file-name">Area Connection</h3>
+          </div>
+          <div className="header-action-group">
+            {onToggleCollapse && (
+              <button
+                className="icon-action-btn"
+                onClick={onToggleCollapse}
+                title="Collapse inspector"
+                aria-label="Collapse inspector"
+              >
+                <PanelRightClose size={15} />
+              </button>
+            )}
+            <button
+              className="close-btn"
+              onClick={() => setFocusedAreaEdge(null)}
+              title="Return to area overview"
+              aria-label="Return to area overview"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div key={focusedAreaEdge.id} className="inspector-content animate-reveal">
+          <button
+            type="button"
+            className="area-back-btn"
+            onClick={() => setFocusedAreaEdge(null)}
+          >
+            <ArrowLeft size={13} style={{ marginRight: '4px' }} />
+            Back to area ({isOutgoing ? srcArea?.name : tgtArea?.name})
+          </button>
+
+          <div className="area-summary-card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+              <span className="mono" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--accent-sky)' }}>
+                {srcArea?.name || focusedAreaEdge.sourceAreaId}
+              </span>
+              <ArrowRight size={14} color="#2dd4bf" />
+              <span className="mono" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--accent-sky)' }}>
+                {tgtArea?.name || focusedAreaEdge.targetAreaId}
+              </span>
+            </div>
+            <p className="area-summary-desc">{focusedAreaEdge.summarySentence}</p>
+          </div>
+
+          <div className="stats-grid">
+            <div className="stat-card">
+              <span className="stat-label">Source Files</span>
+              <span className="stat-value">{focusedAreaEdge.sourceFilesCount}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Target Files</span>
+              <span className="stat-value">{focusedAreaEdge.targetFilesCount}</span>
+            </div>
+          </div>
+
+          <div className="relations-section" style={{ marginTop: '10px' }}>
+            <div className="section-title">
+              <Layers size={14} />
+              <h4>Contributing Dependencies ({focusedAreaEdge.contributingFilePairs.length})</h4>
+            </div>
+            <ul className="relation-list">
+              {focusedAreaEdge.contributingFilePairs.map((pair, idx) => {
+                const srcNode = snapshot?.nodes.find((n) => n.id === pair.sourceFileId);
+                const tgtNode = snapshot?.nodes.find((n) => n.id === pair.targetFileId);
+                return (
+                  <li key={idx} className="area-relation-pair-card">
+                    <div className="pair-endpoints">
+                      <button
+                        type="button"
+                        className="pair-endpoint-btn"
+                        onClick={() => srcNode && onSelectNode(srcNode)}
+                        title={`Inspect source: ${pair.sourceFileId}`}
+                      >
+                        <FileCode size={12} color="#38bdf8" />
+                        <span className="mono">{srcNode?.filename || pair.sourceFileId}</span>
+                      </button>
+                      <ArrowRight size={12} color="#94a3b8" />
+                      <button
+                        type="button"
+                        className="pair-endpoint-btn"
+                        onClick={() => tgtNode && onSelectNode(tgtNode)}
+                        title={`Inspect target: ${pair.targetFileId}`}
+                      >
+                        <FileCode size={12} color="#a78bfa" />
+                        <span className="mono">{tgtNode?.filename || pair.targetFileId}</span>
+                      </button>
+                    </div>
+                    {pair.evidenceSpecifier && (
+                      <div className="pair-evidence mono">
+                        "{pair.evidenceSpecifier}" {pair.line ? `line ${pair.line}` : ''}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </div>
+      </aside>
+    );
+  }
+
+  // 1B. AREA INSPECTOR VIEW (when an architectural area is focused)
   if (!selectedNode && !selectedEdge && selectedAreaId) {
     const currentArea = repoStructure?.areaMap.get(selectedAreaId);
     return (
@@ -191,18 +329,25 @@ export const Inspector: React.FC<InspectorProps> = ({
             className="area-back-btn"
             onClick={() => onSelectArea?.(null)}
           >
-            ← Back to all areas
+            <ArrowLeft size={13} style={{ marginRight: '4px' }} />
+            Back to all areas
           </button>
 
           <div className="area-summary-card">
             <span className="area-path-mono mono">{currentArea?.displayPath || selectedAreaId}</span>
             <p className="area-summary-desc">
-              This area contains {currentArea?.fileCount || 0} file{currentArea?.fileCount !== 1 ? 's' : ''} with{' '}
-              {currentArea?.internalConnections || 0} internal connection{currentArea?.internalConnections !== 1 ? 's' : ''}.
+              This area contains {currentArea?.fileCount || 0} file{currentArea?.fileCount !== 1 ? 's' : ''} (
+              {currentArea?.analyzedCount || 0} analyzed
+              {currentArea && currentArea.unsupportedCount > 0 ? `, ${currentArea.unsupportedCount} unsupported` : ''}
+              ) with {currentArea?.internalConnections || 0} internal connection{currentArea?.internalConnections !== 1 ? 's' : ''}.
             </p>
           </div>
 
           <div className="stats-grid">
+            <div className="stat-card">
+              <span className="stat-label">Internal Edges</span>
+              <span className="stat-value">{currentArea?.internalConnections || 0}</span>
+            </div>
             <div className="stat-card">
               <span className="stat-label">External Deps</span>
               <span className="stat-value">{currentArea?.totalDependencies || 0}</span>
@@ -213,6 +358,75 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
           </div>
 
+          {/* Outgoing Area Dependencies */}
+          <div className="relations-section" style={{ marginTop: '10px' }}>
+            <div className="section-title">
+              <ArrowUpRight size={14} color="#38bdf8" />
+              <h4>Areas this Area Uses ({currentArea?.outgoingAreaEdges.length || 0})</h4>
+            </div>
+            {(!currentArea || currentArea.outgoingAreaEdges.length === 0) ? (
+              <p className="empty-hint">This area does not depend on any other areas.</p>
+            ) : (
+              <div className="area-edges-list">
+                {currentArea.outgoingAreaEdges.map((edge) => {
+                  const tgtArea = repoStructure?.areaMap.get(edge.targetAreaId);
+                  return (
+                    <button
+                      key={edge.id}
+                      type="button"
+                      className="area-relation-btn"
+                      onClick={() => setFocusedAreaEdge(edge)}
+                      title={`Inspect dependencies on ${tgtArea?.name || edge.targetAreaId}`}
+                    >
+                      <div className="area-rel-info">
+                        <span className="area-rel-target mono">→ {tgtArea?.name || edge.targetAreaId}</span>
+                        <span className="area-rel-meta">
+                          {edge.edgeCount} connection{edge.edgeCount === 1 ? '' : 's'} across {edge.sourceFilesCount} file{edge.sourceFilesCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <ChevronRight size={13} className="link-icon" />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Incoming Area Dependents */}
+          <div className="relations-section" style={{ marginTop: '10px' }}>
+            <div className="section-title">
+              <ArrowDownLeft size={14} color="#2dd4bf" />
+              <h4>Areas that Use this Area ({currentArea?.incomingAreaEdges.length || 0})</h4>
+            </div>
+            {(!currentArea || currentArea.incomingAreaEdges.length === 0) ? (
+              <p className="empty-hint">No other areas depend on this area.</p>
+            ) : (
+              <div className="area-edges-list">
+                {currentArea.incomingAreaEdges.map((edge) => {
+                  const srcArea = repoStructure?.areaMap.get(edge.sourceAreaId);
+                  return (
+                    <button
+                      key={edge.id}
+                      type="button"
+                      className="area-relation-btn"
+                      onClick={() => setFocusedAreaEdge(edge)}
+                      title={`Inspect incoming connections from ${srcArea?.name || edge.sourceAreaId}`}
+                    >
+                      <div className="area-rel-info">
+                        <span className="area-rel-target mono">← {srcArea?.name || edge.sourceAreaId}</span>
+                        <span className="area-rel-meta">
+                          {edge.edgeCount} connection{edge.edgeCount === 1 ? '' : 's'} across {edge.targetFilesCount} file{edge.targetFilesCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <ChevronRight size={13} className="link-icon" />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Files in this Area */}
           <div className="relations-section" style={{ marginTop: '14px' }}>
             <div className="section-title">
               <Layers size={14} />
@@ -220,21 +434,33 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
             <ul className="relation-list">
               {currentArea?.nodes.map((node) => (
-                <li
-                  key={node.id}
-                  className="relation-item"
-                  onClick={() => {
-                    onSelectNode(node);
-                    onRevealNode?.(node.id);
-                  }}
-                  title={`Inspect ${node.relative_path}`}
-                >
-                  <div
-                    className="color-dot-small"
-                    style={{ backgroundColor: getFileTypeColor(node.relative_path) }}
-                  />
-                  <span className="rel-path mono">{node.filename}</span>
-                  <ChevronRight size={12} className="link-icon" />
+                <li key={node.id} className="area-file-row">
+                  <button
+                    type="button"
+                    className="area-file-inspect-btn"
+                    onClick={() => onSelectNode(node)}
+                    title={`Inspect ${node.relative_path}`}
+                  >
+                    <div
+                      className="color-dot-small"
+                      style={{ backgroundColor: getFileTypeColor(node.relative_path) }}
+                    />
+                    <span className="rel-path mono">{node.filename}</span>
+                    {node.analysis_status === 'Unsupported' && (
+                      <span className="file-badge unsupported">unsupported</span>
+                    )}
+                  </button>
+                  {onRevealNode && (
+                    <button
+                      type="button"
+                      className="area-file-reveal-btn"
+                      onClick={() => onRevealNode(node.id)}
+                      title={`Reveal ${node.filename} in 3D graph`}
+                      aria-label={`Reveal ${node.filename} in 3D`}
+                    >
+                      <LocateFixed size={12} />
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -247,6 +473,10 @@ export const Inspector: React.FC<InspectorProps> = ({
   // 2. REPOSITORY OVERVIEW (Default view when no node, edge, or area is selected)
   if (!selectedNode && !selectedEdge) {
     if (!snapshot) return null;
+    const totalDiscovered = snapshot.coverage.total_discovered;
+    const totalAnalyzed = snapshot.coverage.total_analyzed;
+    const unsupportedCount = snapshot.nodes.filter((n) => n.analysis_status === 'Unsupported').length;
+
     return (
       <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
         <div className="inspector-header">
@@ -270,9 +500,13 @@ export const Inspector: React.FC<InspectorProps> = ({
               <span>What PreBase Found</span>
             </div>
             <p className="beginner-card-text">
-              PreBase analyzed <strong>{snapshot.coverage.total_analyzed}</strong> files across{' '}
-              <strong>{repoStructure?.areas.length || 0}</strong> codebase areas and detected{' '}
-              <strong>{snapshot.edges.length}</strong> direct internal code connections.
+              PreBase discovered <strong>{totalDiscovered}</strong> files across{' '}
+              <strong>{repoStructure?.areas.length || 0}</strong> architectural areas. Analyzed{' '}
+              <strong>{totalAnalyzed}</strong> supported files for internal dependencies and confirmed{' '}
+              <strong>{snapshot.edges.length}</strong> direct code connections.
+              {unsupportedCount > 0 && (
+                <span> ({unsupportedCount} files are unsupported formats excluded from AST dependency analysis.)</span>
+              )}
             </p>
           </div>
 
@@ -287,14 +521,12 @@ export const Inspector: React.FC<InspectorProps> = ({
                 {repoStructure.suggestions.slice(0, 4).map((sug) => {
                   const node = snapshot.nodes.find((n) => n.id === sug.nodeId);
                   return (
-                    <div
+                    <button
                       key={sug.nodeId}
+                      type="button"
                       className="suggestion-card clickable"
                       onClick={() => {
-                        if (node) {
-                          onSelectNode(node);
-                          onRevealNode?.(node.id);
-                        }
+                        if (node) onSelectNode(node);
                       }}
                       title={`Inspect ${sug.relativePath}`}
                     >
@@ -304,7 +536,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                       </div>
                       <div className="sug-filename mono">{sug.filename}</div>
                       <p className="sug-reason">{sug.reason}</p>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -329,7 +561,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                   >
                     <span className="area-pill-name">{area.name}</span>
                     <span className="area-pill-meta">
-                      {area.fileCount} file{area.fileCount !== 1 ? 's' : ''}
+                      {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} area links
                     </span>
                   </button>
                 ))}
@@ -382,6 +614,7 @@ export const Inspector: React.FC<InspectorProps> = ({
 
   // 3. SELECTED EDGE VIEW
   if (selectedEdge) {
+    const summarySentence = getEdgeRelationshipSentence(selectedEdge);
     return (
       <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
         <div className="inspector-header">
@@ -408,35 +641,38 @@ export const Inspector: React.FC<InspectorProps> = ({
 
         <div key={selectedEdge.id} className="inspector-content animate-reveal">
           <div className="edge-plain-summary">
-            <strong>"{selectedEdge.source_file_id}"</strong> directly imports from{' '}
-            <strong>"{selectedEdge.target_file_id}"</strong>.
+            {summarySentence}
           </div>
 
           <div className="relationship-card">
-            <div
+            <button
+              type="button"
               className="rel-endpoint clickable"
               onClick={() => {
                 const src = snapshot?.nodes.find((n) => n.id === selectedEdge.source_file_id);
                 if (src) onSelectNode(src);
               }}
+              title={`Inspect ${selectedEdge.source_file_id}`}
             >
               <FileCode size={14} color="#38bdf8" />
               <span className="mono">{selectedEdge.source_file_id}</span>
-            </div>
+            </button>
             <div className="rel-arrow">
               <ArrowRight size={16} color="#2dd4bf" />
               <span className="rel-kind">{selectedEdge.relationship_kind}</span>
             </div>
-            <div
+            <button
+              type="button"
               className="rel-endpoint clickable"
               onClick={() => {
                 const tgt = snapshot?.nodes.find((n) => n.id === selectedEdge.target_file_id);
                 if (tgt) onSelectNode(tgt);
               }}
+              title={`Inspect ${selectedEdge.target_file_id}`}
             >
               <FileCode size={14} color="#a78bfa" />
               <span className="mono">{selectedEdge.target_file_id}</span>
-            </div>
+            </button>
           </div>
 
           <div className="evidence-section">
@@ -466,9 +702,15 @@ export const Inspector: React.FC<InspectorProps> = ({
 
   const depCount = selectedNode?.direct_dependency_count ?? 0;
   const dependentCount = selectedNode?.direct_dependent_count ?? 0;
+  const isUnsupported = selectedNode?.analysis_status === 'Unsupported';
+  const isFailed = selectedNode?.analysis_status === 'Failed';
 
   let relationshipSentence = '';
-  if (depCount === 0 && dependentCount === 0) {
+  if (isUnsupported) {
+    relationshipSentence = 'PreBase discovered this file but does not currently analyze its internal dependencies.';
+  } else if (isFailed) {
+    relationshipSentence = 'PreBase encountered an error while parsing this file\'s imports.';
+  } else if (depCount === 0 && dependentCount === 0) {
     relationshipSentence = 'This file has no direct internal dependencies or dependents in this repository.';
   } else if (depCount > 0 && dependentCount === 0) {
     relationshipSentence = `This file uses ${depCount} internal file${depCount > 1 ? 's' : ''}, and is not directly imported by any other indexed files.`;
@@ -514,6 +756,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           <div className="file-path-bar mono">{selectedNode?.relative_path}</div>
           {selectedNode?.relative_path && (
             <button
+              type="button"
               className="path-copy-btn"
               onClick={() => handleCopyPath(selectedNode.relative_path)}
               title={copiedPath ? 'Copied!' : 'Copy path to clipboard'}
@@ -525,7 +768,7 @@ export const Inspector: React.FC<InspectorProps> = ({
         </div>
 
         {/* Plain-English summary banner */}
-        <div className="file-plain-summary-box">
+        <div className={`file-plain-summary-box ${isUnsupported ? 'unsupported' : isFailed ? 'failed' : ''}`}>
           <p className="file-plain-summary-text">{relationshipSentence}</p>
         </div>
 
@@ -548,7 +791,9 @@ export const Inspector: React.FC<InspectorProps> = ({
           <span className="tag size-tag">
             {((selectedNode?.size_bytes || 0) / 1024).toFixed(1)} KB
           </span>
-          <span className="tag status-tag">{selectedNode?.analysis_status}</span>
+          <span className={`tag status-tag ${isUnsupported ? 'unsupported' : isFailed ? 'failed' : ''}`}>
+            {selectedNode?.analysis_status}
+          </span>
         </div>
 
         <div className="stats-grid" style={{ marginTop: '10px' }}>
@@ -566,6 +811,7 @@ export const Inspector: React.FC<InspectorProps> = ({
         <div className="inspector-action-buttons">
           {selectedNode && onRevealNode && networkViewMode !== '2d' && (
             <button
+              type="button"
               className="reveal-btn"
               onClick={() => onRevealNode(selectedNode.id)}
               title="Locate and center this file in the 3D graph"
@@ -575,8 +821,9 @@ export const Inspector: React.FC<InspectorProps> = ({
             </button>
           )}
 
-          {selectedNode && networkViewMode === '3d' && onExplore2D && (
+          {selectedNode && networkViewMode === '3d' && onExplore2D && !isUnsupported && (
             <button
+              type="button"
               className="explore-2d-btn"
               onClick={() => onExplore2D(selectedNode)}
               title="Open focused 2D relationship neighborhood for this file"
@@ -588,6 +835,7 @@ export const Inspector: React.FC<InspectorProps> = ({
 
           {selectedNode && networkViewMode === '2d' && onRefocus2D && selectedNode.id !== focusNodeId && (
             <button
+              type="button"
               className="refocus-2d-btn"
               onClick={() => onRefocus2D(selectedNode.id)}
               title="Recenter 2D relationship neighborhood on this file"
@@ -599,6 +847,7 @@ export const Inspector: React.FC<InspectorProps> = ({
 
           {selectedNode && networkViewMode === '2d' && onSwitchTo3D && (
             <button
+              type="button"
               className="switch-3d-btn"
               onClick={onSwitchTo3D}
               title="Return to 3D Overview while preserving selection"
@@ -610,6 +859,7 @@ export const Inspector: React.FC<InspectorProps> = ({
 
           {selectedNode && onViewFileHistory && (
             <button
+              type="button"
               className="view-history-btn"
               onClick={() => onViewFileHistory(selectedNode.relative_path)}
               title="Inspect historical Git commits for this file"
@@ -622,6 +872,16 @@ export const Inspector: React.FC<InspectorProps> = ({
 
         {loading ? (
           <div className="loading-state">Analyzing relationships...</div>
+        ) : isUnsupported ? (
+          <div className="limitations-box" style={{ marginTop: '12px' }}>
+            <div className="limitations-title">
+              <Info size={14} color="#94a3b8" />
+              <span>Non-analyzed File Format</span>
+            </div>
+            <p className="limitations-desc">
+              PreBase tracks this file in the repository index, but only TypeScript and JavaScript files currently undergo AST-level dependency extraction.
+            </p>
+          </div>
         ) : (
           <>
             {/* Dependencies */}
@@ -635,18 +895,20 @@ export const Inspector: React.FC<InspectorProps> = ({
               ) : (
                 <ul className="relation-list">
                   {inspection?.dependencies.map((dep) => (
-                    <li
-                      key={dep.id}
-                      className="relation-item"
-                      onClick={() => onSelectNode(dep)}
-                      title={`Inspect ${dep.relative_path}`}
-                    >
-                      <div
-                        className="color-dot-small"
-                        style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
-                      />
-                      <span className="rel-path mono">{dep.relative_path}</span>
-                      <ExternalLink size={12} className="link-icon" />
+                    <li key={dep.id} className="relation-item-wrap">
+                      <button
+                        type="button"
+                        className="relation-item-btn"
+                        onClick={() => onSelectNode(dep)}
+                        title={`Inspect ${dep.relative_path}`}
+                      >
+                        <div
+                          className="color-dot-small"
+                          style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                        />
+                        <span className="rel-path mono">{dep.relative_path}</span>
+                        <ExternalLink size={12} className="link-icon" />
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -664,18 +926,20 @@ export const Inspector: React.FC<InspectorProps> = ({
               ) : (
                 <ul className="relation-list">
                   {inspection?.dependents.map((dep) => (
-                    <li
-                      key={dep.id}
-                      className="relation-item"
-                      onClick={() => onSelectNode(dep)}
-                      title={`Inspect ${dep.relative_path}`}
-                    >
-                      <div
-                        className="color-dot-small"
-                        style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
-                      />
-                      <span className="rel-path mono">{dep.relative_path}</span>
-                      <ExternalLink size={12} className="link-icon" />
+                    <li key={dep.id} className="relation-item-wrap">
+                      <button
+                        type="button"
+                        className="relation-item-btn"
+                        onClick={() => onSelectNode(dep)}
+                        title={`Inspect ${dep.relative_path}`}
+                      >
+                        <div
+                          className="color-dot-small"
+                          style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                        />
+                        <span className="rel-path mono">{dep.relative_path}</span>
+                        <ExternalLink size={12} className="link-icon" />
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -688,6 +952,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                   <h4 style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Source Preview</h4>
                   <button
+                    type="button"
                     className="path-copy-btn"
                     onClick={() => handleCopyCode(sourcePreview)}
                     title={copiedCode ? 'Copied code!' : 'Copy source snippet'}

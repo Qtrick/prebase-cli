@@ -1,5 +1,28 @@
-import { DependencyEdge, FileNode } from '../types/graph';
-import { findEntryPointCandidate, EntryPointCandidate } from './entryPointDetection';
+import { DependencyEdge, FileNode, RelationshipKind } from '../types/graph';
+import {
+  findEntryPointCandidates,
+  EntryPointCandidate,
+} from './entryPointDetection';
+
+export interface AreaEdgeContributingFilePair {
+  sourceFileId: string;
+  targetFileId: string;
+  relationshipKind: RelationshipKind;
+  evidenceSpecifier: string;
+  line?: number;
+}
+
+export interface AreaEdge {
+  id: string;
+  sourceAreaId: string;
+  targetAreaId: string;
+  edgeCount: number;
+  sourceFilesCount: number;
+  targetFilesCount: number;
+  contributingEdges: DependencyEdge[];
+  contributingFilePairs: AreaEdgeContributingFilePair[];
+  summarySentence: string;
+}
 
 export interface RepositoryArea {
   id: string;
@@ -12,14 +35,10 @@ export interface RepositoryArea {
   totalDependencies: number; // Outgoing connections to files outside this area
   totalDependents: number;   // Incoming connections from files outside this area
   internalConnections: number; // Connections between files within the same area
-}
-
-export interface AreaEdge {
-  id: string;
-  sourceAreaId: string;
-  targetAreaId: string;
-  edgeCount: number;
-  contributingEdges: DependencyEdge[];
+  outgoingAreaEdges: AreaEdge[];
+  incomingAreaEdges: AreaEdge[];
+  analyzedCount: number;
+  unsupportedCount: number;
 }
 
 export interface ExplorationSuggestion {
@@ -39,14 +58,17 @@ export interface DerivedRepositoryStructure {
   areaEdges: AreaEdge[];
   suggestions: ExplorationSuggestion[];
   entryPointCandidate: EntryPointCandidate | null;
+  entryPointCandidates: EntryPointCandidate[];
 }
 
 /**
  * Normalizes a relative file path to its canonical repository area identifier.
- * Example:
- * - "src/components/Card.tsx" -> "src/components"
- * - "crates/prebase-core/src/model.rs" -> "crates/prebase-core"
- * - "package.json" -> "(root)"
+ * Uses an adaptive directory strategy:
+ * - Root files (package.json, README.md, Cargo.toml) -> '(root)'
+ * - Monorepo workspaces (crates/*, packages/*, apps/*, libs/*) -> 'crates/<name>'
+ * - Nested fullstack apps (frontend/src/*, backend/src/*) -> 'frontend/src/components'
+ * - Single-app structures (src/components/*, src/utils/*) -> 'src/components'
+ * - Test directories (tests/*, e2e/*) -> 'tests'
  */
 export function getAreaIdForPath(relativePath: string): string {
   const parts = relativePath.split('/').filter(Boolean);
@@ -54,26 +76,45 @@ export function getAreaIdForPath(relativePath: string): string {
     return '(root)';
   }
 
-  // Handle common monorepo or workspace namespaces
   const first = parts[0];
+
+  // 1. Monorepo and workspace root packages (crates/*, packages/*, apps/*, libs/*, modules/*)
   if (
-    (first === 'crates' || first === 'packages' || first === 'apps' || first === 'libs') &&
+    (first === 'crates' || first === 'packages' || first === 'apps' || first === 'libs' || first === 'services' || first === 'modules') &&
     parts.length >= 3
   ) {
     return `${parts[0]}/${parts[1]}`;
   }
 
-  // Handle standard nested src/ directory structures
-  if (first === 'src' && parts.length >= 3) {
-    return `src/${parts[1]}`;
+  // 2. Nested fullstack directories (frontend/src/*, backend/src/*, client/src/*, server/src/*)
+  if (
+    (first === 'frontend' || first === 'backend' || first === 'client' || first === 'server') &&
+    parts.length >= 3
+  ) {
+    if (parts[1] === 'src' && parts.length >= 4) {
+      return `${parts[0]}/src/${parts[2]}`;
+    }
+    return `${parts[0]}/${parts[1]}`;
   }
 
-  // If 2 levels: e.g. "src/index.ts" -> "src"
-  if (parts.length === 2) {
-    return parts[0];
+  // 3. Standard src/ nested directories (src/components/*, src/utils/*, src/routes/*)
+  if (first === 'src') {
+    if (parts.length >= 3) {
+      return `src/${parts[1]}`;
+    }
+    return 'src';
   }
 
-  // Fallback to top-level directory
+  // 4. Test suites
+  if (first === 'tests' || first === 'test' || first === 'e2e' || first === '__tests__') {
+    return first;
+  }
+
+  // 5. Default 2-level directory grouping
+  if (parts.length >= 3) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+
   return parts[0];
 }
 
@@ -108,6 +149,9 @@ export function deriveRepositoryStructure(
     const displayPath = areaId === '(root)' ? 'Root Directory' : `${areaId}/`;
     const name = areaId === '(root)' ? 'Root' : areaId.split('/').pop() || areaId;
 
+    const analyzedCount = areaNodes.filter((n) => n.analysis_status === 'Analyzed').length;
+    const unsupportedCount = areaNodes.filter((n) => n.analysis_status === 'Unsupported').length;
+
     const area: RepositoryArea = {
       id: areaId,
       name,
@@ -119,13 +163,26 @@ export function deriveRepositoryStructure(
       totalDependencies: 0,
       totalDependents: 0,
       internalConnections: 0,
+      outgoingAreaEdges: [],
+      incomingAreaEdges: [],
+      analyzedCount,
+      unsupportedCount,
     };
     areas.push(area);
     areaMap.set(areaId, area);
   }
 
   // Aggregate file-level edges into area-level edges
-  const edgeAggregates = new Map<string, { count: number; edges: DependencyEdge[] }>();
+  const edgeAggregates = new Map<
+    string,
+    {
+      sourceAreaId: string;
+      targetAreaId: string;
+      edges: DependencyEdge[];
+      sourceFiles: Set<string>;
+      targetFiles: Set<string>;
+    }
+  >();
 
   for (const edge of edges) {
     const srcArea = fileToAreaId.get(edge.source_file_id);
@@ -145,24 +202,64 @@ export function deriveRepositoryStructure(
       const key = `${srcArea}-->${tgtArea}`;
       let agg = edgeAggregates.get(key);
       if (!agg) {
-        agg = { count: 0, edges: [] };
+        agg = {
+          sourceAreaId: srcArea,
+          targetAreaId: tgtArea,
+          edges: [],
+          sourceFiles: new Set(),
+          targetFiles: new Set(),
+        };
         edgeAggregates.set(key, agg);
       }
-      agg.count++;
       agg.edges.push(edge);
+      agg.sourceFiles.add(edge.source_file_id);
+      agg.targetFiles.add(edge.target_file_id);
     }
   }
 
   const areaEdges: AreaEdge[] = [];
   for (const [key, agg] of edgeAggregates.entries()) {
-    const [sourceAreaId, targetAreaId] = key.split('-->');
-    areaEdges.push({
+    const srcAreaObj = areaMap.get(agg.sourceAreaId);
+    const tgtAreaObj = areaMap.get(agg.targetAreaId);
+    const srcName = srcAreaObj ? srcAreaObj.name : agg.sourceAreaId;
+    const tgtName = tgtAreaObj ? tgtAreaObj.name : agg.targetAreaId;
+
+    const contributingFilePairs: AreaEdgeContributingFilePair[] = agg.edges.map((e) => ({
+      sourceFileId: e.source_file_id,
+      targetFileId: e.target_file_id,
+      relationshipKind: e.relationship_kind,
+      evidenceSpecifier: e.evidence[0]?.import_specifier || '',
+      line: e.evidence[0]?.line,
+    }));
+
+    const edgeCount = agg.edges.length;
+    const sourceFilesCount = agg.sourceFiles.size;
+    const targetFilesCount = agg.targetFiles.size;
+
+    const summarySentence = `${sourceFilesCount} file${sourceFilesCount === 1 ? '' : 's'} in ${srcName} import ${targetFilesCount} file${targetFilesCount === 1 ? '' : 's'} in ${tgtName} across ${edgeCount} connection${edgeCount === 1 ? '' : 's'}.`;
+
+    const areaEdge: AreaEdge = {
       id: key,
-      sourceAreaId,
-      targetAreaId,
-      edgeCount: agg.count,
+      sourceAreaId: agg.sourceAreaId,
+      targetAreaId: agg.targetAreaId,
+      edgeCount,
+      sourceFilesCount,
+      targetFilesCount,
       contributingEdges: agg.edges,
-    });
+      contributingFilePairs,
+      summarySentence,
+    };
+
+    areaEdges.push(areaEdge);
+
+    if (srcAreaObj) srcAreaObj.outgoingAreaEdges.push(areaEdge);
+    if (tgtAreaObj) tgtAreaObj.incomingAreaEdges.push(areaEdge);
+  }
+
+  // Sort area edges in each area by edgeCount descending
+  for (const area of areas) {
+    area.outgoingAreaEdges.sort((a, b) => b.edgeCount - a.edgeCount);
+    area.incomingAreaEdges.sort((a, b) => b.edgeCount - a.edgeCount);
   }
 
   // Sort areas by size (descending file count)
@@ -170,23 +267,25 @@ export function deriveRepositoryStructure(
 
   // Compute Grounded Exploration Suggestions
   const suggestions: ExplorationSuggestion[] = [];
-  const entryCandidate = findEntryPointCandidate(nodes);
+  const entryCandidates = findEntryPointCandidates(nodes);
+  const primaryEntry = entryCandidates.length > 0 ? entryCandidates[0] : null;
 
-  if (entryCandidate) {
+  for (const cand of entryCandidates.slice(0, 2)) {
     suggestions.push({
-      nodeId: entryCandidate.nodeId,
-      relativePath: entryCandidate.relativePath,
-      filename: entryCandidate.filename,
-      title: 'Entry Point Candidate',
-      reason: entryCandidate.heuristicReason,
-      badge: 'Entry Candidate',
+      nodeId: cand.nodeId,
+      relativePath: cand.relativePath,
+      filename: cand.filename,
+      title: cand.displayTitle,
+      reason: cand.heuristicReason,
+      badge: cand.kind === 'library-crate-root' ? 'Crate Root' : 'Entry Candidate',
       kind: 'entrypoint',
     });
   }
 
-  // Top core dependencies (files with high incoming dependent count)
+  // Frequently imported files (files with high incoming dependent count)
+  const candidateIds = new Set(entryCandidates.map((c) => c.nodeId));
   const sortedByDependents = [...nodes]
-    .filter((n) => n.id !== entryCandidate?.nodeId && (n.direct_dependent_count || 0) > 0)
+    .filter((n) => !candidateIds.has(n.id) && (n.direct_dependent_count || 0) > 0)
     .sort((a, b) => (b.direct_dependent_count || 0) - (a.direct_dependent_count || 0));
 
   for (const topNode of sortedByDependents.slice(0, 3)) {
@@ -194,8 +293,8 @@ export function deriveRepositoryStructure(
       nodeId: topNode.id,
       relativePath: topNode.relative_path,
       filename: topNode.filename,
-      title: 'Core Shared File',
-      reason: `Used directly by ${topNode.direct_dependent_count} other file${topNode.direct_dependent_count === 1 ? '' : 's'}`,
+      title: 'Frequently imported file',
+      reason: `Imported by ${topNode.direct_dependent_count} indexed file${topNode.direct_dependent_count === 1 ? '' : 's'}`,
       badge: `${topNode.direct_dependent_count} dependents`,
       kind: 'core-dependency',
     });
@@ -207,7 +306,7 @@ export function deriveRepositoryStructure(
     fileToAreaId,
     areaEdges,
     suggestions,
-    entryPointCandidate: entryCandidate,
+    entryPointCandidate: primaryEntry,
+    entryPointCandidates: entryCandidates,
   };
 }
-
