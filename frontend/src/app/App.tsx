@@ -40,17 +40,73 @@ import {
 } from 'lucide-react';
 import './App.css';
 
-export const App: React.FC = () => {
-  // Read initial view and focus from URL (?view=temporal | ?view=2d | ?view=3d, ?focus=<path>)
-  const initialParams = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
+export interface InitialUrlParams {
+  activeTab: 'network' | 'temporal';
+  networkViewMode: '2d' | '3d';
+  initialFocusPath: string | null;
+}
+
+export function parseInitialUrlParams(search: string): InitialUrlParams {
+  try {
+    const params = new URLSearchParams(search);
     const view = params.get('view');
     const focus = params.get('focus');
     return {
       activeTab: view === 'temporal' ? ('temporal' as const) : ('network' as const),
       networkViewMode: view === '2d' ? ('2d' as const) : ('3d' as const),
-      initialFocusPath: focus ? decodeURIComponent(focus) : null,
+      initialFocusPath: focus || null,
     };
+  } catch {
+    return {
+      activeTab: 'network' as const,
+      networkViewMode: '3d' as const,
+      initialFocusPath: null,
+    };
+  }
+}
+
+export interface KeyboardShortcutTargetLike {
+  tagName?: string;
+  isContentEditable?: boolean;
+  getAttribute?: (attr: string) => string | null;
+}
+
+export interface KeyboardShortcutEventLike {
+  target?: EventTarget | KeyboardShortcutTargetLike | null;
+  key?: string;
+  isComposing?: boolean;
+  keyCode?: number;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+}
+
+export function shouldIgnoreGlobalShortcut(e: KeyboardShortcutEventLike): boolean {
+  const target = e.target as (KeyboardShortcutTargetLike & { isContentEditable?: boolean }) | null | undefined;
+  if (!target) return true;
+  const targetTag = (target as HTMLElement).tagName?.toLowerCase();
+  const isEditable =
+    targetTag === 'input' ||
+    targetTag === 'textarea' ||
+    targetTag === 'select' ||
+    Boolean(target.isContentEditable) ||
+    target.getAttribute?.('contenteditable') === 'true' ||
+    target.getAttribute?.('role') === 'textbox';
+  if (isEditable) return true;
+
+  if (e.isComposing || e.keyCode === 229) return true;
+
+  return false;
+}
+
+export function hasModifierCombination(e: KeyboardShortcutEventLike): boolean {
+  return Boolean(e.metaKey || e.ctrlKey || e.altKey);
+}
+
+export const App: React.FC = () => {
+  // Read initial view and focus from URL (?view=temporal | ?view=2d | ?view=3d, ?focus=<path>)
+  const initialParams = useMemo(() => {
+    return parseInitialUrlParams(typeof window !== 'undefined' ? window.location.search : '');
   }, []);
 
   const [activeTab, setActiveTab] = useState<'network' | 'temporal'>(initialParams.activeTab);
@@ -61,6 +117,9 @@ export const App: React.FC = () => {
   const [independent2DViewport, setIndependent2DViewport] = useState<Viewport2D>({ panX: 0, panY: 0, zoom: 1.0 });
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const focusResolvedRef = useRef(false);
+  const liveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const commitsRequestTokenRef = useRef(0);
+  const commitsAbortControllerRef = useRef<AbortController | null>(null);
 
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -221,53 +280,86 @@ export const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, []);
 
+  const showLiveNotice = useCallback((message: string, duration = 3500) => {
+    if (liveNoticeTimerRef.current) clearTimeout(liveNoticeTimerRef.current);
+    setLiveNotice(message);
+    liveNoticeTimerRef.current = setTimeout(() => {
+      setLiveNotice(null);
+      liveNoticeTimerRef.current = null;
+    }, duration);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (liveNoticeTimerRef.current) clearTimeout(liveNoticeTimerRef.current);
+      if (commitsAbortControllerRef.current) commitsAbortControllerRef.current.abort();
+    };
+  }, []);
+
   // 2. Fetch Git commit history with anchor pagination
   const loadCommits = useCallback(async (filterPath?: string | null) => {
+    const currentToken = ++commitsRequestTokenRef.current;
+    if (commitsAbortControllerRef.current) {
+      commitsAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    commitsAbortControllerRef.current = controller;
+
     setTemporalLoading(true);
     try {
       if (filterPath) {
-        const res = await api.getFileHistory(filterPath, 100);
+        const res = await api.getFileHistory(filterPath, 100, controller.signal);
+        if (currentToken !== commitsRequestTokenRef.current) return;
         setCommits(res.commits);
         setNextCursor(null);
         setHasMoreCommits(false);
         setTotalCommits(res.commits.length);
       } else {
-        const res = await api.getHistory(50, null);
+        const res = await api.getHistory(50, null, controller.signal);
+        if (currentToken !== commitsRequestTokenRef.current) return;
         setCommits(res.commits);
         setNextCursor(res.next_cursor);
         setHasMoreCommits(res.has_more);
         setTotalCommits(res.total_commits);
       }
-    } catch {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return;
+      if (currentToken !== commitsRequestTokenRef.current) return;
       setCommits([]);
       setNextCursor(null);
       setHasMoreCommits(false);
       setTotalCommits(null);
     } finally {
-      setTemporalLoading(false);
+      if (currentToken === commitsRequestTokenRef.current) {
+        setTemporalLoading(false);
+      }
     }
   }, []);
 
   const handleLoadMoreCommits = useCallback(async () => {
     if (!nextCursor || isLoadingMore) return;
+    const currentToken = ++commitsRequestTokenRef.current;
     setIsLoadingMore(true);
     try {
       const res = await api.getHistory(50, nextCursor);
+      if (currentToken !== commitsRequestTokenRef.current) return;
       setCommits((prev) => [...prev, ...res.commits]);
       setNextCursor(res.next_cursor);
       setHasMoreCommits(res.has_more);
       setTotalCommits(res.total_commits);
     } catch (err: unknown) {
+      if (currentToken !== commitsRequestTokenRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('410') || msg.includes('StaleCursor')) {
-        setLiveNotice('Commit history updated on disk. Reloading history from HEAD...');
-        setTimeout(() => setLiveNotice(null), 3500);
+        showLiveNotice('Commit history updated on disk. Reloading history from HEAD...');
         loadCommits(temporalFilterPath);
       }
     } finally {
-      setIsLoadingMore(false);
+      if (currentToken === commitsRequestTokenRef.current) {
+        setIsLoadingMore(false);
+      }
     }
-  }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath]);
+  }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath, showLiveNotice]);
 
   // Load commits when active tab is temporal or filter changes
   useEffect(() => {
@@ -300,8 +392,7 @@ export const App: React.FC = () => {
           changedFiles.length > 0 && changedFiles[0] !== '*'
             ? `${changedFiles.length} file(s) updated`
             : 'Graph reanalyzed';
-        setLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
-        setTimeout(() => setLiveNotice(null), 3500);
+        showLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
 
         // Re-sync selected node if still exists in the new snapshot
         setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
@@ -367,10 +458,10 @@ export const App: React.FC = () => {
   // 4. Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      const isInput = targetTag === 'input' || targetTag === 'textarea';
-      if (isInput) return;
+      // 1. Ignore if typing in editable element, dialog, or during IME composition
+      if (shouldIgnoreGlobalShortcut(e)) return;
 
+      // 2. Escape key clears selection
       if (e.key === 'Escape') {
         setSelectedNode(null);
         setSelectedEdge(null);
@@ -378,6 +469,9 @@ export const App: React.FC = () => {
         setRevealRequest(null);
         return;
       }
+
+      // 3. Do not hijack browser shortcuts or modifier key combinations (Cmd/Ctrl/Alt)
+      if (hasModifierCombination(e)) return;
 
       if (e.key === 'c' || e.key === 'C') {
         if (activeTabRef.current === 'network') {
@@ -855,7 +949,7 @@ export const App: React.FC = () => {
             {temporalLoading ? (
               <div className="loading-overlay">
                 <Loader2 size={36} className="spinner" color="#38bdf8" />
-                <h3>Loading Git ancestry DAG...</h3>
+                <h3>Loading commit history...</h3>
                 <p>Reading commit topology and lane allocations.</p>
               </div>
             ) : commits.length === 0 ? (

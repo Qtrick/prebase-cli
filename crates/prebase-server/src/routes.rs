@@ -71,12 +71,19 @@ pub async fn handle_auth_session(
     match state.exchange_bootstrap_token(&payload.bootstrap_token) {
         Some(token) => {
             let mut headers = HeaderMap::new();
-            let cookie_val = format!(
+            let port_cookie = format!(
+                "prebase_session_{}={}; HttpOnly; SameSite=Strict; Path=/",
+                state.allocated_port, token
+            );
+            if let Ok(val) = port_cookie.parse() {
+                headers.append(header::SET_COOKIE, val);
+            }
+            let generic_cookie = format!(
                 "prebase_session={}; HttpOnly; SameSite=Strict; Path=/",
                 token
             );
-            if let Ok(val) = cookie_val.parse() {
-                headers.insert(header::SET_COOKIE, val);
+            if let Ok(val) = generic_cookie.parse() {
+                headers.append(header::SET_COOKIE, val);
             }
             Ok((
                 headers,

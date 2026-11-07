@@ -118,6 +118,32 @@ export function getAreaIdForPath(relativePath: string): string {
   return parts[0];
 }
 
+export function formatAreaEdgeSummarySentence(
+  sourceFilesCount: number,
+  srcName: string,
+  targetFilesCount: number,
+  tgtName: string,
+  edgeCount: number,
+  relationshipKinds: RelationshipKind[]
+): string {
+  const kinds = new Set(relationshipKinds);
+  let verb = 'have confirmed source relationships with';
+  if (kinds.size === 1) {
+    const singleKind = relationshipKinds[0];
+    if (singleKind === 'Import') {
+      verb = 'import';
+    } else if (singleKind === 'Export') {
+      verb = 're-export from';
+    } else if (singleKind === 'DynamicImport') {
+      verb = 'dynamically import';
+    } else if (singleKind === 'TypeOnly') {
+      verb = 'import type definitions from';
+    }
+  }
+
+  return `${sourceFilesCount} file${sourceFilesCount === 1 ? '' : 's'} in ${srcName} ${verb} ${targetFilesCount} file${targetFilesCount === 1 ? '' : 's'} in ${tgtName} across ${edgeCount} connection${edgeCount === 1 ? '' : 's'}.`;
+}
+
 /**
  * Derives repository areas, inter-area relationships, and exploration suggestions
  * from static snapshot nodes and confirmed dependency edges.
@@ -236,7 +262,14 @@ export function deriveRepositoryStructure(
     const sourceFilesCount = agg.sourceFiles.size;
     const targetFilesCount = agg.targetFiles.size;
 
-    const summarySentence = `${sourceFilesCount} file${sourceFilesCount === 1 ? '' : 's'} in ${srcName} import ${targetFilesCount} file${targetFilesCount === 1 ? '' : 's'} in ${tgtName} across ${edgeCount} connection${edgeCount === 1 ? '' : 's'}.`;
+    const summarySentence = formatAreaEdgeSummarySentence(
+      sourceFilesCount,
+      srcName,
+      targetFilesCount,
+      tgtName,
+      edgeCount,
+      agg.edges.map((e) => e.relationship_kind)
+    );
 
     const areaEdge: AreaEdge = {
       id: key,

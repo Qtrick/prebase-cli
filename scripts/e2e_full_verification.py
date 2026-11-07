@@ -273,24 +273,44 @@ def main():
             success("Live filesystem synchronization verified: revision incremented to 2 on disk change.")
 
             # 12. Headless Chrome browser DOM verification
-            chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.exists(chrome_bin):
-                log("Running headless Chrome DOM inspection...")
-                app_url = f"{base_url}/?token={session_token}&view=network"
-                chrome_cmd = [
-                    chrome_bin,
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--dump-dom",
-                    app_url
-                ]
-                dom_output = subprocess.check_output(chrome_cmd, timeout=15).decode("utf-8")
-                assert "root" in dom_output, "DOM output missing #root element"
-                assert "PreBase" in dom_output, "DOM output missing PreBase title"
-                assert "Network Graph" in dom_output, "DOM output missing Network Graph tab"
-                success("Headless Chrome rendered web UI cleanly with expected DOM components.")
-            else:
-                log("Google Chrome binary not found; skipping headless browser render check.")
+            log("Running headless browser DOM inspection with session cookie...")
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    context = browser.new_context(viewport={"width": 1280, "height": 800})
+                    context.add_cookies([
+                        {"name": f"prebase_session_{PORT}", "value": session_token, "domain": "127.0.0.1", "path": "/"},
+                        {"name": "prebase_session", "value": session_token, "domain": "127.0.0.1", "path": "/"}
+                    ])
+                    page = context.new_page()
+                    page.goto(f"{base_url}/?view=network", wait_until="networkidle")
+                    page.wait_for_selector("#root", timeout=10000)
+                    page.wait_for_selector(".nav-item:has-text('Network Graph')", timeout=10000)
+                    dom_output = page.content()
+                    assert "root" in dom_output, "DOM output missing #root element"
+                    assert "PreBase" in dom_output, "DOM output missing PreBase title"
+                    assert "Network Graph" in dom_output, "DOM output missing Network Graph tab"
+                    browser.close()
+                success("Browser rendered web UI cleanly with expected DOM components and session cookie.")
+            except ImportError:
+                chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                if os.path.exists(chrome_bin):
+                    log("Running headless Chrome DOM inspection (fallback)...")
+                    app_url = f"{base_url}/?view=network"
+                    chrome_cmd = [
+                        chrome_bin,
+                        "--headless=new",
+                        "--disable-gpu",
+                        "--dump-dom",
+                        app_url
+                    ]
+                    dom_output = subprocess.check_output(chrome_cmd, timeout=15).decode("utf-8")
+                    assert "root" in dom_output, "DOM output missing #root element"
+                    assert "PreBase" in dom_output, "DOM output missing PreBase title"
+                    success("Headless Chrome rendered web UI cleanly with expected DOM components.")
+                else:
+                    log("Neither Playwright nor Google Chrome binary found; skipping headless browser render check.")
 
         finally:
             # 13. Graceful shutdown

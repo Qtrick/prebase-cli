@@ -64,7 +64,7 @@ mod tests {
         let auth_resp = app.clone().oneshot(auth_req).await.unwrap();
         assert_eq!(auth_resp.status(), StatusCode::OK);
 
-        // 4. Protected endpoint with cookie must succeed
+        // 4. Protected endpoint with cookie must succeed (both generic and port-isolated)
         let cookie_auth_req = Request::builder()
             .uri("/api/v1/repository")
             .header(header::HOST, "127.0.0.1:8080")
@@ -73,6 +73,24 @@ mod tests {
             .unwrap();
         let cookie_resp = app.clone().oneshot(cookie_auth_req).await.unwrap();
         assert_eq!(cookie_resp.status(), StatusCode::OK);
+
+        let port_cookie_req = Request::builder()
+            .uri("/api/v1/repository")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::COOKIE, "prebase_session_8080=secret-token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let port_cookie_resp = app.clone().oneshot(port_cookie_req).await.unwrap();
+        assert_eq!(port_cookie_resp.status(), StatusCode::OK);
+
+        // 4b. Query token parameter must be rejected (defense-in-depth against URL credential leakage)
+        let query_token_req = Request::builder()
+            .uri("/api/v1/repository?token=secret-token-xyz")
+            .header(header::HOST, "127.0.0.1:8080")
+            .body(Body::empty())
+            .unwrap();
+        let query_token_resp = app.clone().oneshot(query_token_req).await.unwrap();
+        assert_eq!(query_token_resp.status(), StatusCode::UNAUTHORIZED);
 
         // 5. Host header validation must reject arbitrary external host or wrong port
         let evil_host_req = Request::builder()

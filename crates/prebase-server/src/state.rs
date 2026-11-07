@@ -94,7 +94,7 @@ impl AppState {
     pub fn exchange_bootstrap_token(&self, candidate: &str) -> Option<String> {
         let mut guard = self.bootstrap_token.write().unwrap();
         if let Some(ref current) = *guard {
-            if current == candidate {
+            if crate::auth::constant_time_eq(current, candidate) {
                 *guard = None; // Single-use consumption
                 return Some(self.session_token.clone());
             }

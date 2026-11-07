@@ -1,12 +1,11 @@
 use axum::{
     body::Body,
-    extract::{Query, Request, State},
+    extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
 use rand::{distributions::Alphanumeric, Rng};
-use serde::Deserialize;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -28,9 +27,18 @@ pub fn generate_bootstrap_token() -> String {
         .collect()
 }
 
-#[derive(Deserialize)]
-pub struct AuthQuery {
-    pub token: Option<String>,
+/// Constant-time byte comparison to mitigate local side-channel timing attacks.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
@@ -52,25 +60,29 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
     resp
 }
 
-fn extract_cookie_token(headers: &HeaderMap) -> Option<String> {
+fn extract_cookie_token(headers: &HeaderMap, port: u16) -> Option<String> {
     headers
         .get(header::COOKIE)
         .and_then(|h| h.to_str().ok())
         .and_then(|cookies| {
+            let port_prefix = format!("prebase_session_{port}=");
+            let mut legacy_fallback = None;
             for cookie in cookies.split(';') {
                 let cookie = cookie.trim();
-                if let Some(token) = cookie.strip_prefix("prebase_session=") {
+                if let Some(token) = cookie.strip_prefix(&port_prefix) {
                     return Some(token.to_string());
                 }
+                if let Some(token) = cookie.strip_prefix("prebase_session=") {
+                    legacy_fallback = Some(token.to_string());
+                }
             }
-            None
+            legacy_fallback
         })
 }
 
 pub async fn host_and_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, &'static str)> {
@@ -120,29 +132,20 @@ pub async fn host_and_auth_middleware(
     if is_api_route && !is_public_api {
         let mut authorized = false;
 
-        // Check 1: X-Prebase-Session header
+        // Check 1: X-Prebase-Session header (for non-browser CLI/automation tooling)
         if let Some(header_token) = headers
             .get("x-prebase-session")
             .and_then(|h| h.to_str().ok())
         {
-            if header_token == state.session_token {
+            if constant_time_eq(header_token, &state.session_token) {
                 authorized = true;
             }
         }
 
-        // Check 2: HttpOnly Session Cookie
+        // Check 2: HttpOnly Session Cookie (prebase_session_{port} with prebase_session fallback)
         if !authorized {
-            if let Some(cookie_token) = extract_cookie_token(&headers) {
-                if cookie_token == state.session_token {
-                    authorized = true;
-                }
-            }
-        }
-
-        // Check 3: Query Parameter fallback (e.g. for initial testing or SSE)
-        if !authorized {
-            if let Some(ref q_token) = query.token {
-                if q_token == &state.session_token {
+            if let Some(cookie_token) = extract_cookie_token(&headers, port) {
+                if constant_time_eq(&cookie_token, &state.session_token) {
                     authorized = true;
                 }
             }
@@ -158,4 +161,19 @@ pub async fn host_and_auth_middleware(
     }
 
     Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("", ""));
+        assert!(constant_time_eq("token-123456", "token-123456"));
+        assert!(!constant_time_eq("token-123456", "token-123457"));
+        assert!(!constant_time_eq("token-123456", "token-12345"));
+        assert!(!constant_time_eq("token-12345", "token-123456"));
+        assert!(!constant_time_eq("a", "b"));
+    }
 }

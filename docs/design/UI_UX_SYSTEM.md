@@ -61,3 +61,19 @@ Visual complexity is concentrated within the interactive graphs (3D Network Orb,
 - **Code / Path / Hash**: 11px / 500 / monospace
 - **Badge / Micro Tag**: 10px / 600 / uppercase
 
+---
+
+## 5. Repository Exploration & Inspector Hierarchy (Post-MVP Refinements)
+
+### 5.1 Restrained Typography & Honest Language
+- **Repository Overview**: Clean, unornamented headline "Repository overview" paired with structural breakdown of discovered, analyzed, and excluded file boundaries.
+- **Entry Recommendations ("Start here")**: Prioritizes entry candidates and key architectural utilities with explicit justification badges (`Entry Point`, `Direct Exporter`) rather than generic decorative pills.
+- **Architectural Areas ("Areas")**: High-density interactive cards displaying file counts, internal connections, and outgoing relationships with full hover, focus, and active keyboard treatment.
+- **Truthful Node Descriptions**: Eliminates speculative "foundation file" claims; presents verified metrics: `"This file is directly used by N other files in this codebase (inbound dependencies)."`
+
+### 5.2 Stylesheet Architecture & Cascade Integrity
+- All styles in `App.css` are structured in contiguous component sections.
+- Eliminates duplicate selectors and conflicting rules.
+- Interactive controls (`.area-pill-card`, `.suggestion-card`) have complete background, border, and focus states across both dark and light modes, eliminating native gray browser fallbacks.
+- Global keyboard shortcut handlers respect all editable surfaces (`input`, `textarea`, `select`, `[contenteditable]`, `[role="textbox"]`), IME composition (`keyCode 229`), and OS modifier shortcuts (`Cmd+C`, `Cmd+V`, `Cmd+1/2`).
+

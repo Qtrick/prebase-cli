@@ -111,7 +111,9 @@ impl RepositoryScanner {
     }
 
     pub fn is_excluded_relative_path(rel_path: &str) -> bool {
-        let parts: Vec<&str> = rel_path.split('/').collect();
+        let trimmed = rel_path.trim_matches(|c| c == '/' || c == '\\');
+        let normalized = trimmed.replace('\\', "/");
+        let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
         for part in &parts {
             match *part {
                 ".git" | "node_modules" | "dist" | "build" | ".build" | ".next" | ".nuxt"
@@ -121,7 +123,7 @@ impl RepositoryScanner {
             }
         }
 
-        let filename = parts.last().copied().unwrap_or(rel_path);
+        let filename = parts.last().copied().unwrap_or(trimmed);
         // Exclude secret files
         if filename.starts_with(".env")
             || filename.ends_with(".pem")
@@ -228,5 +230,65 @@ impl RepositoryScanner {
         discovered.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
         (discovered, excluded_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_excluded_relative_path() {
+        // Safe source paths
+        assert!(!RepositoryScanner::is_excluded_relative_path("src/main.ts"));
+        assert!(!RepositoryScanner::is_excluded_relative_path(
+            "components/Button.tsx"
+        ));
+        assert!(!RepositoryScanner::is_excluded_relative_path("README.md"));
+
+        // Excluded directories
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "node_modules/foo/index.js"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "dist/bundle.js"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(".git/HEAD"));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".vscode/settings.json"
+        ));
+
+        // Windows path separators
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "node_modules\\foo\\index.js"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "src\\secrets\\.env"
+        ));
+
+        // Secret files
+        assert!(RepositoryScanner::is_excluded_relative_path(".env"));
+        assert!(RepositoryScanner::is_excluded_relative_path(".env.local"));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".env.production"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path("server.key"));
+        assert!(RepositoryScanner::is_excluded_relative_path("cert.pem"));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "credentials.json"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path("id_rsa"));
+        assert!(RepositoryScanner::is_excluded_relative_path("id_rsa.pub"));
+
+        // Trailing slashes and repeated separators
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "secrets/.env/"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "secrets//.env"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "/node_modules/pkg/"
+        ));
     }
 }

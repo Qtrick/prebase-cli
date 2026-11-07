@@ -14,67 +14,49 @@ import {
   ServerEvent,
 } from '../types/temporal';
 
-let inMemorySessionToken: string = '';
-
 export function getSessionToken(): string {
-  if (inMemorySessionToken) return inMemorySessionToken;
-  const tokenFromStorage = sessionStorage.getItem('prebase_token');
-  if (tokenFromStorage) {
-    inMemorySessionToken = tokenFromStorage;
-    return tokenFromStorage;
-  }
   return '';
 }
 
-export async function initSession(): Promise<string> {
+export async function initSession(): Promise<void> {
   const urlParams = new URLSearchParams(window.location.search);
   const bootstrapToken = urlParams.get('bootstrap');
   const tokenFromUrl = urlParams.get('token');
 
   if (bootstrapToken) {
     try {
-      const resp = await fetch('/api/v1/auth/session', {
+      await fetch('/api/v1/auth/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ bootstrap_token: bootstrapToken }),
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.session_token) {
-          inMemorySessionToken = data.session_token;
-          sessionStorage.setItem('prebase_token', data.session_token);
-        }
-      }
     } catch {
-      // ignore network errors on init
+      // ignore network errors on init; subsequent status checks will report connectivity
     }
-    // Clean bootstrap parameter from browser address bar
     urlParams.delete('bootstrap');
     const newSearch = urlParams.toString();
     const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
     window.history.replaceState({}, '', cleanUrl);
   } else if (tokenFromUrl) {
-    inMemorySessionToken = tokenFromUrl;
-    sessionStorage.setItem('prebase_token', tokenFromUrl);
+    // Purge query token from URL without storing in browser storage
     urlParams.delete('token');
     const newSearch = urlParams.toString();
     const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
     window.history.replaceState({}, '', cleanUrl);
   }
-
-  return getSessionToken();
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const token = getSessionToken();
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
   };
-  if (token) {
-    headers['x-prebase-session'] = token;
-  }
 
-  const response = await fetch(path, { headers, signal });
+  const response = await fetch(path, {
+    headers,
+    credentials: 'same-origin',
+    signal,
+  });
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`API error ${response.status} on ${path}: ${errorText}`);
@@ -126,10 +108,8 @@ export const api = {
     onEvent: (event: ServerEvent) => void,
     onStatusChange?: (status: 'connected' | 'reconnecting' | 'error') => void
   ): (() => void) => {
-    // Authenticate via HttpOnly session cookie and query token fallback for EventSource
-    const token = getSessionToken();
-    const url = token ? `/api/v1/events?token=${encodeURIComponent(token)}` : '/api/v1/events';
-    const eventSource = new EventSource(url, { withCredentials: true });
+    // Authenticate cleanly via HttpOnly session cookie without token exposure in URL
+    const eventSource = new EventSource('/api/v1/events', { withCredentials: true });
 
     eventSource.onopen = () => {
       if (onStatusChange) onStatusChange('connected');

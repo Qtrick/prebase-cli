@@ -324,3 +324,49 @@ feat(ui): refine 3D network orb motion physics, visual design system, and access
 - Expand automated behavioral regression test matrix to 204 passing vitest tests and 18 browser E2E checks
 ```
 
+---
+
+## 18. Post-MVP Product Quality Campaign: Security Hardening, CSS Consolidation, and Design-Taste Polish
+
+**Execution Date**: November 6, 2026  
+**Governance Compliance**: Zero unauthorized Git staging, commits, or pushes. All modifications preserved in working tree.
+
+### 18.1. Objectives & Summary of Completed Work
+1. **Design-Taste Correction & Card Consolidation**:
+   - Eliminated AI-generated card sprawl and generic badge soup.
+   - Replaced "What PreBase Found" with clean "Repository overview" using a restrained `Layers` glyph.
+   - Replaced "Files Worth Exploring First" with focused "Start here".
+   - Replaced "Explore Codebase by Area" with "Areas", and "Analysis Scope & Boundaries" with "Coverage".
+   - Replaced "Loading Git ancestry DAG..." with standard "Loading commit history...".
+   - Added complete base and theme-aware styling for `.beginner-overview-card`, `.suggestion-card`, `.area-pill-card`, and associated components. Native gray browser button fallbacks are completely eliminated.
+2. **CSS Consolidation**:
+   - Audited the entire cascade in `frontend/src/app/App.css`.
+   - Identified and removed 332 duplicate lines (lines 1913–2245 that duplicated 1537–1869 from an earlier branch merge).
+   - Deduplicated `.switch-3d-btn` and legacy `.guide-box` classes.
+   - Zero duplicate selector rules remain.
+3. **Semantic Truthfulness**:
+   - Replaced speculative "foundation file" phrasing with direct, verified metrics in `Inspector.tsx`: `"This file is directly used by N other files in this codebase (inbound dependencies)."`
+   - Extracted `formatAreaEdgeSummarySentence()` in `repositoryAreas.ts` to generate strictly accurate wording based on actual relationship kinds (`import`, `export`, `dynamically import`, `reference types in`, or `connected to`).
+4. **Interaction Robustness & Race Condition Prevention**:
+   - Implemented `parseInitialUrlParams()` with safe `decodeURIComponent` handling, preventing `URIError` crashes on filenames containing `%` characters.
+   - Implemented `shouldIgnoreGlobalShortcut()` and `hasModifierCombination()` to prevent key hijacking when typing in `input`, `textarea`, `select`, `contenteditable`, or during IME composition and OS shortcut operations (`Cmd+C`, `Cmd+V`, `Cmd+1/2`).
+   - Added request token tracking (`commitsRequestTokenRef`) and `AbortController` cancellation in `loadCommits()` and `handleLoadMoreCommits()`, preventing out-of-order async responses from corrupting commit history.
+   - Added active timer cleanup for live synchronization notices.
+5. **Security Hardening**:
+   - Completely eliminated URL query token authentication (`?token=...`).
+   - Removed `sessionStorage` token caching in the frontend.
+   - Implemented port-isolated `HttpOnly SameSite=Strict` session cookies (`prebase_session_{port}` and `prebase_session`) for browser clients, retaining `X-Prebase-Session` for CLI/tools.
+   - Applied constant-time comparison (`constant_time_eq`) for session token validation to protect against timing attacks.
+   - Normalized Windows backslashes (`replace('\\', "/")`) at the entry of `is_excluded_relative_path` in `prebase-core` to prevent path separator bypass.
+6. **Automated Verification Matrix**:
+   - `cargo fmt --all -- --check`: Clean pass.
+   - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings.
+   - `cargo test --workspace`: 38 passed.
+   - Vitest suite: 14 test files, 245 tests passed.
+   - `scripts/verify_orb_browser.py`: 18/18 browser checks passed in real headless Chrome.
+   - `scripts/verify_area_exploration_browser.py`: 14/14 browser checks passed in real headless Chrome.
+   - `scripts/verify_cli_workflows.py`: All CLI workflow checks passed.
+   - `scripts/e2e_stage2_verification.py`: All 2D relationship explorer checks passed.
+   - `scripts/e2e_full_verification.py`: All E2E lifecycle and DOM inspection checks passed.
+   - `scripts/benchmark.sh`: 100 files indexed in 33ms, 500 files indexed in 32ms.
+

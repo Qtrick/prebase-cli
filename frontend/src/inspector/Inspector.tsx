@@ -21,7 +21,6 @@ import {
   Check,
   PanelRightClose,
   Folder,
-  Sparkles,
   Info,
   ChevronRight,
   ArrowLeft,
@@ -46,6 +45,33 @@ interface InspectorProps {
   onSwitchTo3D?: () => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+}
+
+export function getNodeRelationshipSentence(
+  node: Pick<FileNode, 'direct_dependency_count' | 'direct_dependent_count' | 'analysis_status'> | null
+): string {
+  if (!node) return '';
+  const depCount = node.direct_dependency_count ?? 0;
+  const dependentCount = node.direct_dependent_count ?? 0;
+  const isUnsupported = node.analysis_status === 'Unsupported';
+  const isFailed = node.analysis_status === 'Failed';
+
+  if (isUnsupported) {
+    return 'PreBase discovered this file but does not currently analyze its internal dependencies.';
+  }
+  if (isFailed) {
+    return "PreBase encountered an error while parsing this file's imports.";
+  }
+  if (depCount === 0 && dependentCount === 0) {
+    return 'This file has no direct internal dependencies or dependents in this repository.';
+  }
+  if (depCount > 0 && dependentCount === 0) {
+    return `This file uses ${depCount} internal file${depCount > 1 ? 's' : ''}, and is not directly imported by any other indexed files.`;
+  }
+  if (depCount === 0 && dependentCount > 0) {
+    return `This file is directly used by ${dependentCount} other file${dependentCount > 1 ? 's' : ''}, and imports no other indexed files.`;
+  }
+  return `This file uses ${depCount} internal file${depCount > 1 ? 's' : ''} and is used by ${dependentCount} other file${dependentCount > 1 ? 's' : ''}.`;
 }
 
 export function getEdgeRelationshipSentence(edge: DependencyEdge): string {
@@ -496,8 +522,8 @@ export const Inspector: React.FC<InspectorProps> = ({
           {/* Beginner-friendly plain English summary */}
           <div className="beginner-overview-card">
             <div className="beginner-card-title">
-              <Sparkles size={16} color="#38bdf8" />
-              <span>What PreBase Found</span>
+              <Layers size={15} color="#38bdf8" />
+              <span>Repository overview</span>
             </div>
             <p className="beginner-card-text">
               PreBase discovered <strong>{totalDiscovered}</strong> files across{' '}
@@ -515,7 +541,7 @@ export const Inspector: React.FC<InspectorProps> = ({
             <div className="exploration-section">
               <div className="section-title">
                 <Compass size={14} color="#2dd4bf" />
-                <h4>Files Worth Exploring First</h4>
+                <h4>Start here</h4>
               </div>
               <div className="suggestion-cards-list">
                 {repoStructure.suggestions.slice(0, 4).map((sug) => {
@@ -548,7 +574,7 @@ export const Inspector: React.FC<InspectorProps> = ({
             <div className="areas-section">
               <div className="section-title">
                 <Folder size={14} color="#38bdf8" />
-                <h4>Explore Codebase by Area</h4>
+                <h4>Areas</h4>
               </div>
               <div className="areas-grid">
                 {repoStructure.areas.map((area) => (
@@ -573,7 +599,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           <div className="limitations-box">
             <div className="limitations-title">
               <Info size={14} color="#94a3b8" />
-              <span>Analysis Scope & Boundaries</span>
+              <span>Coverage</span>
             </div>
             <p className="limitations-desc">
               PreBase maps verified static internal imports between files. External libraries (npm/crates), standard
@@ -700,25 +726,11 @@ export const Inspector: React.FC<InspectorProps> = ({
     repoStructure?.entryPointCandidate !== null &&
     repoStructure?.entryPointCandidate?.nodeId === selectedNode?.id;
 
-  const depCount = selectedNode?.direct_dependency_count ?? 0;
-  const dependentCount = selectedNode?.direct_dependent_count ?? 0;
+  const relationshipSentence = getNodeRelationshipSentence(selectedNode);
   const isUnsupported = selectedNode?.analysis_status === 'Unsupported';
   const isFailed = selectedNode?.analysis_status === 'Failed';
-
-  let relationshipSentence = '';
-  if (isUnsupported) {
-    relationshipSentence = 'PreBase discovered this file but does not currently analyze its internal dependencies.';
-  } else if (isFailed) {
-    relationshipSentence = 'PreBase encountered an error while parsing this file\'s imports.';
-  } else if (depCount === 0 && dependentCount === 0) {
-    relationshipSentence = 'This file has no direct internal dependencies or dependents in this repository.';
-  } else if (depCount > 0 && dependentCount === 0) {
-    relationshipSentence = `This file uses ${depCount} internal file${depCount > 1 ? 's' : ''}, and is not directly imported by any other indexed files.`;
-  } else if (depCount === 0 && dependentCount > 0) {
-    relationshipSentence = `This file is a foundation file used by ${dependentCount} other file${dependentCount > 1 ? 's' : ''}, and imports no other indexed files.`;
-  } else {
-    relationshipSentence = `This file uses ${depCount} internal file${depCount > 1 ? 's' : ''} and is used by ${dependentCount} other file${dependentCount > 1 ? 's' : ''}.`;
-  }
+  const depCount = selectedNode?.direct_dependency_count ?? 0;
+  const dependentCount = selectedNode?.direct_dependent_count ?? 0;
 
   return (
     <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>

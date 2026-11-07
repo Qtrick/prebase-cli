@@ -189,15 +189,20 @@ def main():
 
             # Browser DOM Verification
             log("Running browser DOM inspection for 2D mode...")
-            app_url_2d = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fcomponents%2FCard.tsx"
-            app_url_missing = f"{base_url}/?token={session_token}&view=2d&focus=src%2Fnon_existent.ts"
-            app_url_3d = f"{base_url}/?token={session_token}&view=3d"
+            app_url_2d = f"{base_url}/?view=2d&focus=src%2Fcomponents%2FCard.tsx"
+            app_url_missing = f"{base_url}/?view=2d&focus=src%2Fnon_existent.ts"
+            app_url_3d = f"{base_url}/?view=3d"
 
             try:
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
-                    page = browser.new_page(viewport={"width": 1280, "height": 800})
+                    context = browser.new_context(viewport={"width": 1280, "height": 800})
+                    context.add_cookies([
+                        {"name": f"prebase_session_{PORT}", "value": session_token, "url": base_url},
+                        {"name": "prebase_session", "value": session_token, "url": base_url}
+                    ])
+                    page = context.new_page()
 
                     # Test 1: 2D mode
                     page.goto(app_url_2d, wait_until="networkidle")

@@ -256,19 +256,35 @@ mod tests {
         fs::write(root.join("config.toml"), "title = 'test'").unwrap();
 
         // 4. Supported file with syntax that fails to parse or produces issues
-        fs::write(src_dir.join("broken.ts"), "import from from broken syntax {{{").unwrap();
+        fs::write(
+            src_dir.join("broken.ts"),
+            "import from from broken syntax {{{",
+        )
+        .unwrap();
 
         let analyzer = RepositoryAnalyzer::default();
         let res = analyzer.analyze_path(root).unwrap();
         let snapshot = res.snapshot;
 
-        let main_node = snapshot.nodes.iter().find(|n| n.relative_path == "src/main.ts").unwrap();
+        let main_node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.relative_path == "src/main.ts")
+            .unwrap();
         assert_eq!(main_node.analysis_status, NodeAnalysisStatus::Analyzed);
 
-        let readme_node = snapshot.nodes.iter().find(|n| n.relative_path == "README.md").unwrap();
+        let readme_node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.relative_path == "README.md")
+            .unwrap();
         assert_eq!(readme_node.analysis_status, NodeAnalysisStatus::Unsupported);
 
-        let config_node = snapshot.nodes.iter().find(|n| n.relative_path == "config.toml").unwrap();
+        let config_node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.relative_path == "config.toml")
+            .unwrap();
         assert_eq!(config_node.analysis_status, NodeAnalysisStatus::Unsupported);
 
         // Discovered files should be 4 total (main.ts, broken.ts, README.md, config.toml)
