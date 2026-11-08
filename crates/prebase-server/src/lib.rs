@@ -64,16 +64,7 @@ mod tests {
         let auth_resp = app.clone().oneshot(auth_req).await.unwrap();
         assert_eq!(auth_resp.status(), StatusCode::OK);
 
-        // 4. Protected endpoint with cookie must succeed (both generic and port-isolated)
-        let cookie_auth_req = Request::builder()
-            .uri("/api/v1/repository")
-            .header(header::HOST, "127.0.0.1:8080")
-            .header(header::COOKIE, "prebase_session=secret-token-xyz")
-            .body(Body::empty())
-            .unwrap();
-        let cookie_resp = app.clone().oneshot(cookie_auth_req).await.unwrap();
-        assert_eq!(cookie_resp.status(), StatusCode::OK);
-
+        // 4. Port-partitioned cookie must succeed; generic un-suffixed cookie must be rejected (RFC 6265 isolation)
         let port_cookie_req = Request::builder()
             .uri("/api/v1/repository")
             .header(header::HOST, "127.0.0.1:8080")
@@ -82,6 +73,15 @@ mod tests {
             .unwrap();
         let port_cookie_resp = app.clone().oneshot(port_cookie_req).await.unwrap();
         assert_eq!(port_cookie_resp.status(), StatusCode::OK);
+
+        let generic_cookie_req = Request::builder()
+            .uri("/api/v1/repository")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::COOKIE, "prebase_session=secret-token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let generic_cookie_resp = app.clone().oneshot(generic_cookie_req).await.unwrap();
+        assert_eq!(generic_cookie_resp.status(), StatusCode::UNAUTHORIZED);
 
         // 4b. Query token parameter must be rejected (defense-in-depth against URL credential leakage)
         let query_token_req = Request::builder()
@@ -109,7 +109,7 @@ mod tests {
         let wrong_port_resp = app.clone().oneshot(wrong_port_req).await.unwrap();
         assert_eq!(wrong_port_resp.status(), StatusCode::BAD_REQUEST);
 
-        // 6. Bootstrap token exchange: first attempt succeeds, sets cookie, returns session_token
+        // 6. Bootstrap token exchange: first attempt succeeds, sets port-isolated cookie, omits session_token by default
         let exchange_req = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/session")
@@ -120,8 +120,14 @@ mod tests {
         let exchange_resp = app.clone().oneshot(exchange_req).await.unwrap();
         assert_eq!(exchange_resp.status(), StatusCode::OK);
         assert!(exchange_resp.headers().contains_key(header::SET_COOKIE));
+        let body_bytes = axum::body::to_bytes(exchange_resp.into_body(), 1024)
+            .await
+            .unwrap();
+        let json_body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json_body["authenticated"], true);
+        assert!(json_body.get("session_token").is_none());
 
-        // Reusing the same bootstrap token must fail with 401
+        // Reusing the same bootstrap token without a valid cookie must fail with 401
         let reuse_req = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/session")
@@ -131,6 +137,37 @@ mod tests {
             .unwrap();
         let reuse_resp = app.clone().oneshot(reuse_req).await.unwrap();
         assert_eq!(reuse_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Multi-tab / reload friendliness: if a valid session cookie is present, return 200 OK
+        let valid_cookie_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/session")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::COOKIE, "prebase_session_8080=secret-token-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"bootstrap_token":"already-consumed"}"#))
+            .unwrap();
+        let valid_cookie_resp = app.clone().oneshot(valid_cookie_req).await.unwrap();
+        assert_eq!(valid_cookie_resp.status(), StatusCode::OK);
+
+        // Automation mode: passing expose_token: true returns session_token in JSON
+        let auto_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/session")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::COOKIE, "prebase_session_8080=secret-token-xyz")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"bootstrap_token":"any","expose_token":true}"#,
+            ))
+            .unwrap();
+        let auto_resp = app.clone().oneshot(auto_req).await.unwrap();
+        assert_eq!(auto_resp.status(), StatusCode::OK);
+        let auto_bytes = axum::body::to_bytes(auto_resp.into_body(), 1024)
+            .await
+            .unwrap();
+        let auto_json: serde_json::Value = serde_json::from_slice(&auto_bytes).unwrap();
+        assert_eq!(auto_json["session_token"], "secret-token-xyz");
     }
 
     #[tokio::test]

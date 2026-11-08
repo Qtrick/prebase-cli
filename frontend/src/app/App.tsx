@@ -267,14 +267,22 @@ export const App: React.FC = () => {
 
     // Initialize session from bootstrap token first, then start fetching
     initSession()
-      .then(() => {
+      .then((initRes) => {
         setSessionInitialized(true);
+        if (!initRes.success && initRes.isAuthError) {
+          setError(
+            initRes.error ||
+              'Authentication failed: bootstrap token invalid or already consumed. Please check your terminal and use the URL printed under "Server running at".'
+          );
+          return;
+        }
         checkStatus();
         api.getGitStatus().then(setGitStatus).catch(() => { });
       })
-      .catch(() => {
+      .catch((err) => {
         setSessionInitialized(true);
-        checkStatus();
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`Failed to initialize session: ${msg}`);
       });
 
     return () => clearTimeout(timer);
@@ -876,8 +884,17 @@ export const App: React.FC = () => {
             {error ? (
               <div className="error-overlay">
                 <AlertCircle size={32} color="#ef4444" />
-                <h3>Unable to load graph</h3>
+                <h3>{error.includes('Authentication') ? 'Authentication Required' : 'Unable to load graph'}</h3>
                 <p>{error}</p>
+                {error.includes('Authentication') && (
+                  <button
+                    className="history-retry-btn"
+                    onClick={() => window.location.reload()}
+                    style={{ marginTop: '12px' }}
+                  >
+                    Retry Connection
+                  </button>
+                )}
               </div>
             ) : !snapshot ? (
               <div className="loading-overlay">

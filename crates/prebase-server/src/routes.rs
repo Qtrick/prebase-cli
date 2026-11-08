@@ -34,6 +34,8 @@ pub struct StatusResponse {
     pub indexing_status: IndexingStatus,
     pub revision: u64,
     pub watcher_health: WatcherHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis_duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -57,20 +59,47 @@ pub struct FileHistoryQuery {
 #[derive(Deserialize)]
 pub struct AuthSessionRequest {
     pub bootstrap_token: String,
+    #[serde(default)]
+    pub expose_token: bool,
 }
 
 #[derive(Serialize)]
 pub struct AuthSessionResponse {
-    pub session_token: String,
+    pub authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 pub async fn handle_auth_session(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<AuthSessionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+    // 1. Multi-tab & reload idempotence:
+    // If the client already possesses a valid port-specific session cookie for this instance,
+    // grant immediate 200 OK even if the single-use bootstrap token was already consumed.
+    if let Some(cookie_token) = crate::auth::extract_cookie_token(&headers, state.allocated_port) {
+        if crate::auth::constant_time_eq(&cookie_token, &state.session_token) {
+            let session_token = if payload.expose_token {
+                Some(state.session_token.clone())
+            } else {
+                None
+            };
+            return Ok((
+                HeaderMap::new(),
+                Json(AuthSessionResponse {
+                    authenticated: true,
+                    session_token,
+                }),
+            ));
+        }
+    }
+
+    // 2. Validate and consume single-use bootstrap token
     match state.exchange_bootstrap_token(&payload.bootstrap_token) {
         Some(token) => {
             let mut headers = HeaderMap::new();
+            // Partitioned port-specific session cookie (RFC 6265 prevents cross-instance clobbering)
             let port_cookie = format!(
                 "prebase_session_{}={}; HttpOnly; SameSite=Strict; Path=/",
                 state.allocated_port, token
@@ -78,17 +107,24 @@ pub async fn handle_auth_session(
             if let Ok(val) = port_cookie.parse() {
                 headers.append(header::SET_COOKIE, val);
             }
-            let generic_cookie = format!(
-                "prebase_session={}; HttpOnly; SameSite=Strict; Path=/",
-                token
-            );
-            if let Ok(val) = generic_cookie.parse() {
+            // Explicitly clear legacy un-suffixed cookie from browser jar
+            let clear_legacy_cookie =
+                "prebase_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+            if let Ok(val) = clear_legacy_cookie.parse() {
                 headers.append(header::SET_COOKIE, val);
             }
+
+            let session_token = if payload.expose_token {
+                Some(token)
+            } else {
+                None
+            };
+
             Ok((
                 headers,
                 Json(AuthSessionResponse {
-                    session_token: token,
+                    authenticated: true,
+                    session_token,
                 }),
             ))
         }
@@ -110,10 +146,12 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<StatusRes
     let status = state.get_status();
     let revision = state.get_current_revision();
     let watcher_health = state.get_watcher_health();
+    let analysis_duration_ms = state.get_analysis_duration();
     Json(StatusResponse {
         indexing_status: status,
         revision,
         watcher_health,
+        analysis_duration_ms,
     })
 }
 

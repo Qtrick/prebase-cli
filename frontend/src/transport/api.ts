@@ -14,36 +14,73 @@ import {
   ServerEvent,
 } from '../types/temporal';
 
-export function getSessionToken(): string {
-  return '';
+export interface SessionInitResult {
+  success: boolean;
+  hadBootstrapToken: boolean;
+  error?: string;
+  isAuthError?: boolean;
 }
 
-export async function initSession(): Promise<void> {
+export async function initSession(): Promise<SessionInitResult> {
   const urlParams = new URLSearchParams(window.location.search);
   const bootstrapToken = urlParams.get('bootstrap');
   const tokenFromUrl = urlParams.get('token');
 
-  if (bootstrapToken) {
-    try {
-      await fetch('/api/v1/auth/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ bootstrap_token: bootstrapToken }),
-      });
-    } catch {
-      // ignore network errors on init; subsequent status checks will report connectivity
-    }
-    urlParams.delete('bootstrap');
-    const newSearch = urlParams.toString();
-    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-    window.history.replaceState({}, '', cleanUrl);
-  } else if (tokenFromUrl) {
-    // Purge query token from URL without storing in browser storage
+  // Purge legacy query token from URL without storing in browser storage
+  if (tokenFromUrl) {
     urlParams.delete('token');
     const newSearch = urlParams.toString();
     const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
     window.history.replaceState({}, '', cleanUrl);
+  }
+
+  if (!bootstrapToken) {
+    return { success: true, hadBootstrapToken: false };
+  }
+
+  try {
+    const response = await fetch('/api/v1/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ bootstrap_token: bootstrapToken }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const isAuthError = response.status === 401 || response.status === 400;
+
+      // Single-use token was consumed or is invalid: clean from URL to avoid repeated failed exchanges
+      urlParams.delete('bootstrap');
+      const newSearch = urlParams.toString();
+      const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl);
+
+      return {
+        success: false,
+        hadBootstrapToken: true,
+        isAuthError,
+        error: `Authentication failed (${response.status}): ${errorText || 'Invalid or expired bootstrap token.'}`,
+      };
+    }
+
+    // Success: Token consumed, session cookie established
+    urlParams.delete('bootstrap');
+    const newSearch = urlParams.toString();
+    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+    window.history.replaceState({}, '', cleanUrl);
+
+    return { success: true, hadBootstrapToken: true };
+  } catch (networkErr: unknown) {
+    // Transient network failure (e.g. server still starting or disconnected).
+    // DO NOT strip bootstrap token from URL! Preserve the credential so reload can retry.
+    const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    return {
+      success: false,
+      hadBootstrapToken: true,
+      isAuthError: false,
+      error: `Network failure connecting to local server: ${msg}`,
+    };
   }
 }
 
@@ -59,6 +96,9 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   });
   if (!response.ok) {
     const errorText = await response.text();
+    if (response.status === 401) {
+      throw new Error(`Authentication required (401): Please launch PreBase from your terminal and open the authenticated link.`);
+    }
     throw new Error(`API error ${response.status} on ${path}: ${errorText}`);
   }
 

@@ -50,6 +50,7 @@ pub struct AppState {
     pub published: RwLock<Option<Arc<PublishedNetworkState>>>,
     pub revision_counter: AtomicU64,
     pub analysis_generation: AtomicU64,
+    pub analysis_duration_ms: AtomicU64,
     pub watcher_health: RwLock<WatcherHealth>,
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
@@ -84,6 +85,7 @@ impl AppState {
             published: RwLock::new(None),
             revision_counter: AtomicU64::new(0),
             analysis_generation: AtomicU64::new(0),
+            analysis_duration_ms: AtomicU64::new(0),
             watcher_health: RwLock::new(initial_health),
             git_engine,
             event_sender,
@@ -125,6 +127,20 @@ impl AppState {
     pub fn set_watcher_health(&self, health: WatcherHealth) {
         let mut guard = self.watcher_health.write().unwrap();
         *guard = health;
+    }
+
+    pub fn set_analysis_duration(&self, duration_ms: u64) {
+        self.analysis_duration_ms
+            .store(duration_ms, Ordering::SeqCst);
+    }
+
+    pub fn get_analysis_duration(&self) -> Option<u64> {
+        let val = self.analysis_duration_ms.load(Ordering::SeqCst);
+        if val > 0 {
+            Some(val)
+        } else {
+            None
+        }
     }
 
     pub fn get_published(&self) -> Option<Arc<PublishedNetworkState>> {

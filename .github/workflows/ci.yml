@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install Frontend Dependencies & Run Frontend Tests
         run: |
@@ -56,4 +56,18 @@ jobs:
 
       - name: Run Workspace Tests
         run: cargo test --workspace --verbose
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build PreBase Binary
+        run: cargo build --release --bin prebase
+
+      - name: Run CLI Workflow & Lifecycle Verification
+        run: python3 scripts/verify_cli_workflows.py
+
+      - name: Run RFC 6265 Cookie Port Isolation Tests
+        run: python3 scripts/test_cookie_port_scoping.py
 

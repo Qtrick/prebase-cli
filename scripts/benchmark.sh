@@ -59,7 +59,9 @@ EOF
         git -C "$REPO_DIR" commit -q -m "feat: commit iteration ${c}"
     done
 
-    # 2. Launch PreBase server with specified port, logging stdout/stderr
+    # 2. Launch PreBase server with specified port, recording launch timestamp
+    local LAUNCH_START_MS
+    LAUNCH_START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
     "$BIN" --port "$PORT" --no-open --no-watch "$REPO_DIR" > "$LOG_FILE" 2>&1 &
     local PREBASE_PID=$!
 
@@ -70,7 +72,7 @@ EOF
             SERVER_READY=1
             break
         fi
-        sleep 0.1
+        sleep 0.05
     done
 
     if [ "$SERVER_READY" -ne 1 ]; then
@@ -79,6 +81,10 @@ EOF
         kill -9 "$PREBASE_PID" 2>/dev/null || true
         exit 1
     fi
+
+    local HTTP_READY_MS
+    HTTP_READY_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    local STARTUP_LATENCY_MS=$(( HTTP_READY_MS - LAUNCH_START_MS ))
 
     # 4. Extract bootstrap token from startup log
     local BOOTSTRAP_TOKEN=""
@@ -97,11 +103,11 @@ EOF
         exit 1
     fi
 
-    # 5. Exchange bootstrap token for session token
+    # 5. Exchange bootstrap token for session token (explicit expose_token for CLI benchmark tool)
     local SESSION_RESP
     SESSION_RESP=$(curl -s -X POST "http://127.0.0.1:$PORT/api/v1/auth/session" \
         -H "Content-Type: application/json" \
-        -d "{\"bootstrap_token\":\"$BOOTSTRAP_TOKEN\"}")
+        -d "{\"bootstrap_token\":\"$BOOTSTRAP_TOKEN\",\"expose_token\":true}")
     local SESSION_TOKEN
     SESSION_TOKEN=$(echo "$SESSION_RESP" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("session_token", ""))')
 
@@ -112,10 +118,9 @@ EOF
     fi
 
     # 6. Poll /api/v1/status until indexing_status is "Ready"
-    local START_INDEX_MS
-    START_INDEX_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
     local INDEX_READY=0
     local MAX_POLL=450 # 45 seconds timeout
+    local ANALYSIS_DURATION_MS="0"
     for _ in $(seq 1 $MAX_POLL); do
         local STATUS_JSON
         STATUS_JSON=$(curl -s "http://127.0.0.1:$PORT/api/v1/status" -H "x-prebase-session: $SESSION_TOKEN" || echo "{}")
@@ -124,6 +129,7 @@ EOF
 
         if [ "$CURR_STATUS" = "Ready" ]; then
             INDEX_READY=1
+            ANALYSIS_DURATION_MS=$(echo "$STATUS_JSON" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("analysis_duration_ms", 0))' 2>/dev/null || echo "0")
             break
         elif [ "$CURR_STATUS" = "Failed" ]; then
             echo "    ERROR: Repository indexing failed according to backend status."
@@ -131,12 +137,12 @@ EOF
             kill -9 "$PREBASE_PID" 2>/dev/null || true
             exit 1
         fi
-        sleep 0.1
+        sleep 0.05
     done
 
     local END_INDEX_MS
     END_INDEX_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
-    local ELAPSED_MS=$(( END_INDEX_MS - START_INDEX_MS ))
+    local TOTAL_WALLCLOCK_MS=$(( END_INDEX_MS - LAUNCH_START_MS ))
 
     if [ "$INDEX_READY" -ne 1 ]; then
         echo "    ERROR: Indexing did not reach Ready status within 45s timeout."
@@ -152,20 +158,25 @@ EOF
     local EXPECTED_NODES=$(( COUNT + 1 ))
 
     if [ "$NODE_COUNT" -ne "$EXPECTED_NODES" ]; then
-        echo "    WARNING: Node count mismatch: got $NODE_COUNT, expected $EXPECTED_NODES"
+        echo "    ERROR: Node count mismatch: got $NODE_COUNT, expected $EXPECTED_NODES"
+        kill -9 "$PREBASE_PID" 2>/dev/null || true
+        exit 1
     fi
 
-    # 8. Clean shutdown via SIGINT
-    kill -2 "$PREBASE_PID" 2>/dev/null || true
+    # 8. Clean graceful shutdown via SIGTERM
+    kill -15 "$PREBASE_PID" 2>/dev/null || true
     wait "$PREBASE_PID" 2>/dev/null || true
 
-    echo "    Files Indexed:      ${NODE_COUNT} nodes"
-    echo "    Measured Duration:  ${ELAPSED_MS} ms"
-    echo "    Status:             PASSED (Truthfully Verified via Status API)"
+    echo "    Files Indexed:            ${NODE_COUNT} nodes (Expected: ${EXPECTED_NODES})"
+    echo "    Startup Latency:          ${STARTUP_LATENCY_MS} ms (spawn to HTTP ready)"
+    echo "    Backend Indexing Time:    ${ANALYSIS_DURATION_MS} ms (Tree-sitter AST & dependency resolution)"
+    echo "    Total Wallclock Time:     ${TOTAL_WALLCLOCK_MS} ms (spawn to graph Ready)"
+    echo "    Status:                   PASSED (Strict Correctness & Authoritative Metrics)"
 }
 
 run_benchmark 100
 run_benchmark 500
+run_benchmark 1000
 
 echo ""
 echo "========================================================"

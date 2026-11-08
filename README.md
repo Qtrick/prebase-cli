@@ -16,10 +16,10 @@ PreBase is a developer tool for understanding codebase architecture, dependency 
 Launched directly from your terminal, PreBase discovers your repository, analyzes source relationships with a Rust-native Tree-sitter engine, extracts Git commit lineage, and serves an interactive web interface in your default browser.
 
 **Key Design Principles:**
-- **Zero Runtime Dependencies**: Does not require Node.js, Electron, or Code - OSS at runtime. The compiled `prebase` binary is fully standalone and embeds the frontend.
+- **Standalone Runtime (Zero Node/Electron/VM Dependencies)**: Does not require Node.js, Electron, or Code - OSS at runtime. The compiled `prebase` binary is fully standalone and embeds the frontend distribution. A system `git` CLI executable in `PATH` is utilized for Temporal history DAG extraction; in non-git directories or environments without Git, PreBase operates seamlessly in Network Graph mode.
 - **Strictly Local-First & 100% Offline**: Runs entirely on `127.0.0.1`. No code leaves your machine. No accounts, telemetry, external fonts, or cloud dependencies.
 - **Bi-Directional Visual Intelligence**: Seamlessly switch between the **Network Graph** (spatial dependency structure) and the **Temporal Graph** (Git ancestry DAG).
-- **Demand-Driven Rendering**: 0% idle CPU utilization. Canvases render only on user interaction or state change.
+- **Demand-Driven Rendering**: 0% idle CPU utilization when quiescent. HTML5 Canvas animation loops pause automatically when user gestures and transitions complete, resuming only upon user interaction or live filesystem synchronization.
 - **Live Incremental Monitoring**: Watches source files for changes, reanalyzes code incrementally, and updates browser views in real time via authenticated Server-Sent Events (SSE) while preserving your camera viewport.
 
 ---
@@ -113,7 +113,7 @@ Navigate to any JavaScript or TypeScript repository and execute:
 ./target/release/prebase map --port 8080 --no-watch
 ```
 
-> **Note on View Modes**: `prebase map --view 3d` launches the rotatable 3D Network Graph. The `--view 2d` relationship view is scheduled for Stage 2. Passing `--view 2d` returns a clear informational terminal message with exit code 1.
+> **View Modes**: PreBase supports both a full volumetric **3D Overview** and a focused **2D Relationship Explorer**. By default, `prebase map` launches in 3D mode. Launching with `--view 2d` (or pressing `V` in the UI) switches directly into the deterministic 2D column view, with optional `--focus <path>` to center on a designated source file.
 
 ---
 
@@ -139,6 +139,10 @@ Options:
       --no-watch     Disable live filesystem watching and incremental graph synchronization
   -h, --help         Print help
   -V, --version      Print version
+
+Map Subcommand Options:
+      --view <VIEW>            Network graph view mode: '3d' (default) or '2d'
+      --focus <RELATIVE_PATH>  Relative file path to focus in the 2D relationship view or 3D graph
 ```
 
 ---
@@ -177,11 +181,13 @@ prebase-cli/
 
 PreBase is engineered with strict local security boundaries:
 - **Loopback Only**: Server binds exclusively to `127.0.0.1`.
+- **RFC 6265 Cookie Port-Scoping Defense**: HTTP cookies on localhost are scoped by host (`127.0.0.1`) and path (`/`), not TCP port (RFC 6265 §8.5). Because standard browsers transmit localhost cookies across differing ports, PreBase scopes its HttpOnly, SameSite=Strict cookies to `prebase_session_{port}`. Each PreBase server validates that incoming cookies strictly match its own allocated port and rejects foreign or un-suffixed cookies.
 - **Exact Host Port Validation**: Header must match `127.0.0.1:<port>` or `localhost:<port>`. DNS rebinding attacks from arbitrary hosts are blocked with `400 Bad Request`.
 - **Exact Origin Validation**: Cross-origin requests from external origins are rejected with `403 Forbidden`.
-- **Single-Use Bootstrap Authentication**: Browser launch uses a single-use bootstrap token exchanged via `POST /api/v1/auth/session` for a secure session cookie, immediately stripped from the URL bar (`history.replaceState`).
+- **Single-Use Bootstrap Authentication**: Browser launch generates a cryptographically random single-use bootstrap token exchanged via `POST /api/v1/auth/session` for a secure session cookie, immediately stripped from the URL bar (`history.replaceState`).
 - **Path Traversal & Scope Restrictions**: File access is canonicalized against repository root, rejects `..`, and restricts access to files that exist in the indexed dependency graph snapshot.
-- **Bounded Resource Limits**: Git subprocesses are bounded by a 10s timeout and a 10MB output cap. Source file reads are capped at 500KB.
+- **Bounded Resource Limits & Overflow Protection**: Git stdout is concurrently drained and immediately terminated if output exceeds 10MB; stderr is continuously drained up to 64KB, eliminating OS pipe buffer deadlocks. Source file reads are capped at 500KB.
+- **Clean Lifecycle Termination**: Responds to Unix `SIGTERM` and `SIGINT`, cleanly terminating filesystem watcher threads and immediately releasing the loopback TCP port without hanging or leaving orphaned child processes.
 - **Strict Offline CSP**: Content-Security-Policy blocks all remote fonts, CDNs, external scripts, and external connections (`default-src 'self' 'unsafe-inline' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none';`).
 
 ---

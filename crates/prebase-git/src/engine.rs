@@ -1,6 +1,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -47,14 +49,25 @@ impl GitEngine {
         let mut stdout_handle = child.stdout.take().unwrap();
         let mut stderr_handle = child.stderr.take().unwrap();
 
-        // Concurrently drain stdout up to max limit + 1 byte (to detect overflow)
+        let overflow_flag = Arc::new(AtomicBool::new(false));
+        let overflow_clone = overflow_flag.clone();
+
+        // Concurrently drain stdout up to max limit. If exceeded, flag immediately
+        // and keep draining the pipe so the child process doesn't block while being killed.
         let stdout_reader = std::thread::spawn(move || {
             let mut buf = Vec::new();
             let mut chunk = [0u8; 16384];
-            while buf.len() <= GIT_MAX_OUTPUT_BYTES {
+            loop {
                 match stdout_handle.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Ok(n) => {
+                        if buf.len() <= GIT_MAX_OUTPUT_BYTES {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.len() > GIT_MAX_OUTPUT_BYTES {
+                                overflow_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
@@ -62,14 +75,21 @@ impl GitEngine {
             buf
         });
 
-        // Concurrently drain stderr up to 64KB
+        // Concurrently drain stderr up to 64KB for diagnostics; discard any further bytes
+        // while continuing to drain the pipe to prevent child process buffer deadlocks.
         let stderr_reader = std::thread::spawn(move || {
             let mut buf = Vec::new();
             let mut chunk = [0u8; 8192];
-            while buf.len() < 64 * 1024 {
+            loop {
                 match stderr_handle.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Ok(n) => {
+                        if buf.len() < 64 * 1024 {
+                            let available = (64 * 1024) - buf.len();
+                            let to_take = n.min(available);
+                            buf.extend_from_slice(&chunk[..to_take]);
+                        }
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
@@ -78,12 +98,24 @@ impl GitEngine {
         });
 
         loop {
+            // Immediate overflow response: kill child immediately without waiting for timeout
+            if overflow_flag.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(GitError::OutputLimitExceeded {
+                    command: format!("git {}", args.join(" ")),
+                    max_bytes: GIT_MAX_OUTPUT_BYTES,
+                });
+            }
+
             match child.try_wait().map_err(GitError::Io)? {
                 Some(status) => {
                     let stdout = stdout_reader.join().unwrap_or_default();
                     let stderr = stderr_reader.join().unwrap_or_default();
 
-                    if stdout.len() > GIT_MAX_OUTPUT_BYTES {
+                    if stdout.len() > GIT_MAX_OUTPUT_BYTES || overflow_flag.load(Ordering::SeqCst) {
                         return Err(GitError::OutputLimitExceeded {
                             command: format!("git {}", args.join(" ")),
                             max_bytes: GIT_MAX_OUTPUT_BYTES,

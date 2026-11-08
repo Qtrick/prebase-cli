@@ -179,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let analyzer = RepositoryAnalyzer::default();
         match tokio::task::spawn_blocking(move || analyzer.analyze_path(&root_clone)).await {
             Ok(Ok(result)) => {
-                let duration = start.elapsed().as_millis();
+                let duration = start.elapsed().as_millis() as u64;
                 let node_count = result.snapshot.nodes.len();
                 let edge_count = result.snapshot.edges.len();
                 let publish_res = state_clone.publish_network(
@@ -189,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Some(initial_gen),
                 );
                 if publish_res.is_ok() {
+                    state_clone.set_analysis_duration(duration);
                     println!(
                         "\x1b[32m✔\x1b[0m Indexed \x1b[1m{}\x1b[0m files with \x1b[1m{}\x1b[0m confirmed relationships in {}ms",
                         node_count,
@@ -215,11 +216,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("\nPress \x1b[1mCtrl+C\x1b[0m to shut down PreBase cleanly.\n");
 
-    // 5. Graceful shutdown on Ctrl+C
-    tokio::signal::ctrl_c().await?;
-    println!("\nReceived shutdown signal. Stopping PreBase server...");
+    // 5. Graceful shutdown on SIGINT (Ctrl+C) and SIGTERM (Unix)
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nReceived SIGINT (Ctrl+C). Stopping PreBase server...");
+            }
+            _ = sigterm.recv() => {
+                println!("\nReceived SIGTERM. Stopping PreBase server...");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        println!("\nReceived shutdown signal. Stopping PreBase server...");
+    }
 
+    // Terminate server and release listener
     let _ = server.shutdown_tx.send(());
+
+    // Terminate filesystem watcher cleanly
+    if let Some(watcher) = server.watcher_handle {
+        let _ = watcher.shutdown_tx.send(());
+    }
+
     let _ = server.server_handle.await;
 
     println!("PreBase shut down cleanly. Goodbye!");

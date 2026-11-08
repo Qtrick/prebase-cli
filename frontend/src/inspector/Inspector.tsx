@@ -784,42 +784,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           <p className="file-plain-summary-text">{relationshipSentence}</p>
         </div>
 
-        <div className="meta-tags">
-          {fileAreaId && (
-            <button
-              type="button"
-              className="tag area-tag clickable"
-              onClick={() => onSelectArea?.(fileAreaId)}
-              title={`Focus on area: ${fileAreaId}`}
-            >
-              <Folder size={11} style={{ marginRight: '4px', display: 'inline-block', verticalAlign: 'middle' }} />
-              Area: {fileAreaId}
-            </button>
-          )}
-          {isCandidateEntry && (
-            <span className="tag entry-tag">Entry Candidate</span>
-          )}
-          <span className="tag language-tag">{selectedNode?.language}</span>
-          <span className="tag size-tag">
-            {((selectedNode?.size_bytes || 0) / 1024).toFixed(1)} KB
-          </span>
-          <span className={`tag status-tag ${isUnsupported ? 'unsupported' : isFailed ? 'failed' : ''}`}>
-            {selectedNode?.analysis_status}
-          </span>
-        </div>
-
-        <div className="stats-grid" style={{ marginTop: '10px' }}>
-          <div className="stat-card">
-            <span className="stat-label">Files this file uses</span>
-            <span className="stat-value">{depCount}</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-label">Files that use this file</span>
-            <span className="stat-value">{dependentCount}</span>
-          </div>
-        </div>
-
-        {/* Action Buttons */}
+        {/* Action Buttons - Elevated directly under summary banner */}
         <div className="inspector-action-buttons">
           {selectedNode && onRevealNode && networkViewMode !== '2d' && (
             <button
@@ -880,6 +845,41 @@ export const Inspector: React.FC<InspectorProps> = ({
               <span>View File History</span>
             </button>
           )}
+        </div>
+
+        <div className="meta-tags" style={{ marginTop: '12px' }}>
+          {fileAreaId && (
+            <button
+              type="button"
+              className="tag area-tag clickable"
+              onClick={() => onSelectArea?.(fileAreaId)}
+              title={`Focus on area: ${fileAreaId}`}
+            >
+              <Folder size={11} style={{ marginRight: '4px', display: 'inline-block', verticalAlign: 'middle' }} />
+              Area: {fileAreaId}
+            </button>
+          )}
+          {isCandidateEntry && (
+            <span className="tag entry-tag">Entry Candidate</span>
+          )}
+          <span className="tag language-tag">{selectedNode?.language}</span>
+          <span className="tag size-tag">
+            {((selectedNode?.size_bytes || 0) / 1024).toFixed(1)} KB
+          </span>
+          <span className={`tag status-tag ${isUnsupported ? 'unsupported' : isFailed ? 'failed' : ''}`}>
+            {selectedNode?.analysis_status}
+          </span>
+        </div>
+
+        <div className="stats-grid" style={{ marginTop: '10px' }}>
+          <div className="stat-card">
+            <span className="stat-label">Files this file uses</span>
+            <span className="stat-value">{depCount}</span>
+          </div>
+          <div className="stat-card">
+            <span className="stat-label">Files that use this file</span>
+            <span className="stat-value">{dependentCount}</span>
+          </div>
         </div>
 
         {loading ? (

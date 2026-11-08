@@ -25,7 +25,16 @@ import urllib.request
 import urllib.parse
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
+BIN = os.environ.get("PREBASE_BIN")
+if not BIN or not os.path.isfile(BIN):
+    release_bin = os.path.join(ROOT_DIR, "target", "release", "prebase")
+    debug_bin = os.path.join(ROOT_DIR, "target", "debug", "prebase")
+    if os.path.isfile(release_bin):
+        BIN = release_bin
+    elif os.path.isfile(debug_bin):
+        BIN = debug_bin
+    else:
+        BIN = release_bin
 
 def log(msg):
     print(f"\x1b[36m[CLI VERIFY]\x1b[0m {msg}", flush=True)
@@ -124,9 +133,35 @@ def test_clean_shutdown():
             text=True
         )
         time.sleep(1.2)
+        try:
+            status, _ = http_get(f"http://127.0.0.1:{port}/api/v1/health")
+            if status != 200:
+                fail(f"Server failed to start on port {port}: {status}")
+        except Exception as e:
+            fail(f"Could not reach server on port {port}: {e}")
+
         proc.send_signal(signal.SIGTERM)
         exit_code = proc.wait(timeout=5)
-        success(f"Server exited cleanly with exit code {exit_code} on SIGTERM.")
+        stdout, stderr = proc.communicate()
+
+        if exit_code != 0:
+            fail(f"Expected clean exit code 0 on SIGTERM, got {exit_code}. stderr: {stderr}")
+
+        if "PreBase shut down cleanly" not in stdout:
+            fail(f"Expected graceful shutdown log marker in stdout. stdout: {stdout}")
+
+        # Enforce that port was completely released immediately (using SO_REUSEADDR for TIME_WAIT tolerance)
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+            sock.close()
+            success(f"Port {port} confirmed released immediately after shutdown.")
+        except Exception as e:
+            fail(f"Port {port} was not released after shutdown: {e}")
+
+        success("Server handled SIGTERM gracefully with exit code 0, graceful cleanup, and released socket.")
 
 if __name__ == "__main__":
     print("=" * 75)

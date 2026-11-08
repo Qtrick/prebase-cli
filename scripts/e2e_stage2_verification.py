@@ -163,8 +163,8 @@ def main():
             assert "focus=src%2Fcomponents%2FCard.tsx" in startup_url, f"Expected percent-encoded focus in startup URL, got: {startup_url}"
             success(f"Verified CLI startup URL format: {startup_url}")
 
-            # Bootstrap exchange
-            status, body, _ = http_post_json(f"{base_url}/api/v1/auth/session", {"bootstrap_token": bootstrap_token})
+            # Bootstrap exchange with explicit expose_token for CLI test
+            status, body, _ = http_post_json(f"{base_url}/api/v1/auth/session", {"bootstrap_token": bootstrap_token, "expose_token": True})
             assert status == 200, f"Bootstrap exchange failed: {status} {body}"
             auth_data = json.loads(body)
             session_token = auth_data["session_token"]

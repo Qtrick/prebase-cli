@@ -168,10 +168,10 @@ def main():
             assert bootstrap_token, "Could not extract bootstrap token from log"
             success(f"Bootstrap token acquired: {bootstrap_token[:8]}...")
 
-            # 7. Test single-use bootstrap exchange
+            # 7. Test single-use bootstrap exchange (with explicit expose_token for CLI test)
             status, body, headers = http_post_json(
                 f"{base_url}/api/v1/auth/session",
-                {"bootstrap_token": bootstrap_token}
+                {"bootstrap_token": bootstrap_token, "expose_token": True}
             )
             assert status == 200, f"Bootstrap exchange failed: {status} {body}"
             auth_data = json.loads(body)

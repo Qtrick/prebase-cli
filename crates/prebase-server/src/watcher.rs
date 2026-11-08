@@ -133,9 +133,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         let root_clone = state.root_path.clone();
 
                         tokio::task::spawn_blocking(move || {
+                            let start = std::time::Instant::now();
                             let analyzer = RepositoryAnalyzer::default();
                             match analyzer.analyze_path(&root_clone) {
                                 Ok(result) => {
+                                    let duration = start.elapsed().as_millis() as u64;
+                                    state_clone.set_analysis_duration(duration);
                                     let _ = state_clone.publish_network(
                                         result.snapshot,
                                         result.index,
