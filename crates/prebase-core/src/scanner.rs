@@ -111,8 +111,7 @@ impl RepositoryScanner {
     }
 
     pub fn is_excluded_relative_path(rel_path: &str) -> bool {
-        let trimmed = rel_path.trim_matches(|c| c == '/' || c == '\\');
-        let normalized = trimmed.replace('\\', "/");
+        let normalized = rel_path.replace('\\', "/");
         let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
         for part in &parts {
             match *part {
@@ -123,7 +122,7 @@ impl RepositoryScanner {
             }
         }
 
-        let filename = parts.last().copied().unwrap_or(trimmed);
+        let filename = parts.last().copied().unwrap_or(rel_path);
         // Exclude secret files
         if filename.starts_with(".env")
             || filename.ends_with(".pem")
@@ -168,19 +167,82 @@ impl RepositoryScanner {
                 continue;
             }
 
-            // Check file size
-            let metadata = match path.metadata() {
+            // Symlink and file type security verification
+            let symlink_meta = match path.symlink_metadata() {
                 Ok(m) => m,
                 Err(err) => {
-                    warn!("Failed to read metadata for {rel}: {err}");
+                    warn!("Failed to read symlink metadata for {rel}: {err}");
                     excluded_count += 1;
                     continue;
                 }
             };
 
-            let size = metadata.len();
-            if size > self.config.max_file_size_bytes {
-                warn!("File {rel} exceeds size limit ({size} bytes), skipping");
+            // Skip directories immediately
+            if symlink_meta.is_dir() {
+                continue;
+            }
+
+            let effective_size: u64;
+
+            if symlink_meta.file_type().is_symlink() {
+                // Symlink security verification:
+                // 1. Resolve canonical target
+                let canonical_target = match path.canonicalize() {
+                    Ok(t) => t,
+                    Err(err) => {
+                        warn!("Skipping broken or unresolvable symlink {rel}: {err}");
+                        excluded_count += 1;
+                        continue;
+                    }
+                };
+
+                // 2. Canonical target must remain strictly inside repository root
+                if !canonical_target.starts_with(&self.root) {
+                    warn!(
+                        "Skipping symlink escaping repository root: {rel} -> {}",
+                        canonical_target.display()
+                    );
+                    excluded_count += 1;
+                    continue;
+                }
+
+                // 3. Target must be a regular file (not directory, socket, device, or FIFO)
+                let target_meta = match canonical_target.metadata() {
+                    Ok(m) if m.is_file() => m,
+                    _ => {
+                        warn!(
+                            "Skipping symlink pointing to non-regular file: {rel} -> {}",
+                            canonical_target.display()
+                        );
+                        excluded_count += 1;
+                        continue;
+                    }
+                };
+
+                // 4. Target must not be an excluded or secret file
+                if let Ok(target_rel) = canonical_target.strip_prefix(&self.root) {
+                    let target_rel_str = target_rel.to_string_lossy().replace('\\', "/");
+                    if Self::is_excluded_relative_path(&target_rel_str) {
+                        warn!(
+                            "Skipping symlink pointing to excluded sensitive file: {rel} -> {target_rel_str}"
+                        );
+                        excluded_count += 1;
+                        continue;
+                    }
+                }
+
+                effective_size = target_meta.len();
+            } else if symlink_meta.is_file() {
+                effective_size = symlink_meta.len();
+            } else {
+                // Non-regular file (FIFO, socket, block/char device)
+                warn!("Skipping non-regular filesystem object: {rel}");
+                excluded_count += 1;
+                continue;
+            }
+
+            if effective_size > self.config.max_file_size_bytes {
+                warn!("File {rel} exceeds size limit ({effective_size} bytes), skipping");
                 excluded_count += 1;
                 continue;
             }
@@ -220,7 +282,7 @@ impl RepositoryScanner {
                 relative_path: rel,
                 filename,
                 extension: ext,
-                size_bytes: size,
+                size_bytes: effective_size,
                 file_kind,
                 is_supported_language: is_supported,
             });
@@ -290,5 +352,95 @@ mod tests {
         assert!(RepositoryScanner::is_excluded_relative_path(
             "/node_modules/pkg/"
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_scanning_security() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        let base = tempdir().unwrap();
+        let repo_root = base.path().join("repo");
+        let outside_dir = base.path().join("outside");
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        // 1. Legitimate file
+        let main_ts = repo_root.join("src/main.ts");
+        fs::write(&main_ts, "console.log('hello');").unwrap();
+
+        // 2. Secret file inside repo
+        let secret_file = repo_root.join("src/.env");
+        fs::write(&secret_file, "SECRET_KEY=12345").unwrap();
+
+        // 3. File outside repo
+        let outside_file = outside_dir.join("private.ts");
+        fs::write(&outside_file, "const sensitiveData = 'classified';").unwrap();
+
+        // 4. Symlink escaping repo
+        symlink(&outside_file, repo_root.join("src/escape.ts")).unwrap();
+
+        // 5. Symlink to secret file inside repo
+        symlink(&secret_file, repo_root.join("src/secret_link.ts")).unwrap();
+
+        // 6. Valid internal symlink
+        symlink(&main_ts, repo_root.join("src/valid_alias.ts")).unwrap();
+
+        // 7. Broken symlink
+        symlink(
+            repo_root.join("src/nonexistent.ts"),
+            repo_root.join("src/broken.ts"),
+        )
+        .unwrap();
+
+        // 8. Directory symlink escaping repo
+        symlink(&outside_dir, repo_root.join("src/outside_dir_link")).unwrap();
+
+        // 9. Internal directory symlink inside repo (must be skipped as non-regular file)
+        let internal_subdir = repo_root.join("src/components");
+        fs::create_dir_all(&internal_subdir).unwrap();
+        fs::write(
+            internal_subdir.join("Button.tsx"),
+            "export const Button = () => null;",
+        )
+        .unwrap();
+        symlink(&internal_subdir, repo_root.join("src/components_link")).unwrap();
+
+        // 10. Multi-hop valid symlink inside repo: hop2 -> hop1 -> main.ts
+        symlink(&main_ts, repo_root.join("src/hop1.ts")).unwrap();
+        symlink(repo_root.join("src/hop1.ts"), repo_root.join("src/hop2.ts")).unwrap();
+
+        // 11. Circular symlink loop: cycle_a <-> cycle_b (must not hang or panic; must be excluded)
+        let loop_a = repo_root.join("src/loop_a.ts");
+        let loop_b = repo_root.join("src/loop_b.ts");
+        symlink(&loop_b, &loop_a).unwrap();
+        symlink(&loop_a, &loop_b).unwrap();
+
+        let scanner = RepositoryScanner::new(&repo_root, ScannerConfig::default()).unwrap();
+        let (discovered, excluded_count) = scanner.scan();
+
+        let rel_paths: Vec<String> = discovered.into_iter().map(|f| f.relative_path).collect();
+
+        // Must include legitimate files and valid internal symlinks (including multi-hop)
+        assert!(rel_paths.contains(&"src/main.ts".to_string()));
+        assert!(rel_paths.contains(&"src/valid_alias.ts".to_string()));
+        assert!(rel_paths.contains(&"src/hop1.ts".to_string()));
+        assert!(rel_paths.contains(&"src/hop2.ts".to_string()));
+        assert!(rel_paths.contains(&"src/components/Button.tsx".to_string()));
+
+        // Must strictly exclude escaping symlink, secret symlink, broken symlink, dir symlinks,
+        // circular symlinks, and secret file
+        assert!(!rel_paths.contains(&"src/escape.ts".to_string()));
+        assert!(!rel_paths.contains(&"src/secret_link.ts".to_string()));
+        assert!(!rel_paths.contains(&"src/broken.ts".to_string()));
+        assert!(!rel_paths.contains(&"src/outside_dir_link".to_string()));
+        assert!(!rel_paths.contains(&"src/components_link".to_string()));
+        assert!(!rel_paths.contains(&"src/loop_a.ts".to_string()));
+        assert!(!rel_paths.contains(&"src/loop_b.ts".to_string()));
+        assert!(!rel_paths.contains(&"src/.env".to_string()));
+
+        assert!(excluded_count >= 6);
     }
 }

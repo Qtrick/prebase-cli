@@ -13,6 +13,7 @@ use crate::state::AppState;
 
 pub struct RepoWatcherHandle {
     pub shutdown_tx: oneshot::Sender<()>,
+    pub task_handle: tokio::task::JoinHandle<()>,
 }
 
 pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, notify::Error> {
@@ -53,13 +54,18 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    tokio::spawn(async move {
+    let task_handle = tokio::spawn(async move {
         // Keep watcher alive in this async task
         let _watcher = watcher;
 
         let mut changed_sources: HashSet<String> = HashSet::new();
         let mut git_ref_changed = false;
         let mut full_rescan_needed = false;
+
+        // Single-flight analysis coordinator state
+        let mut is_analyzing = false;
+        let mut pending_after_analysis = false;
+        let (completion_tx, mut completion_rx) = mpsc::channel::<()>(1);
 
         loop {
             if overflow_flag.swap(false, Ordering::SeqCst) {
@@ -70,6 +76,69 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                 _ = &mut shutdown_rx => {
                     info!("Filesystem watcher received shutdown signal");
                     break;
+                }
+                _ = completion_rx.recv() => {
+                    is_analyzing = false;
+                    debug!("Background repository reanalysis finished");
+
+                    // If modifications arrived while analysis was running, trigger next single-flight analysis
+                    if pending_after_analysis || full_rescan_needed || !changed_sources.is_empty() {
+                        pending_after_analysis = false;
+                        if overflow_flag.swap(false, Ordering::SeqCst) {
+                            full_rescan_needed = true;
+                        }
+
+                        let files_to_report: Vec<String> = if full_rescan_needed {
+                            full_rescan_needed = false;
+                            changed_sources.clear();
+                            vec!["*".to_string()]
+                        } else {
+                            changed_sources.drain().collect()
+                        };
+
+                        info!(
+                            "Reanalyzing repository following coalesced filesystem changes in {} file(s)...",
+                            files_to_report.len()
+                        );
+
+                        is_analyzing = true;
+                        let generation = state.get_next_generation();
+                        let state_clone = state.clone();
+                        let root_clone = state.root_path.clone();
+                        let done_tx = completion_tx.clone();
+
+                        tokio::task::spawn_blocking(move || {
+                            let start = std::time::Instant::now();
+                            let analyzer = RepositoryAnalyzer::default();
+                            match analyzer.analyze_path(&root_clone) {
+                                Ok(result) => {
+                                    let duration = start.elapsed().as_millis() as u64;
+                                    match state_clone.publish_network(
+                                        result.snapshot,
+                                        result.index,
+                                        files_to_report,
+                                        Some(generation),
+                                    ) {
+                                        Ok(_rev) => {
+                                            // Only record analysis duration if this generation was accepted and published
+                                            state_clone.set_analysis_duration(duration);
+                                            if state_clone.get_watcher_health() == WatcherHealth::Degraded {
+                                                state_clone.set_watcher_health(WatcherHealth::Active);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            debug!("Rejected stale reanalysis generation {generation}: {err}");
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    error!("Reanalysis failed on filesystem change: {err}");
+                                    state_clone.set_watcher_health(WatcherHealth::Degraded);
+                                }
+                            }
+                            let _ = done_tx.try_send(());
+                        });
+                    }
                 }
                 msg_opt = rx.recv() => {
                     if overflow_flag.swap(false, Ordering::SeqCst) {
@@ -93,6 +162,9 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                                 if is_supported_source_file(&path) {
                                     changed_sources.insert(rel.to_string_lossy().to_string());
+                                    if is_analyzing {
+                                        pending_after_analysis = true;
+                                    }
                                 }
                             }
                         }
@@ -102,7 +174,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(200)), if !changed_sources.is_empty() || git_ref_changed || full_rescan_needed || overflow_flag.load(Ordering::SeqCst) => {
+                _ = tokio::time::sleep(Duration::from_millis(200)), if !is_analyzing && (!changed_sources.is_empty() || git_ref_changed || full_rescan_needed || overflow_flag.load(Ordering::SeqCst)) => {
                     if overflow_flag.swap(false, Ordering::SeqCst) {
                         full_rescan_needed = true;
                     }
@@ -124,13 +196,15 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         };
 
                         info!(
-                            "Detected filesystem changes in {} source files. Triggering incremental reanalysis...",
+                            "Reanalyzing repository following filesystem changes in {} file(s)...",
                             files_to_report.len()
                         );
 
+                        is_analyzing = true;
                         let generation = state.get_next_generation();
                         let state_clone = state.clone();
                         let root_clone = state.root_path.clone();
+                        let done_tx = completion_tx.clone();
 
                         tokio::task::spawn_blocking(move || {
                             let start = std::time::Instant::now();
@@ -138,15 +212,22 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                             match analyzer.analyze_path(&root_clone) {
                                 Ok(result) => {
                                     let duration = start.elapsed().as_millis() as u64;
-                                    state_clone.set_analysis_duration(duration);
-                                    let _ = state_clone.publish_network(
+                                    match state_clone.publish_network(
                                         result.snapshot,
                                         result.index,
                                         files_to_report,
                                         Some(generation),
-                                    );
-                                    if state_clone.get_watcher_health() == WatcherHealth::Degraded {
-                                        state_clone.set_watcher_health(WatcherHealth::Active);
+                                    ) {
+                                        Ok(_rev) => {
+                                            // Only record analysis duration if this generation was accepted and published
+                                            state_clone.set_analysis_duration(duration);
+                                            if state_clone.get_watcher_health() == WatcherHealth::Degraded {
+                                                state_clone.set_watcher_health(WatcherHealth::Active);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            debug!("Rejected stale reanalysis generation {generation}: {err}");
+                                        }
                                     }
                                 }
                                 Err(err) => {
@@ -154,6 +235,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                                     state_clone.set_watcher_health(WatcherHealth::Degraded);
                                 }
                             }
+                            let _ = done_tx.try_send(());
                         });
                     }
                 }
@@ -161,7 +243,10 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
         }
     });
 
-    Ok(RepoWatcherHandle { shutdown_tx })
+    Ok(RepoWatcherHandle {
+        shutdown_tx,
+        task_handle,
+    })
 }
 
 fn is_git_ref_path(rel_path: &Path) -> bool {

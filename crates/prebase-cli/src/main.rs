@@ -242,6 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Terminate filesystem watcher cleanly
     if let Some(watcher) = server.watcher_handle {
         let _ = watcher.shutdown_tx.send(());
+        let _ = watcher.task_handle.await;
     }
 
     let _ = server.server_handle.await;

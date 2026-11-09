@@ -13,6 +13,15 @@ pub struct CanonicalGraph {
     issues: Vec<AnalysisIssue>,
 }
 
+fn relationship_priority(kind: RelationshipKind) -> u8 {
+    match kind {
+        RelationshipKind::Import => 4,
+        RelationshipKind::Export => 3,
+        RelationshipKind::DynamicImport => 2,
+        RelationshipKind::TypeOnly => 1,
+    }
+}
+
 impl CanonicalGraph {
     pub fn new() -> Self {
         Self::default()
@@ -53,12 +62,20 @@ impl CanonicalGraph {
 
         let edge_id = DependencyEdge::make_edge_id(&edge.source_file_id, &edge.target_file_id);
         if let Some(existing) = self.edges.get_mut(&edge_id) {
-            // Deduplicate evidence
+            // Escalate relationship kind if incoming kind has higher semantic precedence
+            if relationship_priority(edge.relationship_kind)
+                > relationship_priority(existing.relationship_kind)
+            {
+                existing.relationship_kind = edge.relationship_kind;
+            }
+            // Deduplicate evidence while strictly preserving semantic distinctions
             for ev in edge.evidence {
                 if !existing.evidence.iter().any(|e| {
                     e.line == ev.line
                         && e.column == ev.column
                         && e.import_specifier == ev.import_specifier
+                        && e.relationship_kind == ev.relationship_kind
+                        && e.is_type_only == ev.is_type_only
                 }) {
                     existing.evidence.push(ev);
                 }
@@ -86,10 +103,18 @@ impl CanonicalGraph {
 
         let edge_id = DependencyEdge::make_edge_id(source_id, target_id);
         if let Some(existing) = self.edges.get_mut(&edge_id) {
+            // Escalate relationship kind if incoming kind has higher semantic precedence
+            if relationship_priority(relationship_kind)
+                > relationship_priority(existing.relationship_kind)
+            {
+                existing.relationship_kind = relationship_kind;
+            }
             if !existing.evidence.iter().any(|e| {
                 e.line == evidence.line
                     && e.column == evidence.column
                     && e.import_specifier == evidence.import_specifier
+                    && e.relationship_kind == evidence.relationship_kind
+                    && e.is_type_only == evidence.is_type_only
             }) {
                 existing.evidence.push(evidence);
             }

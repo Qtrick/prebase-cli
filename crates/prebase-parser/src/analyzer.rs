@@ -205,12 +205,18 @@ impl RepositoryAnalyzer {
             graph.add_issue(issue.clone());
         }
 
+        let total_analyzed = analyzed_counter.load(Ordering::Relaxed);
+        let supported_count = discovered_files
+            .iter()
+            .filter(|f| f.is_supported_language)
+            .count();
+
         let coverage = AnalysisCoverage {
             total_discovered: discovered_files.len(),
-            total_analyzed: analyzed_counter.load(Ordering::Relaxed),
+            total_analyzed,
             total_excluded: excluded_count,
             total_issues: issues.len(),
-            is_complete: issues.is_empty(),
+            is_complete: issues.is_empty() && total_analyzed == supported_count,
         };
 
         let snapshot = graph.build_snapshot(repository_id, revision, coverage);

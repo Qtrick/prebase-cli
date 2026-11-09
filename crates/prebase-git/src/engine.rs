@@ -220,16 +220,22 @@ impl GitEngine {
         if let Ok(status_bytes) = self.run_git_cmd(&["status", "--porcelain=v1", "-z", "-uall"]) {
             let mut tokens = status_bytes.split(|&b| b == 0);
             while let Some(tok) = tokens.next() {
-                if tok.is_empty() {
+                if tok.len() < 3 {
                     continue;
                 }
-                let entry_str = String::from_utf8_lossy(tok);
-                if entry_str.len() >= 3 {
-                    let status_code = &entry_str[..2];
-                    let file_path = entry_str[3..].trim().to_string();
+                // Porcelain -z format: XY <path>\0 [orig_path\0]
+                // First two bytes are status codes; third byte is ASCII space separator.
+                // The filename bytes strictly preserve leading and trailing whitespace.
+                if tok[2] == b' ' {
+                    let status_code = &tok[..2];
+                    let file_path = String::from_utf8_lossy(&tok[3..]).to_string();
 
                     // If status is rename (R) or copy (C), next token is original path
-                    if status_code.starts_with('R') || status_code.starts_with('C') {
+                    if status_code[0] == b'R'
+                        || status_code[0] == b'C'
+                        || status_code[1] == b'R'
+                        || status_code[1] == b'C'
+                    {
                         let _ = tokens.next(); // consume orig_path
                     }
 

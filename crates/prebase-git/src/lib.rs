@@ -83,6 +83,56 @@ mod tests {
     }
 
     #[test]
+    fn test_git_status_filename_exactness_spaces_and_renames() {
+        let dir = setup_test_git_repo();
+        let path = dir.path();
+        let engine = GitEngine::new(path.to_path_buf());
+
+        // 1. Untracked file with leading spaces
+        fs::write(path.join("   leading_space.txt"), "leading").unwrap();
+
+        // 2. Untracked file with trailing spaces
+        fs::write(path.join("trailing_space.txt   "), "trailing").unwrap();
+
+        // 3. Staged rename with spaces
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        };
+        run(&["mv", "file_a.txt", "renamed file with spaces.txt"]);
+
+        let status = engine.get_status().expect("failed to get status");
+        assert!(status.is_dirty);
+
+        // Verify exact filename preservation (leading and trailing spaces must NOT be trimmed)
+        assert!(
+            status
+                .dirty_files
+                .contains(&"   leading_space.txt".to_string()),
+            "Expected leading spaces preserved, got: {:?}",
+            status.dirty_files
+        );
+        assert!(
+            status
+                .dirty_files
+                .contains(&"trailing_space.txt   ".to_string()),
+            "Expected trailing spaces preserved, got: {:?}",
+            status.dirty_files
+        );
+        assert!(
+            status
+                .dirty_files
+                .contains(&"renamed file with spaces.txt".to_string()),
+            "Expected renamed destination path preserved, got: {:?}",
+            status.dirty_files
+        );
+    }
+
+    #[test]
     fn test_git_history_anchor_pagination() {
         let dir = setup_test_git_repo();
         let engine = GitEngine::new(dir.path().to_path_buf());

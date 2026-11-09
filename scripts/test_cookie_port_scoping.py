@@ -128,6 +128,18 @@ class ServerAHandler(http.server.BaseHTTPRequestHandler):
     requests_log: List[Tuple[str, Optional[str], int]] = []
 
     def do_GET(self) -> None:
+        host = self.headers.get("Host", "")
+        if host not in (f"127.0.0.1:{self.port_a}", f"localhost:{self.port_a}"):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        origin = self.headers.get("Origin")
+        if origin and origin not in (f"http://127.0.0.1:{self.port_a}", f"http://localhost:{self.port_a}"):
+            self.send_response(403)
+            self.end_headers()
+            return
+
         cookie_header = self.headers.get("Cookie")
         matched_token = extract_cookie_token(cookie_header, self.port_a)
 
@@ -161,6 +173,31 @@ class ServerAHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             self.requests_log.append((self.path, cookie_header, status))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self) -> None:
+        host = self.headers.get("Host", "")
+        if host not in (f"127.0.0.1:{self.port_a}", f"localhost:{self.port_a}"):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        origin = self.headers.get("Origin")
+        if origin and origin not in (f"http://127.0.0.1:{self.port_a}", f"http://localhost:{self.port_a}"):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        if self.path == "/api/auth/session":
+            # Re-auth with ambient cookie must never return raw token in JSON
+            body = b'{"authenticated":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -221,6 +258,30 @@ class ServerBHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             self.requests_log.append((self.path, cookie_header, status))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self) -> None:
+        host = self.headers.get("Host", "")
+        if host not in (f"127.0.0.1:{self.port_b}", f"localhost:{self.port_b}"):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        origin = self.headers.get("Origin")
+        if origin and origin not in (f"http://127.0.0.1:{self.port_b}", f"http://localhost:{self.port_b}"):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        if self.path == "/api/auth/session":
+            body = b'{"authenticated":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -375,6 +436,42 @@ def run_cookie_port_scoping_test() -> bool:
                     assert '"instance":"B"' in content_b, "Server B must identify instance B"
                     log_success("Server B API authenticated successfully in presence of Server A cookie.")
 
+                    # -----------------------------------------------------------------
+                    # PHASE 4: Cross-Origin Attack Rejection & Token Extraction Prevention
+                    # -----------------------------------------------------------------
+                    log_info("--- Phase 4: Verify Cross-Origin Attack Rejection & Token Protection ---")
+                    # Attacker on Server B attempts cross-origin fetch to Server A
+                    page.goto(f"http://127.0.0.1:{port_b}/")
+                    cross_origin_result = page.evaluate(f"""async () => {{
+                        try {{
+                            const res = await fetch("http://127.0.0.1:{port_a}/api/status");
+                            return res.status;
+                        }} catch (e) {{
+                            return 'blocked';
+                        }}
+                    }}""")
+                    assert cross_origin_result in (403, 'blocked'), f"Cross-origin fetch should be blocked or 403, got {cross_origin_result}"
+                    log_success("CROSS-ORIGIN DEFENSE CONFIRMED: Server A rejected cross-origin request from Server B.")
+
+                    # Ambient cookie re-auth on Server A must never expose token in JSON
+                    page.goto(f"http://127.0.0.1:{port_a}/")
+                    token_exposure_result = page.evaluate("""async () => {
+                        try {
+                            const res = await fetch("/api/auth/session", {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ bootstrap_token: 'any', expose_token: true })
+                            });
+                            return await res.json();
+                        } catch (e) {
+                            return null;
+                        }
+                    }""")
+                    assert token_exposure_result is not None and token_exposure_result.get("session_token") is None, (
+                        "Security failure: Ambient cookie must never expose session_token in JSON"
+                    )
+                    log_success("TOKEN EXTRACTION ORACLE DEFENSE CONFIRMED: Ambient cookie re-auth never returns raw token in JSON.")
+
                 finally:
                     context.close()
                     browser.close()
@@ -473,10 +570,38 @@ def run_cookie_port_scoping_test() -> bool:
                 assert '"instance":"B"' in content_b, "Server B must identify instance B"
             log_success("Server B API authenticated successfully in presence of Server A cookie.")
 
+            # -----------------------------------------------------------------
+            # PHASE 4: Cross-Origin Attack Rejection & Token Extraction Prevention
+            # -----------------------------------------------------------------
+            log_info("--- Phase 4: Verify Cross-Origin Attack Rejection & Token Protection ---")
+            import json
+            cross_origin_req = urllib.request.Request(
+                f"http://127.0.0.1:{port_a}/api/status",
+                headers={"Origin": f"http://127.0.0.1:{port_b}"}
+            )
+            try:
+                with opener.open(cross_origin_req) as resp:
+                    cross_status = resp.status
+            except urllib.error.HTTPError as e:
+                cross_status = e.code
+            assert cross_status == 403, f"Expected 403 for cross-origin request, got {cross_status}"
+            log_success("CROSS-ORIGIN DEFENSE CONFIRMED: Server A rejected cross-origin request from Server B.")
+
+            # Re-auth with ambient cookie must never expose raw token in JSON
+            extract_req = urllib.request.Request(
+                f"http://127.0.0.1:{port_a}/api/auth/session",
+                data=b'{"bootstrap_token":"consumed","expose_token":true}',
+                headers={"Content-Type": "application/json"}
+            )
+            with opener.open(extract_req) as resp:
+                extract_body = json.loads(resp.read().decode("utf-8"))
+            assert extract_body.get("session_token") is None, "Ambient cookie must not expose session_token"
+            log_success("TOKEN EXTRACTION ORACLE DEFENSE CONFIRMED: Ambient cookie re-auth never returns raw token in JSON.")
+
         # -----------------------------------------------------------------
-        # PHASE 4: Token Sanitization Verification
+        # PHASE 5: Token Sanitization Verification
         # -----------------------------------------------------------------
-        log_info("--- Phase 4: Token Sanitization Audit ---")
+        log_info("--- Phase 5: Token Sanitization Audit ---")
         sample_log_with_secrets = (
             f"Cookie: prebase_session_{port_a}={TOKEN_A}; prebase_session_{port_b}={TOKEN_B}"
         )

@@ -80,16 +80,13 @@ pub async fn handle_auth_session(
     // grant immediate 200 OK even if the single-use bootstrap token was already consumed.
     if let Some(cookie_token) = crate::auth::extract_cookie_token(&headers, state.allocated_port) {
         if crate::auth::constant_time_eq(&cookie_token, &state.session_token) {
-            let session_token = if payload.expose_token {
-                Some(state.session_token.clone())
-            } else {
-                None
-            };
+            // Re-authentication via existing ambient cookie must NEVER expose the token in JSON.
+            // This prevents an ambient HttpOnly cookie from functioning as an unintended token-extraction oracle.
             return Ok((
                 HeaderMap::new(),
                 Json(AuthSessionResponse {
                     authenticated: true,
-                    session_token,
+                    session_token: None,
                 }),
             ));
         }
@@ -311,8 +308,14 @@ pub async fn handle_get_source(
         ));
     }
 
-    // Enforce regular file check (prevents thread hangs on FIFOs/named pipes) and 500KB cap
-    let metadata = match std::fs::metadata(&canonical) {
+    // Race-resistant handle validation and reading (eliminates TOCTOU metadata-to-read race)
+    use std::io::Read;
+    let file = match std::fs::File::open(&canonical) {
+        Ok(f) => f,
+        Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to open source file")),
+    };
+
+    let metadata = match file.metadata() {
         Ok(m) => m,
         Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to read file metadata")),
     };
@@ -326,8 +329,13 @@ pub async fn handle_get_source(
         ));
     }
 
-    match std::fs::read_to_string(&canonical) {
-        Ok(content) => Ok(Json(SourceContentResponse {
+    let mut content = String::with_capacity(metadata.len() as usize);
+    match file.take(500 * 1024 + 1).read_to_string(&mut content) {
+        Ok(bytes_read) if bytes_read > 500 * 1024 => Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Source file exceeds 500KB limit",
+        )),
+        Ok(_) => Ok(Json(SourceContentResponse {
             path: file_path,
             content,
         })),

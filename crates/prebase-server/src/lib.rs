@@ -150,24 +150,56 @@ mod tests {
         let valid_cookie_resp = app.clone().oneshot(valid_cookie_req).await.unwrap();
         assert_eq!(valid_cookie_resp.status(), StatusCode::OK);
 
-        // Automation mode: passing expose_token: true returns session_token in JSON
-        let auto_req = Request::builder()
+        // Ambient cookie re-auth must NEVER expose token in JSON even if expose_token: true is requested
+        let oracle_attempt_req = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/session")
             .header(header::HOST, "127.0.0.1:8080")
             .header(header::COOKIE, "prebase_session_8080=secret-token-xyz")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"bootstrap_token":"any","expose_token":true}"#,
+                r#"{"bootstrap_token":"consumed","expose_token":true}"#,
             ))
             .unwrap();
-        let auto_resp = app.clone().oneshot(auto_req).await.unwrap();
+        let oracle_resp = app.clone().oneshot(oracle_attempt_req).await.unwrap();
+        assert_eq!(oracle_resp.status(), StatusCode::OK);
+        let oracle_bytes = axum::body::to_bytes(oracle_resp.into_body(), 1024)
+            .await
+            .unwrap();
+        let oracle_json: serde_json::Value = serde_json::from_slice(&oracle_bytes).unwrap();
+        assert_eq!(oracle_json["authenticated"], true);
+        assert!(
+            oracle_json.get("session_token").is_none(),
+            "Ambient cookie must never expose token in JSON response"
+        );
+
+        // Bootstrap token exchange with expose_token: true returns session_token for authorized automation
+        let auto_state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "secret-token-123".into(),
+            Some("bootstrap-auto-456".into()),
+            8081,
+            false,
+        ));
+        let auto_app = create_router(auto_state);
+        let auto_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/session")
+            .header(header::HOST, "127.0.0.1:8081")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"bootstrap_token":"bootstrap-auto-456","expose_token":true}"#,
+            ))
+            .unwrap();
+        let auto_resp = auto_app.oneshot(auto_req).await.unwrap();
         assert_eq!(auto_resp.status(), StatusCode::OK);
         let auto_bytes = axum::body::to_bytes(auto_resp.into_body(), 1024)
             .await
             .unwrap();
         let auto_json: serde_json::Value = serde_json::from_slice(&auto_bytes).unwrap();
-        assert_eq!(auto_json["session_token"], "secret-token-xyz");
+        assert_eq!(auto_json["session_token"], "secret-token-123");
     }
 
     #[tokio::test]
@@ -192,6 +224,178 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(traversal_req).await.unwrap();
         assert!(resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_source_security_and_toctou_defense() {
+        use prebase_core::index::GraphIndex;
+        use prebase_core::model::{
+            AnalysisCoverage, FileKind, FileNode, GraphSnapshot, NodeAnalysisStatus,
+        };
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().canonicalize().unwrap();
+        let src_dir = repo_root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Legitimate source file
+        let valid_file = src_dir.join("main.ts");
+        let valid_content = "console.log('hello prebase');";
+        fs::write(&valid_file, valid_content).unwrap();
+
+        // 2. Unindexed file on disk
+        let unindexed_file = src_dir.join("unindexed.ts");
+        fs::write(&unindexed_file, "console.log('secret');").unwrap();
+
+        // 3. Excluded secret file on disk
+        let secret_file = src_dir.join(".env");
+        fs::write(&secret_file, "SECRET=123").unwrap();
+
+        // 4. Oversized file (> 500KB)
+        let large_file = src_dir.join("large.ts");
+        let large_content = vec![b'x'; 501 * 1024]; // 501 KB
+        fs::write(&large_file, large_content).unwrap();
+
+        // 5. Directory inside src
+        let sub_dir = src_dir.join("sub_dir");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        let state = Arc::new(AppState::new(
+            repo_root.clone(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        // Create published snapshot containing valid_file, large_file, secret_file, and sub_dir
+        let snap = GraphSnapshot {
+            schema_version: "1.0.0".into(),
+            repository_id: "repo-123".into(),
+            revision: 1,
+            nodes: vec![
+                FileNode {
+                    id: "src/main.ts".into(),
+                    relative_path: "src/main.ts".into(),
+                    filename: "main.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: valid_content.len() as u64,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+                FileNode {
+                    id: "src/large.ts".into(),
+                    relative_path: "src/large.ts".into(),
+                    filename: "large.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 501 * 1024,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+                FileNode {
+                    id: "src/.env".into(),
+                    relative_path: "src/.env".into(),
+                    filename: ".env".into(),
+                    language: "unknown".into(),
+                    size_bytes: 10,
+                    file_kind: FileKind::Other,
+                    analysis_status: NodeAnalysisStatus::Unsupported,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+                FileNode {
+                    id: "src/sub_dir".into(),
+                    relative_path: "src/sub_dir".into(),
+                    filename: "sub_dir".into(),
+                    language: "unknown".into(),
+                    size_bytes: 0,
+                    file_kind: FileKind::Other,
+                    analysis_status: NodeAnalysisStatus::Unsupported,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+            ],
+            edges: vec![],
+            coverage: AnalysisCoverage::default(),
+            issues: vec![],
+        };
+        let index = GraphIndex::build(&snap);
+        state.publish_network(snap, index, vec![], None).unwrap();
+
+        let app = create_router(state);
+
+        // Case A: Valid indexed file -> 200 OK
+        let req_valid = Request::builder()
+            .uri("/api/v1/source/src/main.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_valid = app.clone().oneshot(req_valid).await.unwrap();
+        assert_eq!(resp_valid.status(), StatusCode::OK);
+        let bytes_valid = axum::body::to_bytes(resp_valid.into_body(), 1024)
+            .await
+            .unwrap();
+        let json_valid: serde_json::Value = serde_json::from_slice(&bytes_valid).unwrap();
+        assert_eq!(json_valid["path"], "src/main.ts");
+        assert_eq!(json_valid["content"], valid_content);
+
+        // Case B: Unindexed file on disk -> 403 FORBIDDEN
+        let req_unindexed = Request::builder()
+            .uri("/api/v1/source/src/unindexed.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_unindexed = app.clone().oneshot(req_unindexed).await.unwrap();
+        assert_eq!(resp_unindexed.status(), StatusCode::FORBIDDEN);
+
+        // Case C: Excluded secret file (.env) -> 403 FORBIDDEN
+        let req_secret = Request::builder()
+            .uri("/api/v1/source/src/.env")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_secret = app.clone().oneshot(req_secret).await.unwrap();
+        assert_eq!(resp_secret.status(), StatusCode::FORBIDDEN);
+
+        // Case D: Oversized file (> 500KB) -> 413 PAYLOAD_TOO_LARGE
+        let req_large = Request::builder()
+            .uri("/api/v1/source/src/large.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_large = app.clone().oneshot(req_large).await.unwrap();
+        assert_eq!(resp_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Case E: Directory handle -> 400 BAD_REQUEST
+        let req_dir = Request::builder()
+            .uri("/api/v1/source/src/sub_dir")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_dir = app.clone().oneshot(req_dir).await.unwrap();
+        assert_eq!(resp_dir.status(), StatusCode::BAD_REQUEST);
+
+        // Case F: Path traversal .. -> 400 BAD_REQUEST
+        let req_trav = Request::builder()
+            .uri("/api/v1/source/src/../main.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_trav = app.clone().oneshot(req_trav).await.unwrap();
+        assert_eq!(resp_trav.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

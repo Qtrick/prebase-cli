@@ -269,11 +269,18 @@ export const App: React.FC = () => {
     initSession()
       .then((initRes) => {
         setSessionInitialized(true);
-        if (!initRes.success && initRes.isAuthError) {
-          setError(
-            initRes.error ||
-              'Authentication failed: bootstrap token invalid or already consumed. Please check your terminal and use the URL printed under "Server running at".'
-          );
+        if (!initRes.success) {
+          if (initRes.isAuthError) {
+            setError(
+              initRes.error ||
+                'Authentication failed: bootstrap token invalid or already consumed. Please check your terminal and use the URL printed under "Server running at".'
+            );
+          } else {
+            setError(
+              initRes.error ||
+                'Could not reach local server. Please verify PreBase is running in your terminal.'
+            );
+          }
           return;
         }
         checkStatus();
@@ -886,15 +893,13 @@ export const App: React.FC = () => {
                 <AlertCircle size={32} color="#ef4444" />
                 <h3>{error.includes('Authentication') ? 'Authentication Required' : 'Unable to load graph'}</h3>
                 <p>{error}</p>
-                {error.includes('Authentication') && (
-                  <button
-                    className="history-retry-btn"
-                    onClick={() => window.location.reload()}
-                    style={{ marginTop: '12px' }}
-                  >
-                    Retry Connection
-                  </button>
-                )}
+                <button
+                  className="history-retry-btn"
+                  onClick={() => window.location.reload()}
+                  style={{ marginTop: '12px' }}
+                >
+                  Retry Connection
+                </button>
               </div>
             ) : !snapshot ? (
               <div className="loading-overlay">
