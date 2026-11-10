@@ -26,19 +26,49 @@ import urllib.parse
 import urllib.error
 import subprocess
 import tempfile
+import socket
+import re
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
-PORT = 19994
+DEFAULT_PORT = 19994
+PORT = DEFAULT_PORT
+
+FAILURE_ARTIFACT_DIR = os.environ.get(
+    "PREBASE_FAILURE_ARTIFACT_DIR", os.path.join(ROOT_DIR, "test-results", "failure-artifacts")
+)
+os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
+
+def find_available_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Attempts to bind to preferred port; falls back to an ephemeral port if occupied."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, preferred))
+            return preferred
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
+
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
 
 def log(msg):
-    print(f"\x1b[36m[STAGE 2 E2E]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[STAGE 2 E2E]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def error(msg):
-    print(f"\x1b[31m[ERROR]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[ERROR]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {})
@@ -55,6 +85,9 @@ def http_post_json(url, data, headers=None):
         return resp.status, resp.read().decode("utf-8"), resp.headers
 
 def main():
+    global PORT
+    PORT = find_available_port(DEFAULT_PORT)
+
     print("=" * 70)
     print("PreBase CLI Stage 2 Verification Pipeline: 2D Relationship Explorer")
     print("=" * 70)
@@ -204,37 +237,46 @@ def main():
                     ])
                     page = context.new_page()
 
-                    # Test 1: 2D mode
-                    page.goto(app_url_2d, wait_until="networkidle")
-                    page.wait_for_selector(".relationship-container", timeout=10000)
-                    dom_output = page.content()
+                    try:
+                        # Test 1: 2D mode
+                        page.goto(app_url_2d, wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_selector(".relationship-container", timeout=10000)
+                        dom_output = page.content()
 
-                    assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"
-                    assert "3D Overview" in dom_output, "DOM missing '3D Overview' button"
-                    assert "2D Relationships" in dom_output, "DOM missing '2D Relationships' button"
-                    assert "relationship-container" in dom_output, "DOM missing .relationship-container"
-                    assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
-                    success("Verified 2D Relationship Explorer DOM structure and mode switcher.")
+                        assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"
+                        assert "3D Overview" in dom_output, "DOM missing '3D Overview' button"
+                        assert "2D Relationships" in dom_output, "DOM missing '2D Relationships' button"
+                        assert "relationship-container" in dom_output, "DOM missing .relationship-container"
+                        assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
+                        success("Verified 2D Relationship Explorer DOM structure and mode switcher.")
 
-                    # Test 2: Missing focus file shows purposeful "File Not Found" state
-                    log("Testing purposeful missing-file state in Headless Chrome...")
-                    page.goto(app_url_missing, wait_until="networkidle")
-                    page.wait_for_selector(".relationship-empty-state", timeout=10000)
-                    dom_missing = page.content()
+                        # Test 2: Missing focus file shows purposeful "File Not Found" state
+                        log("Testing purposeful missing-file state in Headless Chrome...")
+                        page.goto(app_url_missing, wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_selector(".relationship-empty-state", timeout=10000)
+                        dom_missing = page.content()
 
-                    assert "File Not Found" in dom_missing, "DOM missing 'File Not Found' header for missing focus"
-                    assert "src/non_existent.ts" in dom_missing, "DOM missing non-existent path citation"
-                    assert "Search files to explore in 2D" in dom_missing, "DOM missing search prompt in empty state"
-                    success("Verified purposeful 'File Not Found' empty state.")
+                        assert "File Not Found" in dom_missing, "DOM missing 'File Not Found' header for missing focus"
+                        assert "src/non_existent.ts" in dom_missing, "DOM missing non-existent path citation"
+                        assert "Search files to explore in 2D" in dom_missing, "DOM missing search prompt in empty state"
+                        success("Verified purposeful 'File Not Found' empty state.")
 
-                    # Test 3: 3D Overview view mode
-                    log("Testing 3D Overview rendering in Headless Chrome...")
-                    page.goto(app_url_3d, wait_until="networkidle")
-                    page.wait_for_selector(".network-canvas", timeout=10000)
-                    dom_3d = page.content()
+                        # Test 3: 3D Overview view mode
+                        log("Testing 3D Overview rendering in Headless Chrome...")
+                        page.goto(app_url_3d, wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_selector(".network-canvas", timeout=10000)
+                        dom_3d = page.content()
 
-                    assert "network-canvas" in dom_3d, "DOM missing .network-canvas in 3D mode"
-                    success("Verified 3D Overview canvas rendered when view=3d.")
+                        assert "network-canvas" in dom_3d, "DOM missing .network-canvas in 3D mode"
+                        success("Verified 3D Overview canvas rendered when view=3d.")
+                    except Exception as e:
+                        try:
+                            fail_shot = os.path.join(FAILURE_ARTIFACT_DIR, "stage2_nav_failure.png")
+                            page.screenshot(path=fail_shot)
+                            log(f"Saved failure screenshot to {fail_shot}")
+                        except Exception:
+                            pass
+                        raise e
 
                     browser.close()
             except ImportError:

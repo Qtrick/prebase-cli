@@ -547,7 +547,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             edge,
             isConnected || isEdgeSelected,
             activeHighlightId,
-            camera.zoom
+            camera.zoom,
+            null,
+            theme
           );
           if (!desc) continue;
 

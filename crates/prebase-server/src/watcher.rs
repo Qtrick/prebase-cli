@@ -67,6 +67,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
         let mut is_analyzing = false;
         let mut pending_after_analysis = false;
         let (completion_tx, mut completion_rx) = mpsc::channel::<()>(1);
+        let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             if overflow_flag.swap(false, Ordering::SeqCst) {
@@ -76,10 +77,17 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
             tokio::select! {
                 _ = &mut shutdown_rx => {
                     info!("Filesystem watcher received shutdown signal");
+                    state.set_shutting_down();
+                    if let Some(handle) = active_task.take() {
+                        let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
+                    }
                     break;
                 }
                 _ = completion_rx.recv() => {
                     is_analyzing = false;
+                    if let Some(handle) = active_task.take() {
+                        let _ = handle.await;
+                    }
                     debug!("Background repository reanalysis finished");
 
                     // If modifications arrived while analysis was running, trigger next single-flight analysis
@@ -99,12 +107,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                         is_analyzing = true;
                         let generation = state.get_next_generation();
-                        spawn_reanalysis(
+                        active_task = Some(spawn_reanalysis(
                             state.clone(),
                             files_to_report,
                             generation,
                             completion_tx.clone(),
-                        );
+                        ));
                     }
                 }
                 msg_opt = rx.recv() => {
@@ -164,12 +172,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                         is_analyzing = true;
                         let generation = state.get_next_generation();
-                        spawn_reanalysis(
+                        active_task = Some(spawn_reanalysis(
                             state.clone(),
                             files_to_report,
                             generation,
                             completion_tx.clone(),
-                        );
+                        ));
                     }
                 }
             }
@@ -204,12 +212,20 @@ fn spawn_reanalysis(
     files_to_report: Vec<String>,
     generation: u64,
     completion_tx: mpsc::Sender<()>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
+        if state.is_shutting_down() {
+            let _ = completion_tx.try_send(());
+            return;
+        }
         let start = std::time::Instant::now();
         let analyzer = RepositoryAnalyzer::default();
         match analyzer.analyze_path(&state.root_path) {
             Ok(result) => {
+                if state.is_shutting_down() {
+                    let _ = completion_tx.try_send(());
+                    return;
+                }
                 let duration = start.elapsed().as_millis() as u64;
                 match state.publish_network(
                     result.snapshot,
@@ -235,7 +251,7 @@ fn spawn_reanalysis(
             }
         }
         let _ = completion_tx.try_send(());
-    });
+    })
 }
 
 fn is_git_ref_path(rel_path: &Path) -> bool {

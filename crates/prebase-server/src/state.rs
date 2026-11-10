@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +55,7 @@ pub struct AppState {
     pub watcher_health: RwLock<WatcherHealth>,
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
+    pub is_shutting_down: AtomicBool,
 }
 
 impl AppState {
@@ -94,6 +95,7 @@ impl AppState {
             watcher_health: RwLock::new(initial_health),
             git_engine,
             event_sender,
+            is_shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -148,6 +150,14 @@ impl AppState {
         }
     }
 
+    pub fn is_shutting_down(&self) -> bool {
+        self.is_shutting_down.load(Ordering::SeqCst)
+    }
+
+    pub fn set_shutting_down(&self) {
+        self.is_shutting_down.store(true, Ordering::SeqCst);
+    }
+
     pub fn get_published(&self) -> Option<Arc<PublishedNetworkState>> {
         self.published.read().unwrap().clone()
     }
@@ -176,6 +186,10 @@ impl AppState {
         changed_files: Vec<String>,
         target_generation: Option<u64>,
     ) -> Result<u64, &'static str> {
+        if self.is_shutting_down() {
+            return Err("Server is shutting down; reanalysis publication discarded");
+        }
+
         let mut pub_guard = self.published.write().unwrap();
 
         // Stale analysis check under write lock to prevent concurrency races

@@ -725,4 +725,274 @@ mod tests {
         let next_text = String::from_utf8(next_chunk.to_vec()).unwrap();
         assert!(next_text.contains(r#""type":"heartbeat""#));
     }
+
+    #[test]
+    fn test_is_safe_relative_path_component_aware() {
+        use crate::routes::is_safe_relative_path;
+
+        // 1. Valid filenames with multiple adjacent periods or leading dot files
+        let valid_paths = [
+            "src/component..ts",
+            "src/version..legacy.ts",
+            "src/..hidden.ts",
+            "src/index.ts",
+            "deep/nested/dir/valid..name...ext",
+            "nested/.hidden",
+            "file...with...many...dots.js",
+        ];
+        for path in &valid_paths {
+            assert!(
+                is_safe_relative_path(path),
+                "Expected path '{}' to be accepted as safe",
+                path
+            );
+        }
+
+        // 2. Traversal attempts (ParentDir components)
+        let traversal_paths = [
+            "../secret.ts",
+            "src/../../outside.ts",
+            "..",
+            "src/..",
+            "src/../main.ts",
+            "src\\..\\secret.ts",
+            "..\\secret.ts",
+            "a/b/../../../etc/passwd",
+        ];
+        for path in &traversal_paths {
+            assert!(
+                !is_safe_relative_path(path),
+                "Expected traversal path '{}' to be rejected",
+                path
+            );
+        }
+
+        // 3. Absolute paths and Windows drive prefixes
+        let absolute_paths = [
+            "/etc/passwd",
+            "/absolute/path.ts",
+            "/",
+            "\\absolute\\path.ts",
+            "C:/Windows/System32",
+            "D:\\secret\\keys.txt",
+            "c:relative\\to\\drive.ts",
+        ];
+        for path in &absolute_paths {
+            assert!(
+                !is_safe_relative_path(path),
+                "Expected absolute path '{}' to be rejected",
+                path
+            );
+        }
+
+        // 4. Empty path, whitespace, null bytes, or leading slashes
+        let malformed_paths = [
+            "",
+            "   ",
+            "\t\n",
+            "src/\0payload.ts",
+            "\0",
+            "/leading/slash.ts",
+            "\\leading\\backslash.ts",
+        ];
+        for path in &malformed_paths {
+            assert!(
+                !is_safe_relative_path(path),
+                "Expected malformed or null-byte path '{:?}' to be rejected",
+                path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_static_asset_serving_and_spa_routing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "secret-token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+        let app = create_router(state);
+
+        // Helper closure to build requests with valid Host header
+        let make_req = |uri: &str, token: Option<&str>| {
+            let mut builder = Request::builder()
+                .uri(uri)
+                .header(header::HOST, "127.0.0.1:8080");
+            if let Some(tok) = token {
+                builder = builder.header("x-prebase-session", tok);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+
+        // 1. Root route `/` -> 200 OK, Content-Type text/html
+        let root_resp = app.clone().oneshot(make_req("/", None)).await.unwrap();
+        assert_eq!(root_resp.status(), StatusCode::OK);
+        let root_ct = root_resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            root_ct.contains("text/html"),
+            "Expected Content-Type to contain text/html, got '{root_ct}'"
+        );
+
+        // 2. SPA routes `/map` and `/history` -> 200 OK, Content-Type text/html
+        for spa_route in &["/map", "/history"] {
+            let resp = app
+                .clone()
+                .oneshot(make_req(spa_route, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Expected SPA route '{spa_route}' to return 200 OK"
+            );
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(
+                ct.contains("text/html"),
+                "Expected Content-Type for '{spa_route}' to contain text/html, got '{ct}'"
+            );
+        }
+
+        // 3. Missing JavaScript asset -> 404 NOT_FOUND (MUST NOT fall back to index.html)
+        let missing_js_resp = app
+            .clone()
+            .oneshot(make_req("/assets/nonexistent-chunk-999.js", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing_js_resp.status(),
+            StatusCode::NOT_FOUND,
+            "Missing JS chunk must return 404 rather than index.html"
+        );
+
+        // 4. Missing CSS asset -> 404 NOT_FOUND
+        let missing_css_resp = app
+            .clone()
+            .oneshot(make_req("/style/missing.css", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing_css_resp.status(),
+            StatusCode::NOT_FOUND,
+            "Missing CSS file must return 404"
+        );
+
+        // 5. Missing API route -> 404 NOT_FOUND (with auth so it hits API fallback, not auth rejection)
+        let missing_api_resp = app
+            .clone()
+            .oneshot(make_req(
+                "/api/v1/nonexistent_endpoint",
+                Some("secret-token-xyz"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing_api_resp.status(),
+            StatusCode::NOT_FOUND,
+            "Missing API route must return 404"
+        );
+
+        // 6. Malformed or traversal paths -> 400 BAD_REQUEST
+        for malformed in &["/../secret", "/assets/../../etc/passwd"] {
+            let resp = app
+                .clone()
+                .oneshot(make_req(malformed, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Traversal path '{malformed}' must return 400 BAD_REQUEST"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shutdown_discards_inflight_reanalysis() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            temp.path().to_path_buf(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        // Initial state before shutdown
+        assert!(!state.is_shutting_down());
+        assert_eq!(state.get_current_revision(), 0);
+        assert!(state.get_published().is_none());
+
+        let dummy_snapshot = GraphSnapshot {
+            schema_version: "1.0.0".into(),
+            repository_id: "repo-123".into(),
+            revision: 0,
+            nodes: vec![],
+            edges: vec![],
+            coverage: AnalysisCoverage::default(),
+            issues: vec![],
+        };
+        let dummy_index = GraphIndex::build(&dummy_snapshot);
+
+        // 1. Publish baseline revision 1
+        let rev1 = state
+            .publish_network(dummy_snapshot.clone(), dummy_index.clone(), vec![], None)
+            .expect("baseline publication should succeed");
+        assert_eq!(rev1, 1);
+        assert_eq!(state.get_current_revision(), 1);
+        let published_before = state.get_published().expect("expected published state");
+        assert_eq!(published_before.revision, 1);
+
+        // 2. Transition state to shutting down
+        state.set_shutting_down();
+        assert!(
+            state.is_shutting_down(),
+            "state.is_shutting_down() must return true after set_shutting_down()"
+        );
+
+        // 3. In-flight reanalysis attempting to publish during shutdown must be discarded
+        let publish_result = state.publish_network(
+            dummy_snapshot,
+            dummy_index,
+            vec!["file_modified_during_shutdown.ts".into()],
+            None,
+        );
+
+        assert!(
+            publish_result.is_err(),
+            "publish_network during shutdown must return an Err"
+        );
+        assert_eq!(
+            publish_result.unwrap_err(),
+            "Server is shutting down; reanalysis publication discarded"
+        );
+
+        // 4. Verify revision counter was NOT incremented and published state was NOT modified
+        assert_eq!(
+            state.get_current_revision(),
+            1,
+            "Revision counter must not increment after failed shutdown publish"
+        );
+        let published_after = state
+            .get_published()
+            .expect("published state must still exist");
+        assert_eq!(
+            published_after.revision, 1,
+            "Published state revision must remain untouched at 1"
+        );
+    }
 }

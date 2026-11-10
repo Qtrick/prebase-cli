@@ -26,19 +26,49 @@ import urllib.parse
 import urllib.error
 import subprocess
 import tempfile
+import socket
+import re
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
-PORT = 19992
+DEFAULT_PORT = 19992
+PORT = DEFAULT_PORT
+
+FAILURE_ARTIFACT_DIR = os.environ.get(
+    "PREBASE_FAILURE_ARTIFACT_DIR", os.path.join(ROOT_DIR, "test-results", "failure-artifacts")
+)
+os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
+
+def find_available_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Attempts to bind to preferred port; falls back to an ephemeral port if occupied."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, preferred))
+            return preferred
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
+
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
 
 def log(msg):
-    print(f"\x1b[36m[E2E]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[E2E]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def error(msg):
-    print(f"\x1b[31m[ERROR]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[ERROR]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {})
@@ -55,6 +85,9 @@ def http_post_json(url, data, headers=None):
         return resp.status, resp.read().decode("utf-8"), resp.headers
 
 def main():
+    global PORT
+    PORT = find_available_port(DEFAULT_PORT)
+
     print("=" * 65)
     print("PreBase CLI End-to-End Verification Pipeline")
     print("=" * 65)
@@ -166,7 +199,7 @@ def main():
                 time.sleep(0.1)
 
             assert bootstrap_token, "Could not extract bootstrap token from log"
-            success(f"Bootstrap token acquired: {bootstrap_token[:8]}...")
+            success("Bootstrap token acquired.")
 
             # 7. Test single-use bootstrap exchange (with explicit expose_token for CLI test)
             status, body, headers = http_post_json(
@@ -284,9 +317,18 @@ def main():
                         {"name": "prebase_session", "value": session_token, "domain": "127.0.0.1", "path": "/"}
                     ])
                     page = context.new_page()
-                    page.goto(f"{base_url}/?view=network", wait_until="networkidle")
-                    page.wait_for_selector("#root", timeout=10000)
-                    page.wait_for_selector(".nav-item:has-text('Network Graph')", timeout=10000)
+                    try:
+                        page.goto(f"{base_url}/?view=network", wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_selector("#root", timeout=10000)
+                        page.wait_for_selector(".nav-item:has-text('Network Graph')", timeout=10000)
+                    except Exception as e:
+                        try:
+                            fail_shot = os.path.join(FAILURE_ARTIFACT_DIR, "e2e_full_nav_failure.png")
+                            page.screenshot(path=fail_shot)
+                            log(f"Saved failure screenshot to {fail_shot}")
+                        except Exception:
+                            pass
+                        raise e
                     dom_output = page.content()
                     assert "root" in dom_output, "DOM output missing #root element"
                     assert "PreBase" in dom_output, "DOM output missing PreBase title"

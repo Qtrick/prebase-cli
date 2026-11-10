@@ -24,6 +24,8 @@ import time
 import json
 import signal
 import shutil
+import socket
+import re
 import tempfile
 import subprocess
 import urllib.request
@@ -36,18 +38,47 @@ PORT = 19998
 SCREENSHOT_DIR = os.environ.get(
     "PREBASE_SCREENSHOT_DIR", os.path.join(ROOT_DIR, "docs", "screenshots")
 )
+FAILURE_ARTIFACT_DIR = os.environ.get(
+    "PREBASE_FAILURE_ARTIFACT_DIR", os.path.join(ROOT_DIR, "test-results", "failure-artifacts")
+)
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
+
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    # Mask bootstrap query parameter: bootstrap=...
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    # Mask port-specific and general session cookies
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    # Mask x-prebase-session and Bearer headers
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
 
 def log(msg):
-    print(f"\x1b[36m[ORB VERIFY]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[ORB VERIFY]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def fail(msg):
-    print(f"\x1b[31m[FAIL]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[FAIL]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
     sys.exit(1)
+
+def find_available_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Attempts to bind to preferred port; falls back to an ephemeral port if occupied."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, preferred))
+            return preferred
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
 
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {})
@@ -116,6 +147,9 @@ def main():
     print("PreBase CLI — 3D Network Orb Real Browser Verification Suite")
     print("=" * 75)
 
+    global PORT
+    PORT = find_available_port(19998)
+
     # 1. Verify executable exists
     if not os.path.exists(BIN):
         fail(f"Executable not found at {BIN}. Run 'cargo build --release --bin prebase' first.")
@@ -174,7 +208,7 @@ def main():
             time.sleep(0.1)
 
         if not startup_url or not bootstrap_token:
-            fail(f"Could not parse startup URL or bootstrap token from log:\n{open(log_path).read()}")
+            fail("Could not parse startup URL or bootstrap token from server log.")
 
         log(f"Extracted bootstrap URL: {startup_url}")
         success("Bootstrap credentials verified.")
@@ -187,12 +221,28 @@ def main():
             page = context.new_page()
 
             log(f"Navigating to {startup_url}...")
-            page.goto(startup_url, wait_until="networkidle")
+            try:
+                page.goto(startup_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception as e:
+                sanitized_err = mask_credentials(str(e))
+                try:
+                    page.screenshot(path=os.path.join(FAILURE_ARTIFACT_DIR, "orb_nav_failure.png"))
+                except Exception:
+                    pass
+                with open(os.path.join(FAILURE_ARTIFACT_DIR, "orb_failure_summary.txt"), "w") as f:
+                    f.write(f"Navigation failed: {sanitized_err}\n")
+                fail(f"Browser navigation failed: {sanitized_err}")
 
-            # Wait for canvas and index ready
-            page.wait_for_selector(".network-canvas", timeout=10000)
-            page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=10000)
-            success("Canvas loaded and repository index is Ready.")
+            # Wait for canvas, repository index ready, and projected 3D nodes
+            # Note: We do NOT use wait_until='networkidle' because the Server-Sent Events (SSE)
+            # stream /api/v1/events is long-lived, which intentionally keeps network activity open.
+            page.wait_for_selector(".network-canvas", timeout=15000)
+            page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)
+            page.wait_for_function(
+                "() => window.__prebaseNetworkDebug && window.__prebaseNetworkDebug.getProjectedNodes().length >= 20",
+                timeout=15000,
+            )
+            success("Canvas loaded and repository index is Ready (with active SSE connection).")
 
             # Let layout and initial projection settle
             time.sleep(1.0)

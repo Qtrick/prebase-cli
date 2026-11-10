@@ -1,4 +1,5 @@
 use axum::{
+    http::StatusCode,
     middleware,
     routing::{get, post},
     Router,
@@ -44,7 +45,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/commits/*hash", get(handle_commit_details))
         .route("/file-history", get(handle_file_history))
         .route("/git/status", get(handle_git_status))
-        .route("/events", get(handle_events));
+        .route("/events", get(handle_events))
+        .fallback(|| async { (StatusCode::NOT_FOUND, "Endpoint not found") });
 
     Router::new()
         .nest("/api/v1", api_router)
@@ -87,12 +89,14 @@ pub async fn start_server(
 
     let app = create_router(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let state_shutdown = state.clone();
 
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)
-            .with_graceful_shutdown(async {
+            .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
                 info!("Server received shutdown signal");
+                state_shutdown.set_shutting_down();
             })
             .await
             .unwrap_or_else(|e| tracing::error!("Server error: {e}"));

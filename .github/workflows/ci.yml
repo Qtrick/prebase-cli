@@ -111,13 +111,13 @@ jobs:
       - name: Run Performance Benchmarks
         run: ./scripts/benchmark.sh
 
-      # Screenshots are UI evidence only and never contain session tokens.
-      - name: Upload browser evidence on failure
+      # Upload browser failure artifacts (sanitized failure screenshots and diagnostics)
+      - name: Upload browser failure artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-screenshots-${{ matrix.os }}
-          path: docs/screenshots/
+          name: browser-failure-artifacts-${{ matrix.os }}
+          path: test-results/failure-artifacts/
           if-no-files-found: ignore
           retention-days: 7
 

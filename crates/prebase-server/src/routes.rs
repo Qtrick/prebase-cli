@@ -231,6 +231,41 @@ pub async fn handle_inspect_edge(
     }
 }
 
+/// Validates that a path is a safe relative path within the repository root.
+/// Specifically:
+/// - Rejects empty paths.
+/// - Rejects absolute paths (starting with `/` or Windows drive prefixes).
+/// - Rejects path traversal (`..` components).
+/// - Normalizes separators (`\` to `/`).
+/// - Permits legitimate filenames containing adjacent periods, e.g. `src/component..ts` or `src/version..legacy.ts`.
+pub fn is_safe_relative_path(path_str: &str) -> bool {
+    let clean = path_str.trim();
+    if clean.is_empty() || clean.starts_with('/') || clean.starts_with('\\') || clean.contains('\0')
+    {
+        return false;
+    }
+    // Check for Windows drive prefix uniformly across all operating systems (e.g. "C:", "d:/", etc.)
+    if clean.len() >= 2 && clean.as_bytes()[0].is_ascii_alphabetic() && clean.as_bytes()[1] == b':'
+    {
+        return false;
+    }
+    // Normalize backslashes to forward slashes for cross-platform component parsing
+    let normalized = clean.replace('\\', "/");
+    let path = std::path::Path::new(&normalized);
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
 #[derive(Serialize)]
 pub struct SourceContentResponse {
     pub path: String,
@@ -241,13 +276,14 @@ pub async fn handle_get_source(
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> Result<Json<SourceContentResponse>, (StatusCode, &'static str)> {
-    // Filesystem security check: prevent path traversal!
-    if file_path.contains("..") || file_path.starts_with('/') || file_path.starts_with('\\') {
+    let clean_path = file_path.trim();
+    // Filesystem security check: component-aware validation prevents path traversal!
+    if !is_safe_relative_path(clean_path) {
         return Err((StatusCode::BAD_REQUEST, "Invalid path"));
     }
 
-    if RepositoryScanner::is_excluded_relative_path(&file_path) {
-        warn!("Attempted to read excluded/secret file: {file_path}");
+    if RepositoryScanner::is_excluded_relative_path(clean_path) {
+        warn!("Attempted to read excluded/secret file: {clean_path}");
         return Err((
             StatusCode::FORBIDDEN,
             "Access to file is excluded for security",
@@ -269,16 +305,16 @@ pub async fn handle_get_source(
         .snapshot
         .nodes
         .iter()
-        .any(|n| n.id == file_path || n.relative_path == file_path);
+        .any(|n| n.id == clean_path || n.relative_path == clean_path);
     if !is_indexed {
-        warn!("Attempted to read non-indexed file: {file_path}");
+        warn!("Attempted to read non-indexed file: {clean_path}");
         return Err((
             StatusCode::FORBIDDEN,
             "Requested file is not part of indexed repository",
         ));
     }
 
-    let target = state.root_path.join(&file_path);
+    let target = state.root_path.join(clean_path);
     let canonical = match target.canonicalize() {
         Ok(p) => p,
         Err(_) => return Err((StatusCode::NOT_FOUND, "File not found")),
@@ -386,7 +422,9 @@ pub async fn handle_file_history(
     Query(query): Query<FileHistoryQuery>,
 ) -> Result<Json<FileHistoryResult>, (StatusCode, String)> {
     let clean_path = query.path.trim_start_matches('/').trim_start_matches('\\');
-    if clean_path.contains("..") || RepositoryScanner::is_excluded_relative_path(clean_path) {
+    if !is_safe_relative_path(clean_path)
+        || RepositoryScanner::is_excluded_relative_path(clean_path)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             "Access to file history is excluded for security".into(),

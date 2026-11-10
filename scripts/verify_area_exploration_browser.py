@@ -26,28 +26,56 @@ import signal
 import shutil
 import tempfile
 import subprocess
+import socket
+import re
 import urllib.request
 import urllib.parse
 from playwright.sync_api import sync_playwright
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
-PORT = 19999
+DEFAULT_PORT = 19999
 SCREENSHOT_DIR = os.environ.get(
     "PREBASE_SCREENSHOT_DIR", os.path.join(ROOT_DIR, "docs", "screenshots")
 )
+FAILURE_ARTIFACT_DIR = os.environ.get(
+    "PREBASE_FAILURE_ARTIFACT_DIR", os.path.join(ROOT_DIR, "test-results", "failure-artifacts")
+)
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
+
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
 
 def log(msg):
-    print(f"\x1b[36m[AREA VERIFY]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[AREA VERIFY]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def fail(msg):
-    print(f"\x1b[31m[FAIL]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[FAIL]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
     sys.exit(1)
+
+def find_available_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Attempts to bind to preferred port; falls back to an ephemeral port if occupied."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, preferred))
+            return preferred
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
 
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {})
@@ -118,17 +146,18 @@ def run_verification():
     try:
         setup_deterministic_multi_area_repo(temp_dir)
 
-        log(f"Starting PreBase release server on port {PORT}...")
+        port = find_available_port(DEFAULT_PORT)
+        log(f"Starting PreBase release server on port {port}...")
         log_path = os.path.join(temp_dir, "prebase_server.log")
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
-            [BIN, "--port", str(PORT), "--no-open", "map", temp_dir],
+            [BIN, "--port", str(port), "--no-open", "map", temp_dir],
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True
         )
 
-        base_url = f"http://127.0.0.1:{PORT}"
+        base_url = f"http://127.0.0.1:{port}"
         server_healthy = False
         for _ in range(60):
             try:
@@ -145,7 +174,6 @@ def run_verification():
 
         # Extract bootstrap token and startup URL from log
         bootstrap_token = None
-        import re
         for _ in range(30):
             if os.path.exists(log_path):
                 with open(log_path, "r") as f:
@@ -162,7 +190,7 @@ def run_verification():
 
         if not bootstrap_token:
             fail("Could not extract bootstrap token from server log.")
-        success(f"Bootstrap token extracted: {bootstrap_token[:8]}...")
+        success("Bootstrap token extracted.")
 
         # Connect with Playwright
         with sync_playwright() as p:
@@ -170,11 +198,22 @@ def run_verification():
             context = browser.new_context(viewport={"width": 1440, "height": 900})
             page = context.new_page()
 
-            app_url = f"http://127.0.0.1:{PORT}/?bootstrap={bootstrap_token}&view=3d"
+            app_url = f"http://127.0.0.1:{port}/?bootstrap={bootstrap_token}&view=3d"
             log(f"Navigating to {app_url}...")
-            page.goto(app_url)
-            page.wait_for_selector(".inspector-panel", timeout=10000)
-            page.wait_for_selector(".beginner-overview-card", timeout=10000)
+            try:
+                page.goto(app_url, wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_selector(".inspector-panel", timeout=10000)
+                page.wait_for_selector(".beginner-overview-card", timeout=10000)
+            except Exception as e:
+                masked_err = mask_credentials(str(e))
+                log(f"Navigation or initial selector wait failed: {masked_err}")
+                try:
+                    fail_shot = os.path.join(FAILURE_ARTIFACT_DIR, "area_nav_failure.png")
+                    page.screenshot(path=fail_shot)
+                    log(f"Saved failure screenshot to {fail_shot}")
+                except Exception:
+                    pass
+                fail(f"Playwright navigation failed: {masked_err}")
 
             # Screenshot 14: Initial Repository Overview
             page.screenshot(path=os.path.join(SCREENSHOT_DIR, "14_area_explorer_overview.png"))

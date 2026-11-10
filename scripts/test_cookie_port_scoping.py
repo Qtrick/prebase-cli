@@ -614,7 +614,8 @@ def run_cookie_port_scoping_test() -> bool:
     except Exception as exc:
         log_fail(f"Test failed with exception: {sanitize(str(exc))}")
         import traceback
-        traceback.print_exc()
+        raw_tb = traceback.format_exc()
+        sys.stderr.write(sanitize(raw_tb) + "\n")
         return False
 
     finally:
