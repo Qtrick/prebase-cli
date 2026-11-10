@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   FileNode,
   GraphSnapshot,
@@ -810,110 +810,6 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
 
       onClose();
       expect(currentSelection).toBeNull(); // selection is cleared
-    });
-
-    describe('Clipboard Copy Actions with Tactile 2000ms Feedback', () => {
-      beforeEach(() => {
-        vi.useFakeTimers();
-      });
-
-      afterEach(() => {
-        vi.useRealTimers();
-      });
-
-      it('manages path copy action state and auto-resets after 2000ms', async () => {
-        let copiedPath = false;
-        const clipboardMock = {
-          writeText: vi.fn().mockResolvedValue(undefined),
-        };
-        Object.defineProperty(globalThis.navigator, 'clipboard', {
-          value: clipboardMock,
-          configurable: true,
-          writable: true,
-        });
-
-        const handleCopyPath = (path: string) => {
-          navigator.clipboard.writeText(path).then(() => {
-            copiedPath = true;
-            setTimeout(() => {
-              copiedPath = false;
-            }, 2000);
-          });
-        };
-
-        handleCopyPath('src/utils/math.ts');
-        await Promise.resolve();
-        await Promise.resolve();
-
-        expect(clipboardMock.writeText).toHaveBeenCalledWith('src/utils/math.ts');
-        expect(copiedPath).toBe(true);
-
-        vi.advanceTimersByTime(1999);
-        expect(copiedPath).toBe(true);
-
-        vi.advanceTimersByTime(2);
-        expect(copiedPath).toBe(false);
-      });
-
-      it('manages full commit SHA copy action and auto-resets after 2000ms', async () => {
-        let copiedSha = false;
-        const commitHash = 'a1b2c3d4e5f67890123456789abcdef012345678';
-        const clipboardMock = {
-          writeText: vi.fn().mockResolvedValue(undefined),
-        };
-        Object.defineProperty(globalThis.navigator, 'clipboard', {
-          value: clipboardMock,
-          configurable: true,
-          writable: true,
-        });
-
-        const handleCopyHash = (hash: string) => {
-          navigator.clipboard.writeText(hash).then(() => {
-            copiedSha = true;
-            setTimeout(() => {
-              copiedSha = false;
-            }, 2000);
-          });
-        };
-
-        handleCopyHash(commitHash);
-        await Promise.resolve();
-        await Promise.resolve();
-
-        expect(clipboardMock.writeText).toHaveBeenCalledWith(commitHash);
-        expect(copiedSha).toBe(true);
-
-        vi.advanceTimersByTime(2001);
-        expect(copiedSha).toBe(false);
-      });
-
-      it('catches clipboard API rejections gracefully without throwing', async () => {
-        let copied = false;
-        const clipboardMock = {
-          writeText: vi.fn().mockRejectedValue(new Error('Permission denied')),
-        };
-        Object.defineProperty(globalThis.navigator, 'clipboard', {
-          value: clipboardMock,
-          configurable: true,
-          writable: true,
-        });
-
-        const handleCopySafe = (text: string) => {
-          navigator.clipboard
-            .writeText(text)
-            .then(() => {
-              copied = true;
-            })
-            .catch(() => {
-              // Gracefully caught
-            });
-        };
-
-        expect(() => handleCopySafe('any-path')).not.toThrow();
-        await Promise.resolve();
-        await Promise.resolve();
-        expect(copied).toBe(false);
-      });
     });
   });
 

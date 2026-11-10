@@ -109,6 +109,42 @@ mod tests {
         let wrong_port_resp = app.clone().oneshot(wrong_port_req).await.unwrap();
         assert_eq!(wrong_port_resp.status(), StatusCode::BAD_REQUEST);
 
+        // 5b. Cross-site API request with Sec-Fetch-Site: cross-site must be rejected with 403
+        let cross_site_api_req = Request::builder()
+            .uri("/api/v1/repository")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "secret-token-xyz")
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "cors")
+            .body(Body::empty())
+            .unwrap();
+        let cross_site_api_resp = app.clone().oneshot(cross_site_api_req).await.unwrap();
+        assert_eq!(cross_site_api_resp.status(), StatusCode::FORBIDDEN);
+
+        // 5c. Cross-site subresource (script/image from evil.com) must be rejected with 403
+        let cross_site_sub_req = Request::builder()
+            .uri("/assets/index.js")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "no-cors")
+            .header("sec-fetch-dest", "script")
+            .body(Body::empty())
+            .unwrap();
+        let cross_site_sub_resp = app.clone().oneshot(cross_site_sub_req).await.unwrap();
+        assert_eq!(cross_site_sub_resp.status(), StatusCode::FORBIDDEN);
+
+        // 5d. Legitimate top-level browser navigation from external links (Slack, GitHub, email) must be permitted
+        let cross_site_nav_req = Request::builder()
+            .uri("/")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .body(Body::empty())
+            .unwrap();
+        let cross_site_nav_resp = app.clone().oneshot(cross_site_nav_req).await.unwrap();
+        assert_ne!(cross_site_nav_resp.status(), StatusCode::FORBIDDEN);
+
         // 6. Bootstrap token exchange: first attempt succeeds, sets port-isolated cookie, omits session_token by default
         let exchange_req = Request::builder()
             .method("POST")

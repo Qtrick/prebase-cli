@@ -273,12 +273,12 @@ export const App: React.FC = () => {
           if (initRes.isAuthError) {
             setError(
               initRes.error ||
-                'Authentication failed: bootstrap token invalid or already consumed. Please check your terminal and use the URL printed under "Server running at".'
+              'Authentication failed: bootstrap token invalid or already consumed. Please check your terminal and use the URL printed under "Server running at".'
             );
           } else {
             setError(
               initRes.error ||
-                'Could not reach local server. Please verify PreBase is running in your terminal.'
+              'Could not reach local server. Please verify PreBase is running in your terminal.'
             );
           }
           return;
@@ -914,55 +914,55 @@ export const App: React.FC = () => {
               </div>
             ) : (
               <>
-              <div className="graph-mode-stage" style={{ position: 'relative', width: '100%', height: '100%' }}>
-                <div
-                  className={`canvas-view-layer ${networkViewMode === '3d' ? 'active' : 'inactive'}`}
-                  aria-hidden={networkViewMode !== '3d'}
-                >
-                  <NetworkCanvas
-                    snapshot={snapshot}
-                    selectedNodeId={selectedNode?.id || null}
-                    selectedEdgeId={selectedEdge?.id || null}
-                    selectedAreaId={selectedAreaId}
-                    onSelectNode={handleSelectNode}
-                    onSelectEdge={handleSelectEdge}
-                    revealRequest={revealRequest}
-                    fitViewTrigger={fitViewCounter}
-                    resetViewTrigger={resetViewCounter}
-                    keepGraphCentered={keepGraphCentered}
-                    onToggleCenterLock={() => setKeepGraphCentered((prev) => !prev)}
-                    isVisible={networkViewMode === '3d'}
-                    insets={networkInsets}
-                    onAnnounce={setAnnouncement}
-                    theme={theme}
-                  />
+                <div className="graph-mode-stage" style={{ position: 'relative', width: '100%', height: '100%' }}>
+                  <div
+                    className={`canvas-view-layer ${networkViewMode === '3d' ? 'active' : 'inactive'}`}
+                    aria-hidden={networkViewMode !== '3d'}
+                  >
+                    <NetworkCanvas
+                      snapshot={snapshot}
+                      selectedNodeId={selectedNode?.id || null}
+                      selectedEdgeId={selectedEdge?.id || null}
+                      selectedAreaId={selectedAreaId}
+                      onSelectNode={handleSelectNode}
+                      onSelectEdge={handleSelectEdge}
+                      revealRequest={revealRequest}
+                      fitViewTrigger={fitViewCounter}
+                      resetViewTrigger={resetViewCounter}
+                      keepGraphCentered={keepGraphCentered}
+                      onToggleCenterLock={() => setKeepGraphCentered((prev) => !prev)}
+                      isVisible={networkViewMode === '3d'}
+                      insets={networkInsets}
+                      onAnnounce={setAnnouncement}
+                      theme={theme}
+                    />
+                  </div>
+                  <div
+                    className={`canvas-view-layer ${networkViewMode === '2d' ? 'active' : 'inactive'}`}
+                    aria-hidden={networkViewMode !== '2d'}
+                  >
+                    <RelationshipCanvas
+                      snapshot={snapshot}
+                      focusNodeId={focusNodeId}
+                      selectedNodeId={selectedNode?.id || null}
+                      selectedEdgeId={selectedEdge?.id || null}
+                      onSelectNode={handleSelectNode}
+                      onSelectEdge={handleSelectEdge}
+                      onRefocusNode={handleRefocusNode2D}
+                      onBackFocus={handleBackFocus2D}
+                      canGoBack={focusHistory.length > 0}
+                      backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
+                      fitViewTrigger={fitViewCounter}
+                      resetViewTrigger={resetViewCounter}
+                      initialViewport={independent2DViewport}
+                      onViewportChange={setIndependent2DViewport}
+                      missingFocusPath={missingFocusPath}
+                      theme={theme}
+                      onAnnounce={setAnnouncement}
+                      isVisible={networkViewMode === '2d'}
+                    />
+                  </div>
                 </div>
-                <div
-                  className={`canvas-view-layer ${networkViewMode === '2d' ? 'active' : 'inactive'}`}
-                  aria-hidden={networkViewMode !== '2d'}
-                >
-                  <RelationshipCanvas
-                    snapshot={snapshot}
-                    focusNodeId={focusNodeId}
-                    selectedNodeId={selectedNode?.id || null}
-                    selectedEdgeId={selectedEdge?.id || null}
-                    onSelectNode={handleSelectNode}
-                    onSelectEdge={handleSelectEdge}
-                    onRefocusNode={handleRefocusNode2D}
-                    onBackFocus={handleBackFocus2D}
-                    canGoBack={focusHistory.length > 0}
-                    backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
-                    fitViewTrigger={fitViewCounter}
-                    resetViewTrigger={resetViewCounter}
-                    initialViewport={independent2DViewport}
-                    onViewportChange={setIndependent2DViewport}
-                    missingFocusPath={missingFocusPath}
-                    theme={theme}
-                    onAnnounce={setAnnouncement}
-                    isVisible={networkViewMode === '2d'}
-                  />
-                </div>
-              </div>
               </>
             )}
           </div>

@@ -114,23 +114,37 @@ impl RepositoryScanner {
         let normalized = rel_path.replace('\\', "/");
         let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
         for part in &parts {
-            match *part {
+            // Compare case-insensitively: on macOS/Windows (case-insensitive by
+            // default) "NODE_MODULES" and "node_modules" are the same directory,
+            // so an exact-case check would walk dependency trees and dot-dirs.
+            match part.to_ascii_lowercase().as_str() {
                 ".git" | "node_modules" | "dist" | "build" | ".build" | ".next" | ".nuxt"
                 | "coverage" | "target" | ".reference" | ".cache" | ".turbo" | ".vscode"
-                | ".idea" | ".cursor" | ".agents" | ".codex" => return true,
+                | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws" | ".gnupg" => {
+                    return true
+                }
                 _ => {}
             }
         }
 
         let filename = parts.last().copied().unwrap_or(rel_path);
-        // Exclude secret files
-        if filename.starts_with(".env")
-            || filename.ends_with(".pem")
-            || filename.ends_with(".key")
-            || filename.ends_with(".p12")
-            || filename.ends_with(".pfx")
-            || filename.starts_with("id_rsa")
-            || filename == "credentials.json"
+        // Secret names are also matched case-insensitively for the same reason:
+        // `.ENV` on a case-insensitive filesystem is the same file as `.env`.
+        let filename_lower = filename.to_ascii_lowercase();
+        if filename_lower.starts_with(".env")
+            || filename_lower.ends_with(".pem")
+            || filename_lower.ends_with(".key")
+            || filename_lower.ends_with(".p12")
+            || filename_lower.ends_with(".pfx")
+            || filename_lower.starts_with("id_rsa")
+            || filename_lower.starts_with("id_dsa")
+            || filename_lower.starts_with("id_ecdsa")
+            || filename_lower.starts_with("id_ed25519")
+            || filename_lower == "identity"
+            || filename_lower == "identity.pub"
+            || filename_lower == ".netrc"
+            || filename_lower == "credentials"
+            || filename_lower == "credentials.json"
         {
             return true;
         }
@@ -182,9 +196,7 @@ impl RepositoryScanner {
                 continue;
             }
 
-            let effective_size: u64;
-
-            if symlink_meta.file_type().is_symlink() {
+            let effective_size: u64 = if symlink_meta.file_type().is_symlink() {
                 // Symlink security verification:
                 // 1. Resolve canonical target
                 let canonical_target = match path.canonicalize() {
@@ -231,15 +243,15 @@ impl RepositoryScanner {
                     }
                 }
 
-                effective_size = target_meta.len();
+                target_meta.len()
             } else if symlink_meta.is_file() {
-                effective_size = symlink_meta.len();
+                symlink_meta.len()
             } else {
                 // Non-regular file (FIFO, socket, block/char device)
                 warn!("Skipping non-regular filesystem object: {rel}");
                 excluded_count += 1;
                 continue;
-            }
+            };
 
             if effective_size > self.config.max_file_size_bytes {
                 warn!("File {rel} exceeds size limit ({effective_size} bytes), skipping");
@@ -352,6 +364,31 @@ mod tests {
         assert!(RepositoryScanner::is_excluded_relative_path(
             "/node_modules/pkg/"
         ));
+    }
+
+    #[test]
+    fn test_scan_enforces_max_file_size_for_regular_files() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("small.ts"), "export const a = 1;").unwrap();
+        fs::write(root.join("big.ts"), "x".repeat(200)).unwrap();
+
+        let scanner = RepositoryScanner::new(
+            root,
+            ScannerConfig {
+                max_file_size_bytes: 100,
+            },
+        )
+        .unwrap();
+        let (discovered, excluded) = scanner.scan();
+        let paths: Vec<String> = discovered.into_iter().map(|f| f.relative_path).collect();
+
+        assert!(paths.contains(&"small.ts".to_string()));
+        assert!(!paths.contains(&"big.ts".to_string()));
+        assert!(excluded >= 1);
     }
 
     #[test]

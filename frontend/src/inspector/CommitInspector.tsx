@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { CommitDetails, CommitSummary, FileChange } from '../types/temporal';
 import { FileNode, GraphSnapshot } from '../types/graph';
 import { api } from '../transport/api';
+import { useCopyFeedback } from '../utils/clipboard';
 import {
   X,
   GitCommit,
@@ -36,7 +37,7 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   const [details, setDetails] = useState<CommitDetails | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyFeedback();
   const [notice, setNotice] = useState<string | null>(null);
 
   const requestTokenRef = useRef(0);
@@ -79,11 +80,8 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   }, [selectedCommit]);
 
   const handleCopyHash = () => {
-    if (!selectedCommit || !navigator?.clipboard) return;
-    navigator.clipboard.writeText(selectedCommit.hash).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    if (!selectedCommit) return;
+    void copy(selectedCommit.hash);
   };
 
   const handleFileClick = (file: FileChange) => {

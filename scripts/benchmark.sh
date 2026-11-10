@@ -10,7 +10,26 @@ if [ ! -f "$BIN" ]; then
 fi
 
 BENCH_DIR=$(mktemp -d -t prebase-bench-XXXXXX)
-trap 'rm -rf "$BENCH_DIR"' EXIT
+PREBASE_PID=""
+
+cleanup() {
+    if [ -n "${PREBASE_PID:-}" ] && kill -0 "$PREBASE_PID" 2>/dev/null; then
+        kill -15 "$PREBASE_PID" 2>/dev/null || true
+        for _ in $(seq 1 40); do
+            kill -0 "$PREBASE_PID" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -9 "$PREBASE_PID" 2>/dev/null || true
+        wait "$PREBASE_PID" 2>/dev/null || true
+    fi
+    rm -rf "$BENCH_DIR"
+}
+
+# Clean up on normal exit, failures, and interrupts alike. Without this a
+# SIGINT during benchmarking leaves an orphaned PreBase server holding a port.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "==> Running PreBase Automated Performance Benchmark (Real Verification)"
 echo "    Benchmark scratch directory: $BENCH_DIR"
@@ -29,7 +48,7 @@ run_benchmark() {
     echo "--------------------------------------------------------"
 
     # 1. Generate synthetic repository based on requested topology
-    git init -q "$REPO_DIR"
+    git init -q -b main "$REPO_DIR"
     git -C "$REPO_DIR" config user.email "bench@prebase.dev"
     git -C "$REPO_DIR" config user.name "Benchmarker"
 
@@ -113,6 +132,29 @@ EOF
             ;;
     esac
 
+    # Deterministic correctness expectations derived from what the generator
+    # actually wrote above, not from the tier label. sparse_areas truncates
+    # COUNT/3 per area and adds one root index.ts.
+    local EXPECTED_NODES EXPECTED_EDGES
+    case "$TOPOLOGY" in
+        dense_hub)
+            EXPECTED_NODES=$(( COUNT + 1 ))
+            EXPECTED_EDGES=$(( COUNT * 3 + 1 ))
+            ;;
+        sparse_areas)
+            EXPECTED_NODES=$(( (COUNT / 3) * 3 + 1 ))
+            EXPECTED_EDGES=3
+            ;;
+        deep_chain)
+            EXPECTED_NODES=$(( COUNT + 1 ))
+            EXPECTED_EDGES=$COUNT
+            ;;
+        *)
+            EXPECTED_NODES=$(( COUNT + 1 ))
+            EXPECTED_EDGES=$(( COUNT + 1 ))
+            ;;
+    esac
+
     git -C "$REPO_DIR" add .
     git -C "$REPO_DIR" commit -q -m "chore: initial commit with ${COUNT} files [${TOPOLOGY}]"
 
@@ -127,7 +169,7 @@ EOF
     local LAUNCH_START_MS
     LAUNCH_START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
     "$BIN" --port "$PORT" --no-open --no-watch "$REPO_DIR" > "$LOG_FILE" 2>&1 &
-    local PREBASE_PID=$!
+    PREBASE_PID=$!
 
     # 3. Poll /api/v1/health until server is listening
     local SERVER_READY=0
@@ -219,6 +261,20 @@ EOF
     NETWORK_JSON=$(curl -s "http://127.0.0.1:$PORT/api/v1/network" -H "x-prebase-session: $SESSION_TOKEN")
     local NODE_COUNT
     NODE_COUNT=$(echo "$NETWORK_JSON" | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("nodes", [])))' 2>/dev/null || echo 0)
+    local EDGE_COUNT
+    EDGE_COUNT=$(echo "$NETWORK_JSON" | python3 -c 'import sys, json; print(len(json.load(sys.stdin).get("edges", [])))' 2>/dev/null || echo 0)
+
+    # Correctness gate: a Ready status with the wrong graph is a failure.
+    if [ "$NODE_COUNT" -ne "$EXPECTED_NODES" ] || [ "$EDGE_COUNT" -ne "$EXPECTED_EDGES" ]; then
+        echo ""
+        echo "    FAILURE: benchmark correctness assertion failed."
+        echo "      Fixture:   ${COUNT} files [${TOPOLOGY}]"
+        echo "      Nodes:     expected ${EXPECTED_NODES}, actual ${NODE_COUNT}"
+        echo "      Edges:     expected ${EXPECTED_EDGES}, actual ${EDGE_COUNT}"
+        echo "      Log:"
+        cat "$LOG_FILE"
+        exit 1
+    fi
 
     # 8. Clean graceful shutdown via SIGTERM and record shutdown duration
     local SHUTDOWN_START_MS
@@ -229,7 +285,7 @@ EOF
     SHUTDOWN_END_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
     local SHUTDOWN_DURATION_MS=$(( SHUTDOWN_END_MS - SHUTDOWN_START_MS ))
 
-    echo "    Files Indexed:            ${NODE_COUNT} nodes"
+    echo "    Files Indexed:            ${NODE_COUNT} nodes / ${EDGE_COUNT} relationships (expected ${EXPECTED_NODES}/${EXPECTED_EDGES})"
     echo "    Startup Latency:          ${STARTUP_LATENCY_MS} ms (spawn to HTTP ready)"
     echo "    Backend AST Analysis:     ${ANALYSIS_DURATION_MS} ms (Tree-sitter AST & dependency resolution)"
     echo "    Total Wallclock Time:     ${TOTAL_WALLCLOCK_MS} ms (spawn to graph Ready)"

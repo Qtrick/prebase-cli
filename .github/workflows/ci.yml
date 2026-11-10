@@ -6,10 +6,24 @@ on:
   pull_request:
     branches: [ main ]
 
+# Read-only workflow token: CI never needs to write to the repository.
+permissions:
+  contents: read
+
+# Superseded pushes to the same ref should not keep burning runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
 jobs:
   test:
     name: Test & Lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -24,16 +38,28 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Setup Rust toolchain
+        # Pinned in rust-toolchain.toml; keep this in sync so `cargo` and
+        # `cargo clippy` resolve to exactly the same compiler locally and in CI.
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Record toolchain versions
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          git --version
+          python3 --version
+
       - name: Install Frontend Dependencies & Run Frontend Tests
         run: |
           npm --prefix frontend ci
           npm --prefix frontend test
           npm --prefix frontend run build
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache Cargo Dependencies
         uses: actions/cache@v4
@@ -52,10 +78,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy Lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Workspace Tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --locked --verbose
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -64,11 +90,11 @@ jobs:
 
       - name: Install Python Dependencies & Playwright
         run: |
-          pip install playwright
+          pip install playwright==1.49.1
           playwright install --with-deps chromium
 
       - name: Build PreBase Binary
-        run: cargo build --release --bin prebase
+        run: cargo build --release --locked --bin prebase
 
       - name: Run CLI Workflow & Lifecycle Verification
         run: python3 scripts/verify_cli_workflows.py
@@ -85,3 +111,15 @@ jobs:
       - name: Run Performance Benchmarks
         run: ./scripts/benchmark.sh
 
+      # Screenshots are UI evidence only and never contain session tokens.
+      - name: Upload browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-screenshots-${{ matrix.os }}
+          path: docs/screenshots/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Raw logs can contain bootstrap/session tokens, so they are deliberately
+      # not uploaded. Use the failing step's GitHub log instead.

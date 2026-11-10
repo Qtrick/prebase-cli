@@ -36,6 +36,8 @@ impl GitEngine {
     fn run_git_cmd(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.root_path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .args(args)
             .env("LANG", "C")
             .env("LC_ALL", "C")

@@ -20,20 +20,27 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    fn test_git_cmd(path: &std::path::Path) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE");
+        cmd
+    }
+
     fn setup_test_git_repo() -> tempfile::TempDir {
         let dir = tempdir().expect("failed to create tempdir");
         let path = dir.path();
 
         let run = |args: &[&str]| {
-            let status = Command::new("git")
-                .current_dir(path)
+            let status = test_git_cmd(path)
                 .args(args)
                 .status()
                 .expect("failed to execute git");
             assert!(status.success(), "git {:?} failed", args);
         };
 
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["config", "user.name", "PreBase Test"]);
         run(&["config", "user.email", "test@prebase.dev"]);
 
@@ -46,6 +53,19 @@ mod tests {
             "-m",
             "feat: initial commit with file_a and file_b",
         ]);
+
+        // Deterministic fixture assertion: the caller's global init.defaultBranch
+        // must never decide which branch these tests operate on.
+        let head_branch = test_git_cmd(path)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("failed to read HEAD branch");
+        assert!(head_branch.status.success(), "git rev-parse failed");
+        assert_eq!(
+            String::from_utf8_lossy(&head_branch.stdout).trim(),
+            "main",
+            "test fixture must start on an explicit 'main' branch"
+        );
 
         // Commit 2: Modify file_a and add file_c
         fs::write(path.join("file_a.txt"), "hello world modified\n").unwrap();
@@ -96,11 +116,7 @@ mod tests {
 
         // 3. Staged rename with spaces
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .current_dir(path)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = test_git_cmd(path).args(args).output().unwrap();
             assert!(out.status.success());
         };
         run(&["mv", "file_a.txt", "renamed file with spaces.txt"]);
@@ -148,13 +164,11 @@ mod tests {
 
         // Add a new commit to HEAD while user is paginating!
         fs::write(dir.path().join("new_file.txt"), "new content").unwrap();
-        Command::new("git")
-            .current_dir(dir.path())
+        test_git_cmd(dir.path())
             .args(["add", "."])
             .status()
             .unwrap();
-        Command::new("git")
-            .current_dir(dir.path())
+        test_git_cmd(dir.path())
             .args(["commit", "-m", "feat: new commit during pagination"])
             .status()
             .unwrap();
@@ -234,15 +248,14 @@ mod tests {
         let dir = tempdir().expect("failed to create tempdir");
         let path = dir.path();
         let run = |args: &[&str]| {
-            let status = Command::new("git")
-                .current_dir(path)
+            let status = test_git_cmd(path)
                 .args(args)
                 .status()
                 .expect("failed to execute git");
             assert!(status.success(), "git {:?} failed", args);
         };
 
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["config", "user.name", "Merge Tester"]);
         run(&["config", "user.email", "merge@prebase.dev"]);
 
@@ -314,11 +327,7 @@ mod tests {
     #[test]
     fn test_empty_repository_handled_gracefully() {
         let dir = tempdir().unwrap();
-        Command::new("git")
-            .current_dir(dir.path())
-            .arg("init")
-            .status()
-            .unwrap();
+        test_git_cmd(dir.path()).arg("init").status().unwrap();
 
         let engine = GitEngine::new(dir.path().to_path_buf());
         assert!(engine.is_git_repository());
@@ -352,15 +361,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let run = |args: &[&str]| {
-            let status = Command::new("git")
-                .current_dir(path)
+            let status = test_git_cmd(path)
                 .args(args)
                 .status()
                 .expect("failed to execute git");
             assert!(status.success(), "git {:?} failed", args);
         };
 
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["config", "user.name", "DAG Test"]);
         run(&["config", "user.email", "dag@prebase.dev"]);
 
@@ -454,15 +462,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let run = |args: &[&str]| {
-            let status = Command::new("git")
-                .current_dir(path)
+            let status = test_git_cmd(path)
                 .args(args)
                 .status()
                 .expect("failed to execute git");
             assert!(status.success(), "git {:?} failed", args);
         };
 
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["config", "user.name", "Large Test"]);
         run(&["config", "user.email", "large@prebase.dev"]);
 
@@ -478,5 +485,188 @@ mod tests {
         let head = engine.get_status().unwrap().head_commit.unwrap();
         let details = engine.get_commit_details(&head).unwrap();
         assert_eq!(details.files.len(), 1500);
+    }
+
+    // Mutex ensuring tests mutating ambient process environment run serialized.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        saved_git_dir: Option<std::ffi::OsString>,
+        saved_git_work_tree: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(git_dir: Option<&std::path::Path>, git_work_tree: Option<&std::path::Path>) -> Self {
+            let saved_git_dir = std::env::var_os("GIT_DIR");
+            let saved_git_work_tree = std::env::var_os("GIT_WORK_TREE");
+
+            match git_dir {
+                Some(p) => unsafe { std::env::set_var("GIT_DIR", p) },
+                None => unsafe { std::env::remove_var("GIT_DIR") },
+            }
+            match git_work_tree {
+                Some(p) => unsafe { std::env::set_var("GIT_WORK_TREE", p) },
+                None => unsafe { std::env::remove_var("GIT_WORK_TREE") },
+            }
+
+            Self {
+                saved_git_dir,
+                saved_git_work_tree,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.saved_git_dir {
+                Some(v) => unsafe { std::env::set_var("GIT_DIR", v) },
+                None => unsafe { std::env::remove_var("GIT_DIR") },
+            }
+            match &self.saved_git_work_tree {
+                Some(v) => unsafe { std::env::set_var("GIT_WORK_TREE", v) },
+                None => unsafe { std::env::remove_var("GIT_WORK_TREE") },
+            }
+        }
+    }
+
+    #[test]
+    fn test_git_engine_scoped_despite_ambient_git_dir_and_work_tree() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        // 1. Setup primary repo (the intended target for GitEngine)
+        let primary_dir = tempdir().unwrap();
+        let primary_path = primary_dir.path();
+        let run_primary = |args: &[&str]| {
+            let status = test_git_cmd(primary_path)
+                .args(args)
+                .status()
+                .expect("failed to execute git");
+            assert!(status.success(), "primary git {:?} failed", args);
+        };
+        run_primary(&["init", "-b", "main"]);
+        run_primary(&["config", "user.name", "Primary User"]);
+        run_primary(&["config", "user.email", "primary@prebase.dev"]);
+        fs::write(primary_path.join("primary.txt"), "hello primary\n").unwrap();
+        run_primary(&["add", "primary.txt"]);
+        run_primary(&["commit", "-m", "feat: commit in primary repo"]);
+
+        let primary_head_output = test_git_cmd(primary_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let primary_head = String::from_utf8_lossy(&primary_head_output.stdout)
+            .trim()
+            .to_string();
+
+        // 2. Setup ambient repo (a completely separate repo that ambient env might point to)
+        let ambient_dir = tempdir().unwrap();
+        let ambient_path = ambient_dir.path();
+        let run_ambient = |args: &[&str]| {
+            let status = test_git_cmd(ambient_path)
+                .args(args)
+                .status()
+                .expect("failed to execute git");
+            assert!(status.success(), "ambient git {:?} failed", args);
+        };
+        run_ambient(&["init", "-b", "main"]);
+        run_ambient(&["config", "user.name", "Ambient User"]);
+        run_ambient(&["config", "user.email", "ambient@prebase.dev"]);
+        fs::write(ambient_path.join("ambient.txt"), "hello ambient\n").unwrap();
+        run_ambient(&["add", "ambient.txt"]);
+        run_ambient(&["commit", "-m", "feat: commit in ambient repo"]);
+
+        let ambient_head_output = test_git_cmd(ambient_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let ambient_head = String::from_utf8_lossy(&ambient_head_output.stdout)
+            .trim()
+            .to_string();
+
+        assert_ne!(primary_head, ambient_head);
+
+        // 3. Setup a plain non-git directory
+        let non_git_dir = tempdir().unwrap();
+
+        let engine = GitEngine::new(primary_path.to_path_buf());
+
+        // Case A: Ambient GIT_DIR and GIT_WORK_TREE point to ambient_repo
+        {
+            let _env_guard = EnvGuard::set(Some(&ambient_path.join(".git")), Some(ambient_path));
+
+            // GitEngine must be scoped to primary_path, NOT ambient_path
+            assert!(engine.is_git_repository());
+
+            let status = engine.get_status().expect("failed to get status");
+            assert!(status.is_git_repo);
+            assert_eq!(
+                status.head_commit.as_deref(),
+                Some(primary_head.as_str()),
+                "status.head_commit must reflect primary repo, not ambient repo"
+            );
+
+            // Verify dirty tracking isolation
+            fs::write(
+                primary_path.join("primary_uncommitted.txt"),
+                "dirty primary",
+            )
+            .unwrap();
+            fs::write(
+                ambient_path.join("ambient_uncommitted.txt"),
+                "dirty ambient",
+            )
+            .unwrap();
+
+            let dirty_status = engine.get_status().expect("failed to get dirty status");
+            assert!(
+                dirty_status
+                    .dirty_files
+                    .contains(&"primary_uncommitted.txt".to_string()),
+                "dirty files must include files in primary repo"
+            );
+            assert!(
+                !dirty_status
+                    .dirty_files
+                    .contains(&"ambient_uncommitted.txt".to_string()),
+                "dirty files must NOT include files from ambient repo"
+            );
+
+            // Verify history is scoped to primary repo
+            let history = engine.get_history(10, None).expect("failed to get history");
+            assert_eq!(history.commits.len(), 1);
+            assert_eq!(history.commits[0].hash, primary_head);
+            assert_eq!(history.commits[0].summary, "feat: commit in primary repo");
+
+            // Verify commit details scoped to primary repo
+            let details = engine
+                .get_commit_details(&primary_head)
+                .expect("failed to get commit details");
+            assert_eq!(details.hash, primary_head);
+            assert!(details.files.iter().any(|f| f.path == "primary.txt"));
+            assert!(!details.files.iter().any(|f| f.path == "ambient.txt"));
+
+            // Verify non-git directory is NOT considered a git repo even if ambient GIT_DIR exists
+            let non_git_engine = GitEngine::new(non_git_dir.path().to_path_buf());
+            assert!(
+                !non_git_engine.is_git_repository(),
+                "non-git directory must not be detected as git repository due to ambient GIT_DIR"
+            );
+            let non_git_status = non_git_engine.get_status().expect("status should succeed");
+            assert!(!non_git_status.is_git_repo);
+            assert_eq!(non_git_status.head_commit, None);
+        }
+
+        // Case B: Ambient GIT_DIR points to a broken / nonexistent path
+        {
+            let nonexistent = primary_path.join("nonexistent_git_dir_xyz");
+            let _env_guard = EnvGuard::set(Some(&nonexistent), Some(&nonexistent));
+
+            // Engine must still succeed and remain scoped to primary_path
+            assert!(engine.is_git_repository());
+            let status = engine
+                .get_status()
+                .expect("engine must ignore broken ambient GIT_DIR");
+            assert_eq!(status.head_commit.as_deref(), Some(primary_head.as_str()));
+        }
     }
 }

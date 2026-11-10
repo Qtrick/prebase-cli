@@ -7,6 +7,7 @@ import {
   getAreaIdForPath,
   AreaEdge,
 } from '../utils/repositoryAreas';
+import { useCopyFeedback } from '../utils/clipboard';
 import {
   X,
   ArrowRight,
@@ -110,13 +111,11 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
-  const [copiedPath, setCopiedPath] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
+  const { copied: copiedPath, copy: copyPath } = useCopyFeedback();
+  const { copied: copiedCode, copy: copyCode } = useCopyFeedback();
   const [focusedAreaEdge, setFocusedAreaEdge] = useState<AreaEdge | null>(null);
 
   const requestTokenRef = useRef(0);
-  const pathCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const codeCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear focused area edge when area changes or selection clears
   useEffect(() => {
@@ -124,35 +123,12 @@ export const Inspector: React.FC<InspectorProps> = ({
   }, [selectedAreaId]);
 
   const handleCopyPath = (path: string) => {
-    if (!navigator?.clipboard) return;
-    navigator.clipboard
-      .writeText(path)
-      .then(() => {
-        setCopiedPath(true);
-        if (pathCopyTimerRef.current) clearTimeout(pathCopyTimerRef.current);
-        pathCopyTimerRef.current = setTimeout(() => setCopiedPath(false), 2000);
-      })
-      .catch(() => {});
+    void copyPath(path);
   };
 
   const handleCopyCode = (code: string) => {
-    if (!navigator?.clipboard) return;
-    navigator.clipboard
-      .writeText(code)
-      .then(() => {
-        setCopiedCode(true);
-        if (codeCopyTimerRef.current) clearTimeout(codeCopyTimerRef.current);
-        codeCopyTimerRef.current = setTimeout(() => setCopiedCode(false), 2000);
-      })
-      .catch(() => {});
+    void copyCode(code);
   };
-
-  useEffect(() => {
-    return () => {
-      if (pathCopyTimerRef.current) clearTimeout(pathCopyTimerRef.current);
-      if (codeCopyTimerRef.current) clearTimeout(codeCopyTimerRef.current);
-    };
-  }, []);
 
   // Compute structured repository areas and beginner suggestions
   const repoStructure = useMemo(() => {

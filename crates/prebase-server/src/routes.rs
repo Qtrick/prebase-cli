@@ -285,18 +285,15 @@ pub async fn handle_get_source(
     };
 
     // Verify canonical path starts with canonical root path
-    let canonical_root = match state.root_path.canonicalize() {
-        Ok(r) => r,
-        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "Invalid root path")),
-    };
+    let canonical_root = &state.canonical_root;
 
-    if !canonical.starts_with(&canonical_root) {
+    if !canonical.starts_with(canonical_root) {
         warn!("Path traversal attempt blocked: {file_path}");
         return Err((StatusCode::FORBIDDEN, "Path escapes repository root"));
     }
 
     // Verify resolved canonical target is not an excluded sensitive file (prevents internal symlink leaks)
-    let canonical_rel = match canonical.strip_prefix(&canonical_root) {
+    let canonical_rel = match canonical.strip_prefix(canonical_root) {
         Ok(p) => p.to_string_lossy().replace('\\', "/"),
         Err(_) => return Err((StatusCode::FORBIDDEN, "Path escapes repository root")),
     };

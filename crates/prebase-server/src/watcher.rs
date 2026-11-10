@@ -1,5 +1,6 @@
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use prebase_core::model::WatcherHealth;
+use prebase_core::RepositoryScanner;
 use prebase_parser::RepositoryAnalyzer;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -88,13 +89,8 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                             full_rescan_needed = true;
                         }
 
-                        let files_to_report: Vec<String> = if full_rescan_needed {
-                            full_rescan_needed = false;
-                            changed_sources.clear();
-                            vec!["*".to_string()]
-                        } else {
-                            changed_sources.drain().collect()
-                        };
+                        let files_to_report =
+                            drain_pending_changes(&mut full_rescan_needed, &mut changed_sources);
 
                         info!(
                             "Reanalyzing repository following coalesced filesystem changes in {} file(s)...",
@@ -103,41 +99,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                         is_analyzing = true;
                         let generation = state.get_next_generation();
-                        let state_clone = state.clone();
-                        let root_clone = state.root_path.clone();
-                        let done_tx = completion_tx.clone();
-
-                        tokio::task::spawn_blocking(move || {
-                            let start = std::time::Instant::now();
-                            let analyzer = RepositoryAnalyzer::default();
-                            match analyzer.analyze_path(&root_clone) {
-                                Ok(result) => {
-                                    let duration = start.elapsed().as_millis() as u64;
-                                    match state_clone.publish_network(
-                                        result.snapshot,
-                                        result.index,
-                                        files_to_report,
-                                        Some(generation),
-                                    ) {
-                                        Ok(_rev) => {
-                                            // Only record analysis duration if this generation was accepted and published
-                                            state_clone.set_analysis_duration(duration);
-                                            if state_clone.get_watcher_health() == WatcherHealth::Degraded {
-                                                state_clone.set_watcher_health(WatcherHealth::Active);
-                                            }
-                                        }
-                                        Err(err) => {
-                                            debug!("Rejected stale reanalysis generation {generation}: {err}");
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Reanalysis failed on filesystem change: {err}");
-                                    state_clone.set_watcher_health(WatcherHealth::Degraded);
-                                }
-                            }
-                            let _ = done_tx.try_send(());
-                        });
+                        spawn_reanalysis(
+                            state.clone(),
+                            files_to_report,
+                            generation,
+                            completion_tx.clone(),
+                        );
                     }
                 }
                 msg_opt = rx.recv() => {
@@ -161,7 +128,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                                 }
 
                                 if is_supported_source_file(&path) {
-                                    changed_sources.insert(rel.to_string_lossy().to_string());
+                                    changed_sources.insert(rel.to_string_lossy().replace('\\', "/"));
                                     if is_analyzing {
                                         pending_after_analysis = true;
                                     }
@@ -187,13 +154,8 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                     }
 
                     if full_rescan_needed || !changed_sources.is_empty() {
-                        let files_to_report: Vec<String> = if full_rescan_needed {
-                            full_rescan_needed = false;
-                            changed_sources.clear();
-                            vec!["*".to_string()]
-                        } else {
-                            changed_sources.drain().collect()
-                        };
+                        let files_to_report =
+                            drain_pending_changes(&mut full_rescan_needed, &mut changed_sources);
 
                         info!(
                             "Reanalyzing repository following filesystem changes in {} file(s)...",
@@ -202,41 +164,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                         is_analyzing = true;
                         let generation = state.get_next_generation();
-                        let state_clone = state.clone();
-                        let root_clone = state.root_path.clone();
-                        let done_tx = completion_tx.clone();
-
-                        tokio::task::spawn_blocking(move || {
-                            let start = std::time::Instant::now();
-                            let analyzer = RepositoryAnalyzer::default();
-                            match analyzer.analyze_path(&root_clone) {
-                                Ok(result) => {
-                                    let duration = start.elapsed().as_millis() as u64;
-                                    match state_clone.publish_network(
-                                        result.snapshot,
-                                        result.index,
-                                        files_to_report,
-                                        Some(generation),
-                                    ) {
-                                        Ok(_rev) => {
-                                            // Only record analysis duration if this generation was accepted and published
-                                            state_clone.set_analysis_duration(duration);
-                                            if state_clone.get_watcher_health() == WatcherHealth::Degraded {
-                                                state_clone.set_watcher_health(WatcherHealth::Active);
-                                            }
-                                        }
-                                        Err(err) => {
-                                            debug!("Rejected stale reanalysis generation {generation}: {err}");
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Reanalysis failed on filesystem change: {err}");
-                                    state_clone.set_watcher_health(WatcherHealth::Degraded);
-                                }
-                            }
-                            let _ = done_tx.try_send(());
-                        });
+                        spawn_reanalysis(
+                            state.clone(),
+                            files_to_report,
+                            generation,
+                            completion_tx.clone(),
+                        );
                     }
                 }
             }
@@ -247,6 +180,62 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
         shutdown_tx,
         task_handle,
     })
+}
+
+/// Consume the coalesced change set into the file list reported to subscribers.
+/// A full rescan is reported as the wildcard entry.
+fn drain_pending_changes(
+    full_rescan_needed: &mut bool,
+    changed_sources: &mut HashSet<String>,
+) -> Vec<String> {
+    if *full_rescan_needed {
+        *full_rescan_needed = false;
+        changed_sources.clear();
+        vec!["*".to_string()]
+    } else {
+        changed_sources.drain().collect()
+    }
+}
+
+/// Start one blocking reanalysis. The completion signal flips `is_analyzing`
+/// so the coordinator can run exactly one analysis at a time.
+fn spawn_reanalysis(
+    state: Arc<AppState>,
+    files_to_report: Vec<String>,
+    generation: u64,
+    completion_tx: mpsc::Sender<()>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let analyzer = RepositoryAnalyzer::default();
+        match analyzer.analyze_path(&state.root_path) {
+            Ok(result) => {
+                let duration = start.elapsed().as_millis() as u64;
+                match state.publish_network(
+                    result.snapshot,
+                    result.index,
+                    files_to_report,
+                    Some(generation),
+                ) {
+                    Ok(_rev) => {
+                        // Only record duration when this generation was accepted and published.
+                        state.set_analysis_duration(duration);
+                        if state.get_watcher_health() == WatcherHealth::Degraded {
+                            state.set_watcher_health(WatcherHealth::Active);
+                        }
+                    }
+                    Err(err) => {
+                        debug!("Rejected stale reanalysis generation {generation}: {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Reanalysis failed on filesystem change: {err}");
+                state.set_watcher_health(WatcherHealth::Degraded);
+            }
+        }
+        let _ = completion_tx.try_send(());
+    });
 }
 
 fn is_git_ref_path(rel_path: &Path) -> bool {
@@ -265,16 +254,9 @@ fn is_git_ref_path(rel_path: &Path) -> bool {
 }
 
 fn should_ignore_path(rel_path: &Path) -> bool {
-    for comp in rel_path.components() {
-        if let std::path::Component::Normal(os_name) = comp {
-            let s = os_name.to_string_lossy();
-            match s.as_ref() {
-                "node_modules" | "target" | "dist" | "build" | ".build" | ".next" | ".nuxt"
-                | "coverage" | ".reference" | ".cache" | ".turbo" | ".vscode" | ".idea"
-                | ".cursor" | ".agents" | ".codex" | ".git" => return true,
-                _ => {}
-            }
-        }
+    let rel_str = rel_path.to_string_lossy();
+    if RepositoryScanner::is_excluded_relative_path(&rel_str) {
+        return true;
     }
 
     if let Some(file_name) = rel_path.file_name().and_then(|n| n.to_str()) {
@@ -302,6 +284,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_drain_pending_changes_coalesces_and_resets_state() {
+        let mut full_rescan = false;
+        let mut changed: HashSet<String> = ["src/a.ts".to_string(), "src/b.ts".to_string()]
+            .into_iter()
+            .collect();
+
+        let mut files = drain_pending_changes(&mut full_rescan, &mut changed);
+        files.sort();
+        assert_eq!(files, vec!["src/a.ts".to_string(), "src/b.ts".to_string()]);
+        assert!(changed.is_empty());
+        assert!(!full_rescan);
+
+        // A pending full rescan wins over individual paths and clears them.
+        let mut full_rescan = true;
+        let mut changed: HashSet<String> = ["src/a.ts".to_string()].into_iter().collect();
+        let files = drain_pending_changes(&mut full_rescan, &mut changed);
+        assert_eq!(files, vec!["*".to_string()]);
+        assert!(!full_rescan);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
     fn test_component_aware_filesystem_filtering() {
         // Files containing 'dist' or 'target' as substrings must NOT be ignored
         assert!(!should_ignore_path(Path::new("src/distribution.ts")));
@@ -319,6 +323,14 @@ mod tests {
         assert!(should_ignore_path(Path::new(".git/config")));
         assert!(should_ignore_path(Path::new("src/.DS_Store")));
         assert!(should_ignore_path(Path::new("src/temp.tmp")));
+
+        // Sensitive and case-insensitive folders match scanner boundaries
+        assert!(should_ignore_path(Path::new(".ssh/id_rsa")));
+        assert!(should_ignore_path(Path::new(".aws/credentials")));
+        assert!(should_ignore_path(Path::new(".gnupg/secring.gpg")));
+        assert!(should_ignore_path(Path::new("NODE_MODULES/package.json")));
+        assert!(should_ignore_path(Path::new(".env")));
+        assert!(should_ignore_path(Path::new("secrets.key")));
     }
 
     #[test]

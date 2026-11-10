@@ -44,6 +44,7 @@ pub struct AppState {
     pub bootstrap_token: RwLock<Option<String>>,
     pub allocated_port: u16,
     pub root_path: PathBuf,
+    pub canonical_root: PathBuf,
     pub repo_name: String,
     pub repo_id: String,
     pub status: RwLock<IndexingStatus>,
@@ -73,12 +74,16 @@ impl AppState {
         } else {
             WatcherHealth::Disabled
         };
+        let canonical_root = root_path
+            .canonicalize()
+            .unwrap_or_else(|_| root_path.clone());
 
         Self {
             session_token,
             bootstrap_token: RwLock::new(bootstrap_token),
             allocated_port,
             root_path,
+            canonical_root,
             repo_name,
             repo_id,
             status: RwLock::new(IndexingStatus::NotStarted),

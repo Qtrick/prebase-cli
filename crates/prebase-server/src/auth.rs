@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -127,6 +127,25 @@ pub async fn host_and_auth_middleware(
     let path = req.uri().path();
     let is_api_route = path.starts_with("/api/");
     let is_public_api = path == "/api/v1/health" || path == "/api/v1/auth/session";
+
+    // 3. Defense-in-depth Sec-Fetch-Site validation (mitigate browser cross-site ambient cookie requests)
+    if let Some(sec_site) = headers.get("sec-fetch-site").and_then(|s| s.to_str().ok()) {
+        if sec_site.eq_ignore_ascii_case("cross-site") {
+            let is_top_level_navigation = (req.method() == Method::GET
+                || req.method() == Method::HEAD)
+                && headers.get("sec-fetch-mode").and_then(|m| m.to_str().ok()) == Some("navigate")
+                && !is_api_route
+                && headers
+                    .get("sec-fetch-dest")
+                    .and_then(|d| d.to_str().ok())
+                    .is_none_or(|d| d == "document");
+
+            if !is_top_level_navigation {
+                warn!("Rejected cross-site request to {path} with Sec-Fetch-Site: {sec_site}");
+                return Err((StatusCode::FORBIDDEN, "Forbidden Cross-Site Request"));
+            }
+        }
+    }
 
     if is_api_route && !is_public_api {
         let mut authorized = false;

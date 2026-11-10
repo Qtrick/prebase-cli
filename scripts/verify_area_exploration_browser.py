@@ -33,7 +33,9 @@ from playwright.sync_api import sync_playwright
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
 PORT = 19999
-SCREENSHOT_DIR = os.path.join(ROOT_DIR, "docs", "screenshots")
+SCREENSHOT_DIR = os.environ.get(
+    "PREBASE_SCREENSHOT_DIR", os.path.join(ROOT_DIR, "docs", "screenshots")
+)
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
@@ -58,7 +60,7 @@ def setup_deterministic_multi_area_repo(repo_dir):
         ["git"] + list(args), cwd=repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    git("init")
+    git("init", "-b", "main")
     git("config", "user.name", "PreBase Test")
     git("config", "user.email", "test@prebase.local")
 

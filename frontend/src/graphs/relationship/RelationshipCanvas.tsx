@@ -15,6 +15,11 @@ import {
   RelationshipGraphData,
 } from './relationshipTypes';
 import {
+  fitViewportToBounds,
+  recenterViewportForResize,
+  type Viewport2D,
+} from './relationshipViewport';
+import {
   ArrowLeft,
   Search,
   AlertCircle,
@@ -25,11 +30,7 @@ import {
 } from 'lucide-react';
 import './RelationshipCanvas.css';
 
-export interface Viewport2D {
-  panX: number;
-  panY: number;
-  zoom: number;
-}
+export type { Viewport2D } from './relationshipViewport';
 
 interface RelationshipCanvasProps {
   snapshot: GraphSnapshot | null;
@@ -186,59 +187,80 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   layoutRef.current = layout;
 
   // Fit view helper
-  const fitToGraph = useCallback(
-    (bounds: LayoutBounds, width: number, height: number) => {
-      if (bounds.width <= 0 || bounds.height <= 0 || width <= 0 || height <= 0) {
-        const next = { panX: width / 2, panY: height / 2, zoom: 1.0 };
-        setViewport(next);
-        onViewportChange?.(next);
-        return;
-      }
-
-      // Dynamic adaptive padding and scale factor for optimal workspace utilization
-      const padding = Math.min(64, Math.max(32, Math.min(width, height) * 0.06));
-      const availableW = Math.max(100, width - padding * 2);
-      const availableH = Math.max(100, height - padding * 2);
-
-      const zoomX = availableW / bounds.width;
-      const zoomY = availableH / bounds.height;
-      // Allow compact diagrams to comfortably scale up to 1.6x rather than being trapped at 1.2x
-      const nextZoom = Math.min(1.6, Math.max(0.25, Math.min(zoomX, zoomY)));
-
-      const nextPanX = width / 2 - bounds.centerX * nextZoom;
-      const nextPanY = height / 2 - bounds.centerY * nextZoom;
-
-      const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
+  const applyViewport = useCallback(
+    (next: Viewport2D) => {
       setViewport(next);
       onViewportChange?.(next);
     },
     [onViewportChange]
+  );
+
+  // Track whether the user has deliberately moved the camera, so a container
+  // resize preserves their framing instead of snapping back to a global fit.
+  const hasUserAdjustedViewRef = useRef(false);
+
+  const fitToGraph = useCallback(
+    (bounds: LayoutBounds, width: number, height: number) => {
+      applyViewport(fitViewportToBounds(bounds, width, height));
+    },
+    [applyViewport]
   );
 
   // Reset view helper
   const resetToCenter = useCallback(
     (width: number, height: number) => {
-      const next = { panX: width / 2, panY: height / 2, zoom: 1.0 };
-      setViewport(next);
-      onViewportChange?.(next);
+      hasUserAdjustedViewRef.current = true;
+      applyViewport({ panX: width / 2, panY: height / 2, zoom: 1.0 });
     },
-    [onViewportChange]
+    [applyViewport]
   );
 
-  // Auto-fit when focusNodeId changes or on initial mount
-  const lastFittedFocusRef = useRef<string | null>(null);
+  // Auto-fit on focus change, and refit (or recenter) when the container is
+  // measured/resized. The initial fallback dimensions are intentionally not
+  // trusted for framing: the ResizeObserver reports the real size right after
+  // mount, so this effect must react to that change or the rightmost column is
+  // rendered outside the canvas.
+  const lastAutoFitRef = useRef<{
+    focusNodeId: string | null;
+    width: number;
+    height: number;
+  } | null>(null);
+
   useEffect(() => {
-    if (focusNodeId && focusNodeId !== lastFittedFocusRef.current && layout.nodes.length > 0) {
-      lastFittedFocusRef.current = focusNodeId;
+    if (!focusNodeId || layout.nodes.length === 0) return;
+
+    const previous = lastAutoFitRef.current;
+    const focusChanged = !previous || previous.focusNodeId !== focusNodeId;
+    const sizeChanged =
+      previous !== null &&
+      (previous.width !== dimensions.width || previous.height !== dimensions.height);
+
+    if (!focusChanged && !sizeChanged) return;
+
+    lastAutoFitRef.current = {
+      focusNodeId,
+      width: dimensions.width,
+      height: dimensions.height,
+    };
+
+    if (focusChanged) {
+      // A new focus is always framed, discarding camera state from the previous
+      // neighborhood.
+      hasUserAdjustedViewRef.current = false;
+      fitToGraph(layout.bounds, dimensions.width, dimensions.height);
+    } else if (hasUserAdjustedViewRef.current && previous) {
+      applyViewport(recenterViewportForResize(viewportRef.current, previous, dimensions));
+    } else {
       fitToGraph(layout.bounds, dimensions.width, dimensions.height);
     }
-  }, [focusNodeId, layout, dimensions, fitToGraph]);
+  }, [focusNodeId, layout, dimensions, fitToGraph, applyViewport]);
 
   // Handle external fit view trigger
   const lastFitTriggerRef = useRef(fitViewTrigger);
   useEffect(() => {
     if (fitViewTrigger > 0 && fitViewTrigger !== lastFitTriggerRef.current) {
       lastFitTriggerRef.current = fitViewTrigger;
+      hasUserAdjustedViewRef.current = false;
       fitToGraph(layout.bounds, dimensions.width, dimensions.height);
     }
   }, [fitViewTrigger, layout.bounds, dimensions, fitToGraph]);
@@ -700,6 +722,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
           panX: dragStartRef.current.panX + dx,
           panY: dragStartRef.current.panY + dy,
         };
+        hasUserAdjustedViewRef.current = true;
         setViewport(next);
         onViewportChange?.(next);
         requestRender();
@@ -827,6 +850,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const nextPanY = mouseY - (mouseY - cur.panY) * (nextZoom / cur.zoom);
 
       const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
+      hasUserAdjustedViewRef.current = true;
       setViewport(next);
       onViewportChange?.(next);
       requestRender();
@@ -867,6 +891,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         const cur = viewportRef.current;
         const nextZoom = Math.min(2.5, cur.zoom * 1.2);
         const next = { ...cur, zoom: nextZoom };
+        hasUserAdjustedViewRef.current = true;
         setViewport(next);
         onViewportChange?.(next);
         requestRender();
@@ -878,6 +903,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         const cur = viewportRef.current;
         const nextZoom = Math.max(0.15, cur.zoom / 1.2);
         const next = { ...cur, zoom: nextZoom };
+        hasUserAdjustedViewRef.current = true;
         setViewport(next);
         onViewportChange?.(next);
         requestRender();
@@ -888,6 +914,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         e.preventDefault();
         const cur = viewportRef.current;
         const next = { ...cur, zoom: 1.0 };
+        hasUserAdjustedViewRef.current = true;
         setViewport(next);
         onViewportChange?.(next);
         requestRender();
@@ -1126,6 +1153,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
           <button
             className="hud-icon-btn"
             onClick={() => {
+              hasUserAdjustedViewRef.current = false;
               fitToGraph(layout.bounds, dimensions.width, dimensions.height);
               onAnnounce?.('Fitted 2D relationship view to all visible nodes');
             }}

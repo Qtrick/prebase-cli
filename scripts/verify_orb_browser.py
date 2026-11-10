@@ -33,7 +33,9 @@ from playwright.sync_api import sync_playwright
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
 PORT = 19998
-SCREENSHOT_DIR = os.path.join(ROOT_DIR, "docs", "screenshots")
+SCREENSHOT_DIR = os.environ.get(
+    "PREBASE_SCREENSHOT_DIR", os.path.join(ROOT_DIR, "docs", "screenshots")
+)
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 

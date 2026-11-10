@@ -13,13 +13,18 @@ alwaysApply: true
 - Provide a suggested Conventional Commit message as **plain text only**. Never execute it automatically.
 - Read-only git inspection (`git status`, `git diff`, `git log`) is allowed.
 
-## 2. Engineering Workflow
+## 2. Mandatory Live GitHub Actions Audit
+- **EVERY PREBASE CLI DEVELOPMENT CAMPAIGN MUST BEGIN WITH A LIVE GITHUB ACTIONS AUDIT.**
+- Retrieve recent runs (`gh run list --repo <owner>/<repo>`), inspect failed logs (`gh run view <id> --log-failed`), determine the exact failure mechanism, and resolve CI blockers before declaring readiness.
+- Never claim GitHub Actions is green unless an actual remote run for the corrected commit has succeeded.
+
+## 3. Engineering Workflow
 Follow the strict development cycle:
 $$\text{AUDIT} \to \text{RESEARCH} \to \text{PLAN} \to \text{IMPLEMENT} \to \text{TEST} \to \text{REVIEW} \to \text{FIX} \to \text{RETEST}$$
 - Verify actual behavior in the running application and browser via Playwright.
 - Do not stop at passing unit tests when UI/visual interaction is involved.
 
-## 3. Specialists and Review Loop
+## 4. Specialists and Review Loop
 - Consult and employ specialist roles:
   - `code-reviewer-editor`: diff correctness, resource leaks, accessibility, precision editing.
   - `test-writer`: design meaningful edge-case and behavioral regression tests.
@@ -28,6 +33,6 @@ $$\text{AUDIT} \to \text{RESEARCH} \to \text{PLAN} \to \text{IMPLEMENT} \to \tex
 - Apply `UI/UX Pro Max` and frontend design principles (`ui-ensemble`, `pen-design`) to guarantee visual polish and interaction feel.
 - Apply `Ponytail Code Reduction`: radical simplicity, zero gratuitous dependencies, reuse existing utilities, delete before adding, smallest working diff.
 
-## 4. Source Safety
+## 5. Source Safety
 - Historical references in `.reference/` are for inspection only. Never commit, bundle, or distribute `.reference/` files.
 

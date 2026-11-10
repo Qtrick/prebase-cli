@@ -35,7 +35,27 @@ git check-ignore
 
 ---
 
-## 2. Engineering Workflow
+## 2. Mandatory Live GitHub Actions Verification Rule
+
+**EVERY PREBASE CLI DEVELOPMENT CAMPAIGN MUST BEGIN WITH A LIVE GITHUB ACTIONS AUDIT.**
+
+Before implementation:
+1. Identify the actual repository remote (`git remote -v`).
+2. Inspect recent commits and verify current branch.
+3. Retrieve recent GitHub Actions workflow runs (`gh run list --repo <owner>/<repo> --limit 30`).
+4. Identify failed and cancelled runs.
+5. Retrieve failed jobs and steps (`gh run view <run_id> --log-failed`).
+6. Inspect actual failed job logs.
+7. Determine the exact failure mechanism.
+8. Correlate failures with commits and affected source files.
+9. Check whether the same defect remains in the working tree.
+10. Add unresolved CI failures to the implementation plan.
+
+*Never guess why CI failed. Read the logs.* Never claim GitHub Actions is green unless an actual remote run for the corrected commit has succeeded.
+
+---
+
+## 3. Engineering Workflow
 
 All implementation and bug remediation must follow the iterative engineering loop:
 
@@ -45,7 +65,7 @@ Agents must drive continuously through this cycle until all task acceptance crit
 
 ---
 
-## 3. Specialist Roles and Delegations
+## 4. Specialist Roles and Delegations
 
 Agents must utilize appropriate specialists throughout development:
 - **`code-reviewer-editor`**: Evaluates integrated diffs for correctness, race conditions, memory leaks, performance, and accessibility; applies focused patches to conclusive defects.
@@ -59,7 +79,7 @@ Agents must utilize appropriate specialists throughout development:
 
 ---
 
-## 4. Code Quality and Architecture Invariants
+## 5. Code Quality and Architecture Invariants
 
 - **Minimal Necessary Abstractions**: Avoid premature generalizations, framework creep, or unnecessary state stores.
 - **Reuse Existing Code**: Always inspect existing utilities, math modules, and layout algorithms before introducing new ones.
@@ -71,7 +91,7 @@ Agents must utilize appropriate specialists throughout development:
 
 ---
 
-## 5. Source Safety and Reference Isolation
+## 6. Source Safety and Reference Isolation
 
 - The `.reference/` directory contains historical reference material (e.g., Code - OSS Prebasecode).
 - Agents may freely inspect `.reference/` for algorithms, projection math, and architectural insights.
