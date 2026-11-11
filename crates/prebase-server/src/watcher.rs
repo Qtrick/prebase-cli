@@ -84,8 +84,9 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                 _ = &mut shutdown_rx => {
                     info!("Filesystem watcher received shutdown signal");
                     state.set_shutting_down();
-                    if let Some(handle) = active_task.take() {
-                        let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
+                    if let Some(mut handle) = active_task.take() {
+                        handle.abort();
+                        let _ = tokio::time::timeout(Duration::from_millis(500), &mut handle).await;
                     }
                     break;
                 }

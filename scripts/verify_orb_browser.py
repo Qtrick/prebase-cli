@@ -238,10 +238,17 @@ def main():
             # stream /api/v1/events is long-lived, which intentionally keeps network activity open.
             page.wait_for_selector(".network-canvas", timeout=15000)
             page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)
-            page.wait_for_function(
-                "() => window.__prebaseNetworkDebug && window.__prebaseNetworkDebug.getProjectedNodes().length >= 20",
-                timeout=15000,
-            )
+            
+            # Deterministic Python polling loop for projected 3D nodes without string-based wait_for_function
+            deadline = time.time() + 15.0
+            nodes_ready = False
+            while time.time() < deadline:
+                node_count = page.evaluate("() => window.__prebaseNetworkDebug ? window.__prebaseNetworkDebug.getProjectedNodes().length : 0")
+                if node_count >= 20:
+                    nodes_ready = True
+                    break
+                time.sleep(0.1)
+            assert nodes_ready, "Projected 3D nodes did not reach required minimum of 20 within 15s"
             success("Canvas loaded and repository index is Ready (with active SSE connection).")
 
             # Let layout and initial projection settle

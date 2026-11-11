@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { CommitDetails, CommitSummary, FileChange } from '../types/temporal';
+import { CommitDetails, CommitSummary, FileChange, GitStatus } from '../types/temporal';
 import { FileNode, GraphSnapshot } from '../types/graph';
 import { api } from '../transport/api';
 import { useCopyFeedback } from '../utils/clipboard';
 import {
   X,
   GitCommit,
+  GitBranch,
+  Clock,
   User,
   Calendar,
   FileCode,
@@ -24,6 +26,11 @@ interface CommitInspectorProps {
   onNavigateToNetwork: (node: FileNode) => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+  gitStatus?: GitStatus | null;
+  totalCommits?: number | null;
+  loadedCommitsCount?: number;
+  temporalFilterPath?: string | null;
+  onClearFilter?: () => void;
 }
 
 export const CommitInspector: React.FC<CommitInspectorProps> = ({
@@ -33,6 +40,11 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   onNavigateToNetwork,
   isCollapsed = false,
   onToggleCollapse,
+  gitStatus,
+  totalCommits,
+  loadedCommitsCount,
+  temporalFilterPath,
+  onClearFilter,
 }) => {
   const [details, setDetails] = useState<CommitDetails | null>(null);
   const [loading, setLoading] = useState(false);
@@ -100,7 +112,83 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
     }
   };
 
-  if (!selectedCommit) return null;
+  if (!selectedCommit) {
+    return (
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+        <div className="inspector-header">
+          <div className="inspector-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Clock size={16} color="#38bdf8" />
+            <span>Git History Overview</span>
+          </div>
+          <div className="header-action-group">
+            {onToggleCollapse && (
+              <button
+                className="icon-action-btn"
+                onClick={onToggleCollapse}
+                title="Collapse inspector"
+                aria-label="Collapse inspector"
+              >
+                <PanelRightClose size={15} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="inspector-content animate-reveal">
+          {temporalFilterPath && (
+            <div className="stat-card" style={{ borderLeft: '3px solid var(--accent-sky)' }}>
+              <div className="stat-row-between">
+                <span className="stat-label">File History Filter</span>
+                {onClearFilter && (
+                  <button className="copy-btn" onClick={onClearFilter} title="Show full repository history">
+                    <span>Clear Filter</span>
+                  </button>
+                )}
+              </div>
+              <span className="stat-value mono" style={{ fontSize: '12px' }}>{temporalFilterPath}</span>
+            </div>
+          )}
+
+          {gitStatus && (
+            <div className="stat-card">
+              <span className="stat-label">Active Branch & HEAD</span>
+              <div className="meta-line" style={{ marginTop: '6px' }}>
+                <GitBranch size={14} color="#38bdf8" />
+                <span className="mono" style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {gitStatus.branch || 'HEAD (detached)'}
+                </span>
+              </div>
+              {gitStatus.head_commit && (
+                <div className="meta-line" style={{ marginTop: '4px' }}>
+                  <GitCommit size={14} color="#94a3b8" />
+                  <span className="mono dim" style={{ fontSize: '11px' }}>
+                    {gitStatus.head_commit.slice(0, 7)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="stat-card">
+            <span className="stat-label">Timeline Commits</span>
+            <div style={{ marginTop: '6px', fontSize: '13px', color: 'var(--text-primary)' }}>
+              <strong>{loadedCommitsCount || 0}</strong> {totalCommits ? `of ${totalCommits}` : ''} commits loaded
+            </div>
+          </div>
+
+          <div className="stat-card">
+            <span className="stat-label">Navigation Guide</span>
+            <ul style={{ margin: '8px 0 0 0', paddingLeft: '16px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              <li>Click any commit dot or summary in the DAG to inspect file diffs and stats.</li>
+              <li>Use <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↑</kbd> and <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↓</kbd> arrow keys to navigate commits.</li>
+              <li>Drag to pan the timeline; scroll wheel to zoom.</li>
+              <li>Clicking an analyzed file in a commit opens the Network Graph focused on that file.</li>
+            </ul>
+          </div>
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
@@ -230,7 +318,15 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
                       <li
                         key={idx}
                         className={`file-change-item ${existsInNetwork ? 'interactive' : 'historical'}`}
+                        tabIndex={existsInNetwork ? 0 : undefined}
+                        role={existsInNetwork ? 'button' : undefined}
                         onClick={() => handleFileClick(file)}
+                        onKeyDown={(e) => {
+                          if (existsInNetwork && (e.key === 'Enter' || e.key === ' ')) {
+                            e.preventDefault();
+                            handleFileClick(file);
+                          }
+                        }}
                         title={
                           existsInNetwork
                             ? 'Click to locate file in Network Graph'

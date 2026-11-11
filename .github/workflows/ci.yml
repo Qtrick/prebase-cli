@@ -41,8 +41,9 @@ jobs:
       - name: Setup Rust toolchain
         # Pinned in rust-toolchain.toml; keep this in sync so `cargo` and
         # `cargo clippy` resolve to exactly the same compiler locally and in CI.
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7 # 1.99.0
         with:
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Record toolchain versions

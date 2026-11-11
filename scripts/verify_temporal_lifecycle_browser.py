@@ -6,21 +6,25 @@ Independently verifies in real headless Chromium using Playwright:
 1. Direct launch via `history` CLI command (?view=temporal).
 2. Temporal DAG rendering, commit nodes, and branch/merge topology.
 3. Anchor pagination across commit history (>50 commits) without duplicates.
-4. Commit selection and CommitInspector drawer with changed files & diff stats.
-5. Cross-tab navigation from CommitInspector changed file to Network graph.
-6. Live git-ref update handling: git commit triggers SSE `git.updated` and updates UI without reload.
-7. Purposeful empty state for non-git repository.
-8. 2D Relationship deep interactions: direct launch, back-stack history navigation, depth/direction HUD.
-9. 2D live-update reconciliation: adding files preserves active 2D focus.
-10. Authentication & trust boundary lifecycle:
+4. Commit selection via genuine mouse click and CommitInspector drawer with changed files & diff stats.
+5. Accessible keyboard selection (ArrowDown / ArrowUp) on Temporal Canvas.
+6. Cross-view navigation from CommitInspector changed file (Card.tsx) to Network graph.
+7. 2D Relationship deep interactions on Card.tsx: 1 Hop / 2 Hops, refocusing on neighbor (Button.tsx),
+   and Back button navigation restoring Card.tsx.
+8. Live git-ref update handling: 56th commit triggers SSE `git.updated` and updates UI without reload,
+   with strict Content-Security-Policy enforcement (no 'unsafe-eval').
+9. Reduced motion media query emulation and verification.
+10. Purposeful empty state for non-git repository.
+11. Authentication & trust boundary lifecycle:
     - Access without token rejected / redirected to auth error screen.
     - Invalid bootstrap token rejected.
     - Single-use bootstrap token replay rejected.
     - Seamless page reload via session cookie.
     - Concurrent browser tabs in authenticated context.
     - Rejection of invalid Host and Origin headers.
-11. Server graceful shutdown with SIGINT and immediate port release.
-12. Captures evidentiary screenshots to docs/screenshots/.
+12. Server graceful shutdown with SIGINT and immediate port release.
+13. Captures evidentiary screenshots to docs/screenshots/.
+14. Diagnostic failure capture: writes temporal_failure.png and sanitized temporal_failure_summary.txt.
 """
 
 import os
@@ -35,7 +39,7 @@ import socket
 import re
 import urllib.request
 import urllib.parse
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
@@ -51,6 +55,7 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
 
 def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
     if not text:
         return text
     text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
@@ -87,6 +92,14 @@ def http_get(url, headers=None):
             return resp.status, resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8")
+
+def http_get_with_headers(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read().decode("utf-8"), resp.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8"), e.headers
 
 def parse_startup_info(log_path):
     startup_url = None
@@ -157,14 +170,20 @@ def setup_rich_git_repository(repo_dir: str):
     # Merge feature/badge into main with a merge commit
     git("merge", "--no-ff", "feature/badge", "-m", "merge: join feature/badge into main")
 
-    # Add 50 incremental commits to total >54 commits (verifying pagination limit of 50)
-    for i in range(1, 51):
+    # Add 49 incremental commits to CHANGELOG.md (5 + 49 = 54 commits)
+    for i in range(1, 50):
         with open(os.path.join(repo_dir, "CHANGELOG.md"), "a") as f:
             f.write(f"- Update {i}: patch cycle notes\n")
         git("add", "CHANGELOG.md")
         git("commit", "-m", f"chore: changelog update entry {i}")
 
-    success(f"Rich git repository initialized with 55 total commits and branch topology.")
+    # Commit 55 (the head of main): modify src/components/Card.tsx so latest commit touches an analyzed TSX component
+    with open(os.path.join(comp_dir, "Card.tsx"), "a") as f:
+        f.write("\n// Updated Card component styling\n")
+    git("add", os.path.join("src", "components", "Card.tsx"))
+    git("commit", "-m", "feat: enhance Card component styling")
+
+    success("Rich git repository initialized with 55 total commits, branch topology, and latest commit modifying Card.tsx.")
 
 def main():
     print("=" * 80)
@@ -255,189 +274,239 @@ def main():
         with sync_playwright() as p:
             log("Launching Playwright Chromium browser...")
             browser = p.chromium.launch(headless=True)
+            active_page = None
 
-            # 3a. Test navigation with invalid bootstrap token in separate clean browser context
-            invalid_url = f"{base_url}/?bootstrap=invalid_token_99999&view=temporal"
-            log(f"Navigating to invalid token URL: {invalid_url}")
-            auth_context = browser.new_context(viewport={"width": 1280, "height": 800})
-            auth_page = auth_context.new_page()
-            auth_page.goto(invalid_url, wait_until="domcontentloaded")
-            auth_page.wait_for_selector(".error-overlay", timeout=10000)
-            err_text = auth_page.locator(".error-overlay").inner_text()
-            assert "Authentication" in err_text or "token" in err_text, f"Expected auth error in UI, got: {err_text}"
-            auth_context.close()
-            success("Browser UI gracefully displays Authentication Required for invalid bootstrap token.")
+            try:
+                # 3a. Test navigation with invalid bootstrap token in separate clean browser context
+                invalid_url = f"{base_url}/?bootstrap=invalid_token_99999&view=temporal"
+                log(f"Navigating to invalid token URL: {invalid_url}")
+                auth_context = browser.new_context(viewport={"width": 1280, "height": 800})
+                auth_page = auth_context.new_page()
+                active_page = auth_page
+                auth_page.goto(invalid_url, wait_until="domcontentloaded")
+                expect(auth_page.locator(".error-overlay")).to_be_visible(timeout=10000)
+                expect(auth_page.locator(".error-overlay")).to_contain_text(re.compile(r"(Authentication|token)"))
+                auth_context.close()
+                success("Browser UI gracefully displays Authentication Required for invalid bootstrap token.")
 
-            # 3b. Navigate with valid startup URL in main context (exchanging single-use bootstrap token)
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
-            page = context.new_page()
-            log(f"Navigating to valid startup URL: {startup_url}...")
-            page.goto(startup_url, wait_until="domcontentloaded", timeout=15000)
+                # 3b. Navigate with valid startup URL in main context (exchanging single-use bootstrap token)
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
+                page = context.new_page()
+                active_page = page
+                log(f"Navigating to valid startup URL: {startup_url}...")
+                page.goto(startup_url, wait_until="domcontentloaded", timeout=15000)
 
-            # Wait for Temporal canvas and index ready
-            page.wait_for_selector(".temporal-canvas-container canvas", timeout=15000)
-            page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)
-            success("Temporal canvas rendered and Index Ready indicator visible.")
+                # Wait for Temporal canvas and index ready
+                expect(page.locator(".temporal-canvas-container canvas")).to_be_visible(timeout=15000)
+                expect(page.locator(".status-indicator:has-text('Index Ready')")).to_be_visible(timeout=15000)
+                success("Temporal canvas rendered and Index Ready indicator visible.")
 
-            time.sleep(1.0)
-            page.screenshot(path=os.path.join(SCREENSHOT_DIR, "18_temporal_dag_initial.png"))
-            success("Captured initial Temporal DAG -> docs/screenshots/18_temporal_dag_initial.png")
+                time.sleep(1.0)
+                page.screenshot(path=os.path.join(SCREENSHOT_DIR, "18_temporal_dag_initial.png"))
+                success("Captured initial Temporal DAG -> docs/screenshots/18_temporal_dag_initial.png")
 
-            # 3c. Replay protection: verify that the bootstrap token cannot be reused in another clean context
-            log("Verifying bootstrap token replay rejection in clean context...")
-            clean_context = browser.new_context(viewport={"width": 1280, "height": 800})
-            replay_page = clean_context.new_page()
-            replay_page.goto(startup_url, wait_until="domcontentloaded")
-            replay_page.wait_for_selector(".error-overlay", timeout=10000)
-            replay_err = replay_page.locator(".error-overlay").inner_text()
-            assert "Authentication" in replay_err or "token" in replay_err, "Replay of consumed token must fail"
-            clean_context.close()
-            success("Single-use bootstrap token replay strictly rejected in clean browser context.")
+                # 3c. Replay protection: verify that the bootstrap token cannot be reused in another clean context
+                log("Verifying bootstrap token replay rejection in clean context...")
+                clean_context = browser.new_context(viewport={"width": 1280, "height": 800})
+                replay_page = clean_context.new_page()
+                replay_page.goto(startup_url, wait_until="domcontentloaded")
+                expect(replay_page.locator(".error-overlay")).to_be_visible(timeout=10000)
+                expect(replay_page.locator(".error-overlay")).to_contain_text(re.compile(r"(Authentication|token)"))
+                clean_context.close()
+                success("Single-use bootstrap token replay strictly rejected in clean browser context.")
 
-            # 3d. Verify Temporal Header Commit Count and Initial Pagination State
-            header_text = page.locator(".temporal-header-info").inner_text()
-            log(f"Temporal Header: '{header_text}'")
-            assert "50 of 55" in header_text or "50 commits" in header_text, f"Expected page limit 50, got: {header_text}"
-            success("Temporal header reflects initial 50-commit page limit of 55 total commits.")
+                # 3d. Verify Temporal Header Commit Count and Initial Pagination State
+                expect(page.locator(".temporal-header-info")).to_contain_text(re.compile(r"50 (of 55|commits)"), timeout=5000)
+                header_text = page.locator(".temporal-header-info").inner_text()
+                log(f"Temporal Header: '{header_text}'")
+                success("Temporal header reflects initial 50-commit page limit of 55 total commits.")
 
-            # Verify floating pagination button
-            pagination_btn = page.locator(".pagination-btn")
-            assert pagination_btn.is_visible(), "Pagination button must be visible when total > 50"
-            btn_text = pagination_btn.inner_text()
-            log(f"Pagination button text: '{btn_text}'")
-            assert "Load older commits" in btn_text, f"Unexpected pagination button text: {btn_text}"
+                # Verify floating pagination button
+                pagination_btn = page.locator(".pagination-btn")
+                expect(pagination_btn).to_be_visible(timeout=5000)
+                expect(pagination_btn).to_contain_text("Load older commits")
 
-            # 3e. Click pagination button to load remaining commits (Anchor Pagination)
-            log("Clicking pagination button to load remaining commits...")
-            pagination_btn.click()
-            page.wait_for_function(
-                "() => document.querySelector('.temporal-header-info')?.innerText.includes('55 of 55') || document.querySelector('.temporal-header-info')?.innerText.includes('55 commits')",
-                timeout=10000
-            )
-            success("Anchor pagination loaded remaining commits without duplicates (55 of 55).")
-            time.sleep(0.5)
-            page.screenshot(path=os.path.join(SCREENSHOT_DIR, "19_temporal_paginated_full.png"))
-            success("Captured full paginated DAG -> docs/screenshots/19_temporal_paginated_full.png")
+                # 3e. Click pagination button to load remaining commits (Anchor Pagination)
+                # Replaced string-based page.wait_for_function with Playwright expect
+                log("Clicking pagination button to load remaining commits...")
+                pagination_btn.click()
+                expect(page.locator(".temporal-header-info")).to_contain_text(re.compile(r"55 (of 55|commits)"), timeout=10000)
+                success("Anchor pagination loaded remaining commits without duplicates (55 of 55).")
+                time.sleep(0.5)
+                page.screenshot(path=os.path.join(SCREENSHOT_DIR, "19_temporal_paginated_full.png"))
+                success("Captured full paginated DAG -> docs/screenshots/19_temporal_paginated_full.png")
 
-            # 3f. Select a commit on the Temporal Canvas to open CommitInspector
-            log("Selecting initial commit on canvas to inspect commit details...")
-            pos = page.evaluate("() => window.__prebaseTemporalDebug ? window.__prebaseTemporalDebug.getScreenPosition(0) : null")
-            canvas = page.locator(".temporal-canvas-container canvas")
-            box = canvas.bounding_box()
-            if pos:
-                click_x = box["x"] + pos["x"] + 20
+                # 3f. Select initial commit on canvas via genuine mouse click (no selectCommit fallback)
+                log("Selecting initial commit on canvas via genuine mouse click...")
+                pos = page.evaluate("() => window.__prebaseTemporalDebug ? window.__prebaseTemporalDebug.getScreenPosition(0) : null")
+                assert pos is not None, "Temporal layout must expose screen position for initial commit"
+                canvas = page.locator(".temporal-canvas-container canvas")
+                box = canvas.bounding_box()
+                assert box is not None, "Temporal canvas bounding box must exist"
+                click_x = box["x"] + pos["x"]
                 click_y = box["y"] + pos["y"]
                 log(f"Computed commit click point from layout: ({click_x:.1f}, {click_y:.1f})")
                 page.mouse.click(click_x, click_y)
-            else:
-                page.mouse.click(box["x"] + 150, box["y"] + 120)
-            time.sleep(0.5)
 
-            if not page.is_visible(".inspector-panel .sha-text"):
-                page.evaluate("() => { if (window.__prebaseTemporalDebug) { const l = window.__prebaseTemporalDebug.getLayout(); if (l.nodes.length > 0) window.__prebaseTemporalDebug.selectCommit(l.nodes[0].commit); } }")
-                time.sleep(0.5)
+                expect(page.locator(".inspector-panel .sha-text")).to_be_visible(timeout=10000)
+                initial_sha = page.locator(".inspector-panel .sha-text").inner_text()
+                log(f"CommitInspector displayed commit SHA: {initial_sha}")
+                assert len(initial_sha) == 40, f"Expected 40-character commit SHA, got: {initial_sha}"
+                page.screenshot(path=os.path.join(SCREENSHOT_DIR, "20_temporal_commit_inspector.png"))
+                success("CommitInspector displayed via genuine mouse click with full SHA, author, date, and diff stats.")
 
-            page.wait_for_selector(".inspector-panel .sha-text", timeout=10000)
-            sha_text = page.locator(".inspector-panel .sha-text").inner_text()
-            log(f"CommitInspector displayed commit SHA: {sha_text}")
-            assert len(sha_text) == 40, f"Expected 40-character commit SHA, got: {sha_text}"
-            page.screenshot(path=os.path.join(SCREENSHOT_DIR, "20_temporal_commit_inspector.png"))
-            success("CommitInspector displayed with full SHA, author, date, and diff stats.")
+                # 3f-2. Test Accessible Keyboard Selection (canvas focus, ArrowDown, ArrowUp)
+                log("Testing accessible keyboard selection on Temporal Canvas...")
+                canvas.focus()
+                page.keyboard.press("ArrowDown")
+                expect(page.locator(".inspector-panel .sha-text")).not_to_have_text(initial_sha, timeout=5000)
+                next_sha = page.locator(".inspector-panel .sha-text").inner_text()
+                log(f"ArrowDown selected next commit SHA: {next_sha}")
+                assert len(next_sha) == 40 and next_sha != initial_sha, "ArrowDown must select a different commit"
 
-            # 3g. Test Cross-View Navigation from CommitInspector to Network Graph
-            # Look for changed files list in inspector
-            changed_files = page.locator(".file-change-item")
-            if changed_files.count() > 0:
-                first_file_path = changed_files.first.locator(".file-path").inner_text()
-                log(f"Clicking changed file in inspector: '{first_file_path}'")
-                changed_files.first.click()
-                time.sleep(0.5)
-                # If the file exists in network, it switches to network tab
-                if page.is_visible(".network-canvas") or page.is_visible(".relationship-canvas"):
-                    success("Cross-view navigation from CommitInspector to Network tab verified.")
+                page.keyboard.press("ArrowUp")
+                expect(page.locator(".inspector-panel .sha-text")).to_have_text(initial_sha, timeout=5000)
+                restored_sha = page.locator(".inspector-panel .sha-text").inner_text()
+                log(f"ArrowUp restored initial commit SHA: {restored_sha}")
+                assert restored_sha == initial_sha, "ArrowUp must restore initial commit"
+                success("Accessible keyboard selection verified (canvas focus -> ArrowDown -> ArrowUp -> inspector updated).")
+
+                # 3g. Test Cross-View Navigation from CommitInspector to Network Graph
+                # The latest commit (initial_sha) modifies src/components/Card.tsx
+                log("Testing cross-view navigation from CommitInspector changed files to Network Graph...")
+                card_file_item = page.locator(".file-change-item:has-text('Card.tsx')")
+                expect(card_file_item).to_be_visible(timeout=5000)
+                log("Clicking Card.tsx in CommitInspector changed files...")
+                card_file_item.click()
+
+                # Verify Network view renders and Card.tsx is selected in Inspector
+                expect(page.locator(".network-canvas")).to_be_visible(timeout=10000)
+                expect(page.locator(".inspector-panel h3.file-name")).to_have_text("Card.tsx", timeout=5000)
+                expect(page.locator(".inspector-panel .file-path-bar")).to_contain_text("src/components/Card.tsx")
+                expect(page.locator(".inspector-panel .relations-section").first).to_be_visible(timeout=5000)
+                success("Cross-view navigation verified: Card.tsx clicked from inspector -> Network view renders -> Card.tsx selected & relationships inspected.")
+
+                # 3h. Test 2D Relationships on Card.tsx: 1 Hop / 2 Hops, refocus on neighbor (Button.tsx), Back button
+                log("Navigating to 2D Relationship Explorer for Card.tsx...")
+                explore_2d_btn = page.locator("button.explore-2d-btn:has-text('Explore Relationships in 2D')")
+                if explore_2d_btn.is_visible():
+                    explore_2d_btn.click()
                 else:
-                    # File was historical (CHANGELOG.md might not be ts/tsx)
-                    log("File is outside analyzed source files; historical notice expected.")
-            
-            # 3h. Switch to 2D Relationship Explorer and test Back-Stack History
-            log("Navigating to 2D Relationship Explorer via Mode Switcher...")
-            page.locator("button.nav-item:has-text('Network Graph')").click()
-            time.sleep(0.5)
-            page.locator("button.mode-btn:has-text('2D Relationships')").click()
-            time.sleep(0.5)
-            assert page.is_visible(".relationship-container"), "2D Relationship container must be visible"
-            page.screenshot(path=os.path.join(SCREENSHOT_DIR, "21_2d_relationship_deep.png"))
-            success("2D Relationship Explorer rendered.")
+                    page.locator("button.mode-btn:has-text('2D Relationships')").click()
 
-            # Test 1 Hop / 2 Hops and Direction buttons in 2D HUD
-            log("Testing 2D HUD depth and direction controls...")
-            btn_2hops = page.locator("button.hud-segment:has-text('2 Hops')")
-            if btn_2hops.is_visible():
+                expect(page.locator(".relationship-container")).to_be_visible(timeout=10000)
+                page.screenshot(path=os.path.join(SCREENSHOT_DIR, "21_2d_relationship_deep.png"))
+                success("2D Relationship Explorer rendered focused on Card.tsx.")
+
+                # Test 1 Hop / 2 Hops in 2D HUD
+                log("Testing 2D HUD depth controls (1 Hop / 2 Hops)...")
+                btn_2hops = page.locator("button.hud-segment:has-text('2 Hops')")
+                expect(btn_2hops).to_be_visible(timeout=5000)
                 btn_2hops.click()
-                time.sleep(0.3)
-                assert "active" in btn_2hops.get_attribute("class"), "2 Hops button must become active"
-                page.locator("button.hud-segment:has-text('1 Hop')").click()
-                time.sleep(0.3)
+                expect(btn_2hops).to_have_class(re.compile(r"active"), timeout=3000)
+
+                btn_1hop = page.locator("button.hud-segment:has-text('1 Hop')")
+                btn_1hop.click()
+                expect(btn_1hop).to_have_class(re.compile(r"active"), timeout=3000)
                 success("2D HUD depth controls (1 Hop / 2 Hops) verified.")
 
-            # Test refocusing and back-stack button
-            # In 2D mode, if candidates exist or search refocuses:
-            cand_btns = page.locator("button.candidate-item")
-            if cand_btns.count() > 0:
-                cand_btns.first.click()
-                time.sleep(0.5)
-                # Verify back button appears
+                # Refocus on neighbor (Button.tsx) and test Back button navigation
+                log("Testing refocus on neighbor Button.tsx and Back button navigation...")
+                button_dep = page.locator(".inspector-panel .relation-item-btn:has-text('Button.tsx')")
+                expect(button_dep).to_be_visible(timeout=5000)
+                button_dep.click()
+
+                refocus_btn = page.locator("button.refocus-2d-btn")
+                expect(refocus_btn).to_be_visible(timeout=5000)
+                refocus_btn.click()
+
                 back_btn = page.locator("button.hud-btn.back-btn")
-                if back_btn.is_visible():
-                    log(f"Back button appeared with title: '{back_btn.get_attribute('title')}'")
-                    back_btn.click()
-                    time.sleep(0.3)
-                    success("2D Back-stack navigation verified (refocus -> Back button -> restored).")
+                expect(back_btn).to_be_visible(timeout=5000)
+                log(f"Back button appeared with title: '{back_btn.get_attribute('title')}'")
+                back_btn.click()
 
-            # 3i. Live Git-Ref Update via SSE: create commit on disk while browser is open
-            log("Testing live git-ref update via SSE without page reload...")
-            # Switch back to Temporal tab
-            page.locator("button.nav-item:has-text('Temporal Graph')").click()
-            time.sleep(0.5)
+                expect(back_btn).not_to_be_visible(timeout=5000)
+                expect(page.locator(".inspector-panel h3.file-name")).to_have_text("Card.tsx", timeout=5000)
+                success("2D Back-stack navigation verified: Card.tsx -> refocus Button.tsx -> Back button appears -> Back clicked -> Card.tsx restored.")
 
-            # Create a 56th commit using git CLI
-            git = lambda *args: subprocess.check_call(
-                ["git"] + list(args), cwd=test_repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            with open(os.path.join(test_repo_dir, "LIVE_NOTE.md"), "w") as f:
-                f.write("Live update commit\n")
-            git("add", "LIVE_NOTE.md")
-            git("commit", "-m", "feat: 56th live commit from watcher test")
+                # 3i. Live Git-Ref Update via SSE: create 56th commit on disk while browser is open
+                log("Testing live git-ref update via SSE without page reload...")
+                page.locator("button.nav-item:has-text('Temporal Graph')").click()
+                expect(page.locator(".temporal-canvas-container canvas")).to_be_visible(timeout=10000)
 
-            # Wait for browser to receive `git.updated` event and update commit count
-            log("Waiting for browser to receive git.updated SSE event...")
-            page.wait_for_function(
-                "() => document.querySelector('.temporal-header-info')?.innerText.includes('56')",
-                timeout=12000
-            )
-            success("Live git-ref update received via SSE; browser updated commit count to 56 without page reload.")
+                # Attach CSP violation monitor to ensure no 'unsafe-eval' or script violations occur during live update
+                page.evaluate("""() => {
+                    window.__cspViolations = [];
+                    window.addEventListener('securitypolicyviolation', (e) => {
+                        window.__cspViolations.push(e.blockedURI + ': ' + e.violatedDirective);
+                    });
+                }""")
 
-            # 3j. Test page reload under active session cookie (no bootstrap param)
-            log("Testing browser page reload with authenticated session cookie...")
-            page.goto(f"{base_url}/", wait_until="domcontentloaded")
-            page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=10000)
-            success("Seamless page reload verified via RFC 6265 session cookie.")
+                # Create a 56th commit using git CLI
+                git = lambda *args: subprocess.check_call(
+                    ["git"] + list(args), cwd=test_repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                with open(os.path.join(test_repo_dir, "LIVE_NOTE.md"), "w") as f:
+                    f.write("Live update commit\n")
+                git("add", "LIVE_NOTE.md")
+                git("commit", "-m", "feat: 56th live commit from watcher test")
 
-            # 3k. Test concurrent tabs in same authenticated browser context
-            log("Testing multiple concurrent tabs in authenticated session...")
-            tab2 = context.new_page()
-            tab2.goto(f"{base_url}/", wait_until="domcontentloaded")
-            tab2.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=10000)
-            tab2.close()
-            success("Multiple concurrent browser tabs authenticated and loaded simultaneously.")
+                # Wait for browser to receive git.updated SSE event and update commit count without reload
+                # Replaced string-based wait_for_function with Playwright expect
+                log("Waiting for browser to receive git.updated SSE event...")
+                expect(page.locator(".temporal-header-info")).to_contain_text("56", timeout=12000)
 
-            # 3l. Test reduced motion preference
-            log("Testing prefers-reduced-motion media emulation...")
-            page.emulate_media(reduced_motion="reduce")
-            time.sleep(0.3)
-            success("Reduced-motion preference emulated cleanly without rendering errors.")
+                # Verify strict Content Security Policy forbids 'unsafe-eval'
+                status, _, headers = http_get_with_headers(f"{base_url}/api/v1/health")
+                csp = headers.get("content-security-policy", "")
+                assert "'unsafe-eval'" not in csp, f"Strict CSP must forbid 'unsafe-eval', got: {csp}"
+                assert "script-src 'self'" in csp, f"Strict CSP must enforce script-src 'self', got: {csp}"
 
-            browser.close()
+                # Confirm zero CSP violations during live update reconciliation
+                violations = page.evaluate("() => window.__cspViolations || []")
+                assert len(violations) == 0, f"Expected no CSP violations, got: {violations}"
+                success("Live git-ref update received via SSE; browser updated commit count to 56 without reload, and verified no 'unsafe-eval' was used.")
+
+                # 3j. Test page reload under active session cookie (no bootstrap param)
+                log("Testing browser page reload with authenticated session cookie...")
+                page.goto(f"{base_url}/", wait_until="domcontentloaded")
+                expect(page.locator(".status-indicator:has-text('Index Ready')")).to_be_visible(timeout=10000)
+                success("Seamless page reload verified via RFC 6265 session cookie.")
+
+                # 3k. Test concurrent tabs in same authenticated browser context
+                log("Testing multiple concurrent tabs in authenticated session...")
+                tab2 = context.new_page()
+                tab2.goto(f"{base_url}/", wait_until="domcontentloaded")
+                expect(tab2.locator(".status-indicator:has-text('Index Ready')")).to_be_visible(timeout=10000)
+                tab2.close()
+                success("Multiple concurrent browser tabs authenticated and loaded simultaneously.")
+
+                # 3l. Test reduced motion preference emulation and verification
+                log("Testing prefers-reduced-motion media emulation...")
+                page.emulate_media(reduced_motion="reduce")
+                is_reduced = page.evaluate("() => window.matchMedia('(prefers-reduced-motion: reduce)').matches")
+                assert is_reduced is True, "prefers-reduced-motion: reduce media query must be active in browser"
+                success("Reduced-motion preference emulated cleanly and confirmed active in browser.")
+
+                browser.close()
+
+            except Exception as exc:
+                sanitized_err = mask_credentials(str(exc))
+                if active_page:
+                    try:
+                        fail_shot = os.path.join(FAILURE_ARTIFACT_DIR, "temporal_failure.png")
+                        active_page.screenshot(path=fail_shot)
+                        log(f"Saved failure screenshot -> {fail_shot}")
+                    except Exception as shot_err:
+                        log(f"Could not capture failure screenshot: {shot_err}")
+                try:
+                    summary_path = os.path.join(FAILURE_ARTIFACT_DIR, "temporal_failure_summary.txt")
+                    with open(summary_path, "w") as f:
+                        f.write(f"Temporal test failure: {sanitized_err}\n")
+                    log(f"Saved failure summary -> {summary_path}")
+                except Exception as write_err:
+                    log(f"Could not write failure summary: {write_err}")
+                fail(f"Temporal browser test suite failed: {sanitized_err}")
 
         # ----------------------------------------------------------------------
         # TEST SUITE 4: Purposeful empty state for non-git repository
@@ -482,11 +551,9 @@ def main():
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(viewport={"width": 1280, "height": 800})
                 page.goto(ng_url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_selector(".empty-overlay", timeout=10000)
-                empty_text = page.locator(".empty-overlay").inner_text()
-                log(f"Non-git empty state text: '{empty_text}'")
-                assert "No Git commit history available" in empty_text, f"Expected non-git empty state, got: {empty_text}"
-                assert "not a Git repository" in empty_text, f"Expected explanation of non-git repo, got: {empty_text}"
+                expect(page.locator(".empty-overlay")).to_be_visible(timeout=10000)
+                expect(page.locator(".empty-overlay")).to_contain_text("No Git commit history available")
+                expect(page.locator(".empty-overlay")).to_contain_text("not a Git repository")
                 page.screenshot(path=os.path.join(SCREENSHOT_DIR, "22_temporal_nongit_empty_state.png"))
                 success("Purposeful non-git empty state verified with truthful explanation.")
                 browser.close()
@@ -515,4 +582,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

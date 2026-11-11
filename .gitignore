@@ -21,3 +21,6 @@ build/
 .DS_Store
 Thumbs.db
 
+# Test run and failure artifacts
+test-results/
+

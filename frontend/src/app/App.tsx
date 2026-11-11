@@ -1032,8 +1032,8 @@ export const App: React.FC = () => {
         )}
       </main>
 
-      {/* 3. Right Inspector (Network Inspector or Temporal Commit Inspector) */}
-      {activeTab === 'temporal' && selectedCommit ? (
+      {/* 3. Right Inspector (Network Inspector or Temporal Commit Inspector / Overview) */}
+      {activeTab === 'temporal' ? (
         <CommitInspector
           selectedCommit={selectedCommit}
           snapshot={snapshot}
@@ -1041,6 +1041,11 @@ export const App: React.FC = () => {
           onNavigateToNetwork={handleNavigateToNetwork}
           isCollapsed={inspectorCollapsed}
           onToggleCollapse={() => setInspectorCollapsed((c) => !c)}
+          gitStatus={gitStatus}
+          totalCommits={totalCommits}
+          loadedCommitsCount={commits.length}
+          temporalFilterPath={temporalFilterPath}
+          onClearFilter={() => setTemporalFilterPath(null)}
         />
       ) : (
         <Inspector

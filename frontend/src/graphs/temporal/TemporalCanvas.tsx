@@ -96,7 +96,6 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
             node,
           };
         },
-        selectCommit: (commit: CommitSummary | null) => onSelectCommit(commit),
       };
     }
     return () => {
@@ -104,7 +103,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
         delete (window as any).__prebaseTemporalDebug;
       }
     };
-  }, [layout, transform, onSelectCommit]);
+  }, [layout, transform]);
 
   // Demand-driven canvas rendering (zero idle CPU usage)
   useEffect(() => {
@@ -374,6 +373,27 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     });
   };
 
+  const scrollCommitIntoView = (targetNode: LayoutCommit) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const height = canvas.clientHeight || 600;
+    setTransform((prev) => {
+      const screenY = prev.y + targetNode.y * prev.k;
+      if (screenY < 60) {
+        return {
+          ...prev,
+          y: 80 - targetNode.y * prev.k,
+        };
+      } else if (screenY > height - 80) {
+        return {
+          ...prev,
+          y: height - 100 - targetNode.y * prev.k,
+        };
+      }
+      return prev;
+    });
+  };
+
   // Keyboard navigation for accessible commit selection
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (layout.nodes.length === 0) return;
@@ -382,14 +402,37 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       const currentIndex = layout.nodes.findIndex((n) => n.commit.hash === selectedCommitHash);
       if (currentIndex === -1) {
         onSelectCommit(layout.nodes[0].commit);
+        scrollCommitIntoView(layout.nodes[0]);
       } else if (currentIndex < layout.nodes.length - 1) {
-        onSelectCommit(layout.nodes[currentIndex + 1].commit);
+        const nextNode = layout.nodes[currentIndex + 1];
+        onSelectCommit(nextNode.commit);
+        scrollCommitIntoView(nextNode);
       }
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       const currentIndex = layout.nodes.findIndex((n) => n.commit.hash === selectedCommitHash);
-      if (currentIndex > 0) {
-        onSelectCommit(layout.nodes[currentIndex - 1].commit);
+      if (currentIndex === -1) {
+        const lastNode = layout.nodes[layout.nodes.length - 1];
+        onSelectCommit(lastNode.commit);
+        scrollCommitIntoView(lastNode);
+      } else if (currentIndex > 0) {
+        const prevNode = layout.nodes[currentIndex - 1];
+        onSelectCommit(prevNode.commit);
+        scrollCommitIntoView(prevNode);
+      }
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      onSelectCommit(layout.nodes[0].commit);
+      scrollCommitIntoView(layout.nodes[0]);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      const lastNode = layout.nodes[layout.nodes.length - 1];
+      onSelectCommit(lastNode.commit);
+      scrollCommitIntoView(lastNode);
+    } else if (e.key === 'Escape') {
+      if (selectedCommitHash) {
+        e.preventDefault();
+        onSelectCommit(null);
       }
     }
   };
@@ -406,12 +449,12 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     >
       <canvas
         ref={canvasRef}
+        className="temporal-canvas"
         tabIndex={0}
         role="application"
         aria-label="Git commit history DAG"
-        aria-description="Use ArrowUp and ArrowDown to navigate commits, mouse drag to pan timeline, mouse wheel to zoom, and click to inspect commit details."
+        aria-description="Use ArrowUp and ArrowDown to navigate commits, Home/End for start/end, Escape to deselect, mouse drag to pan timeline, mouse wheel to zoom, and click to inspect commit details."
         onKeyDown={handleKeyDown}
-        style={{ width: '100%', height: '100%', display: 'block', outline: 'none' }}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 2. Start local Axum server with optional filesystem watching
     let watch_filesystem = !args.no_watch;
-    let server = start_server(
+    let mut server = start_server(
         canonical_root.clone(),
         repo_name.clone(),
         repo_id.clone(),
@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state_clone = server.state.clone();
     let root_clone = canonical_root.clone();
 
-    tokio::spawn(async move {
+    let indexing_handle = tokio::spawn(async move {
         println!("  Indexing source files...");
         state_clone.set_status(prebase_core::model::IndexingStatus::Scanning);
         state_clone.set_analyzing(true);
@@ -241,16 +241,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("\nReceived shutdown signal. Stopping PreBase server...");
     }
 
+    // Signal shutdown to shared state so ongoing tasks abandon in-flight work immediately
+    server.state.set_shutting_down();
+
     // Terminate server and release listener
     let _ = server.shutdown_tx.send(());
 
-    // Terminate filesystem watcher cleanly
-    if let Some(watcher) = server.watcher_handle {
+    // Abort and bounded-wait initial indexing task if still in flight
+    indexing_handle.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(500), indexing_handle).await;
+
+    // Terminate filesystem watcher cleanly with abort and bounded-wait
+    if let Some(mut watcher) = server.watcher_handle {
         let _ = watcher.shutdown_tx.send(());
-        let _ = watcher.task_handle.await;
+        if tokio::time::timeout(Duration::from_millis(1000), &mut watcher.task_handle)
+            .await
+            .is_err()
+        {
+            watcher.task_handle.abort();
+            let _ =
+                tokio::time::timeout(Duration::from_millis(200), &mut watcher.task_handle).await;
+        }
     }
 
-    let _ = server.server_handle.await;
+    // Bounded-wait on HTTP server task with fallback abort
+    if tokio::time::timeout(Duration::from_millis(1000), &mut server.server_handle)
+        .await
+        .is_err()
+    {
+        server.server_handle.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut server.server_handle).await;
+    }
 
     println!("PreBase shut down cleanly. Goodbye!");
     Ok(())

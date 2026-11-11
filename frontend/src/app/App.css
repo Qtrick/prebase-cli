@@ -1257,11 +1257,16 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   outline-offset: 1px;
 }
 
-.network-canvas {
+.network-canvas,
+.temporal-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
   outline: none;
 }
 
-.network-canvas:focus-visible {
+.network-canvas:focus-visible,
+.temporal-canvas:focus-visible {
   outline: 2px solid var(--accent-teal);
   outline-offset: -2px;
 }
@@ -1352,6 +1357,11 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
 .file-change-item.interactive:hover {
   background: var(--bg-hover);
   border-color: rgba(56, 189, 248, 0.4);
+}
+
+.file-change-item.interactive:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 1px;
 }
 
 .file-change-item.historical {
