@@ -174,6 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tokio::spawn(async move {
         println!("  Indexing source files...");
+        state_clone.set_status(prebase_core::model::IndexingStatus::Scanning);
+        state_clone.set_analyzing(true);
         let start = Instant::now();
         let initial_gen = state_clone.get_next_generation();
         let analyzer = RepositoryAnalyzer::default();
@@ -188,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     vec![],
                     Some(initial_gen),
                 );
+                state_clone.set_analyzing(false);
                 if publish_res.is_ok() {
                     state_clone.set_analysis_duration(duration);
                     println!(
@@ -199,6 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
             Ok(Err(err)) => {
+                state_clone.set_analyzing(false);
                 error!("Repository analysis failed: {err}");
                 eprintln!("\x1b[31m✖\x1b[0m Repository analysis failed: {err}");
                 if state_clone.current_generation() == initial_gen {
@@ -206,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
             Err(join_err) => {
+                state_clone.set_analyzing(false);
                 error!("Analysis task panicked: {join_err}");
                 if state_clone.current_generation() == initial_gen {
                     state_clone.set_failed("Analysis task panicked");

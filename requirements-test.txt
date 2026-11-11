@@ -1,0 +1,6 @@
+# PreBase CLI Browser & Integration Test Dependencies
+# Supported Python versions: >=3.10, <3.14 (3.11 recommended for CI and local development)
+# Playwright wheels for greenlet require Python <3.14 until upstream 3.14 compatibility stabilizes.
+
+playwright==1.49.1
+

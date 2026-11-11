@@ -376,12 +376,12 @@ export const App: React.FC = () => {
     }
   }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath, showLiveNotice]);
 
-  // Load commits when active tab is temporal or filter changes
+  // Load commits when active tab is temporal or filter changes (gated by session initialization)
   useEffect(() => {
-    if (activeTab === 'temporal') {
+    if (sessionInitialized && !error && activeTab === 'temporal') {
       loadCommits(temporalFilterPath);
     }
-  }, [activeTab, temporalFilterPath, loadCommits]);
+  }, [sessionInitialized, error, activeTab, temporalFilterPath, loadCommits]);
 
   // Stable refs for background SSE callbacks without effect churn
   const activeTabRef = useRef(activeTab);
@@ -886,22 +886,24 @@ export const App: React.FC = () => {
         )}
 
         {/* View Content */}
-        {activeTab === 'network' ? (
+        {error ? (
           <div className="graph-container">
-            {error ? (
-              <div className="error-overlay">
-                <AlertCircle size={32} color="#ef4444" />
-                <h3>{error.includes('Authentication') ? 'Authentication Required' : 'Unable to load graph'}</h3>
-                <p>{error}</p>
-                <button
-                  className="history-retry-btn"
-                  onClick={() => window.location.reload()}
-                  style={{ marginTop: '12px' }}
-                >
-                  Retry Connection
-                </button>
-              </div>
-            ) : !snapshot ? (
+            <div className="error-overlay">
+              <AlertCircle size={32} color="#ef4444" />
+              <h3>{error.includes('Authentication') ? 'Authentication Required' : 'Unable to load graph'}</h3>
+              <p>{error}</p>
+              <button
+                className="primary-btn history-retry-btn"
+                onClick={() => window.location.reload()}
+                style={{ marginTop: '12px' }}
+              >
+                Retry Connection
+              </button>
+            </div>
+          </div>
+        ) : activeTab === 'network' ? (
+          <div className="graph-container">
+            {!snapshot ? (
               <div className="loading-overlay">
                 <Loader2 size={36} className="spinner" color="#2dd4bf" />
                 <h3>Analyzing repository structure...</h3>

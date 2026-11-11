@@ -81,6 +81,31 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     }
   }, [resetViewTrigger]);
 
+  // Expose deterministic debug API for automated browser verification (parity with NetworkCanvas)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as any).__prebaseTemporalDebug = {
+        getLayout: () => layout,
+        getTransform: () => ({ ...transform }),
+        getScreenPosition: (commitIndex: number) => {
+          if (commitIndex < 0 || commitIndex >= layout.nodes.length) return null;
+          const node = layout.nodes[commitIndex];
+          return {
+            x: transform.x + node.x * transform.k,
+            y: transform.y + node.y * transform.k,
+            node,
+          };
+        },
+        selectCommit: (commit: CommitSummary | null) => onSelectCommit(commit),
+      };
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        delete (window as any).__prebaseTemporalDebug;
+      }
+    };
+  }, [layout, transform, onSelectCommit]);
+
   // Demand-driven canvas rendering (zero idle CPU usage)
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -349,6 +374,26 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     });
   };
 
+  // Keyboard navigation for accessible commit selection
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (layout.nodes.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const currentIndex = layout.nodes.findIndex((n) => n.commit.hash === selectedCommitHash);
+      if (currentIndex === -1) {
+        onSelectCommit(layout.nodes[0].commit);
+      } else if (currentIndex < layout.nodes.length - 1) {
+        onSelectCommit(layout.nodes[currentIndex + 1].commit);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const currentIndex = layout.nodes.findIndex((n) => n.commit.hash === selectedCommitHash);
+      if (currentIndex > 0) {
+        onSelectCommit(layout.nodes[currentIndex - 1].commit);
+      }
+    }
+  };
+
   return (
     <div
       ref={containerRef}
@@ -359,7 +404,15 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       onMouseUp={handleMouseUp}
       onWheel={handleWheel}
     >
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas
+        ref={canvasRef}
+        tabIndex={0}
+        role="application"
+        aria-label="Git commit history DAG"
+        aria-description="Use ArrowUp and ArrowDown to navigate commits, mouse drag to pan timeline, mouse wheel to zoom, and click to inspect commit details."
+        onKeyDown={handleKeyDown}
+        style={{ width: '100%', height: '100%', display: 'block', outline: 'none' }}
+      />
     </div>
   );
 };

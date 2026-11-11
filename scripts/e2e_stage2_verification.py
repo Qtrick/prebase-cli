@@ -280,13 +280,9 @@ def main():
 
                     browser.close()
             except ImportError:
-                chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                if os.path.exists(chrome_bin):
-                    dom_output = subprocess.check_output([
-                        chrome_bin, "--headless=new", "--disable-gpu", "--dump-dom", app_url_2d
-                    ], timeout=15).decode("utf-8")
-                    assert "relationship-container" in dom_output
-                    success("Verified 2D Relationship Explorer via Chrome dump-dom.")
+                log("\x1b[1;31m[ERROR]\x1b[0m Playwright is not installed. Browser E2E verification requires Playwright.")
+                log("Please install test dependencies: pip install -r requirements-test.txt && playwright install chromium")
+                raise RuntimeError("Playwright is required for browser E2E verification but is not installed.")
 
         finally:
             log("Stopping PreBase server with SIGINT...")

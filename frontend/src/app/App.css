@@ -616,7 +616,8 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   max-width: 440px;
 }
 
-.primary-btn {
+.primary-btn,
+.history-retry-btn {
   background: var(--accent-teal);
   color: #0d1117;
   border: none;
@@ -626,6 +627,18 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   border-radius: 6px;
   cursor: pointer;
   margin-top: 10px;
+  transition: opacity 0.15s ease;
+}
+
+.primary-btn:hover,
+.history-retry-btn:hover {
+  opacity: 0.9;
+}
+
+.primary-btn:focus-visible,
+.history-retry-btn:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 2px;
 }
 
 /* Inspector Panel */

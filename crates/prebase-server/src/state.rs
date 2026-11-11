@@ -56,6 +56,7 @@ pub struct AppState {
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
     pub is_shutting_down: AtomicBool,
+    pub is_analyzing: AtomicBool,
 }
 
 impl AppState {
@@ -96,6 +97,7 @@ impl AppState {
             git_engine,
             event_sender,
             is_shutting_down: AtomicBool::new(false),
+            is_analyzing: AtomicBool::new(false),
         }
     }
 
@@ -158,6 +160,19 @@ impl AppState {
         self.is_shutting_down.store(true, Ordering::SeqCst);
     }
 
+    pub fn is_analyzing(&self) -> bool {
+        self.is_analyzing.load(Ordering::SeqCst)
+    }
+
+    pub fn set_analyzing(&self, analyzing: bool) {
+        self.is_analyzing.store(analyzing, Ordering::SeqCst);
+    }
+
+    pub fn set_status(&self, status: IndexingStatus) {
+        let mut guard = self.status.write().unwrap();
+        *guard = status;
+    }
+
     pub fn get_published(&self) -> Option<Arc<PublishedNetworkState>> {
         self.published.read().unwrap().clone()
     }
@@ -196,6 +211,7 @@ impl AppState {
         if let Some(expected_gen) = target_generation {
             let current = self.current_generation();
             if expected_gen != current {
+                self.set_analyzing(false);
                 info!(
                     "Discarding stale analysis result (expected gen {}, current gen {})",
                     expected_gen, current
@@ -231,6 +247,8 @@ impl AppState {
             "Published network revision {} ({} nodes, {} edges)",
             new_revision, node_count, edge_count
         );
+
+        self.set_analyzing(false);
 
         // Broadcast SSE update event
         let _ = self.event_sender.send(ServerEvent::NetworkUpdated {

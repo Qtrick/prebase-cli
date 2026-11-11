@@ -336,23 +336,9 @@ def main():
                     browser.close()
                 success("Browser rendered web UI cleanly with expected DOM components and session cookie.")
             except ImportError:
-                chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                if os.path.exists(chrome_bin):
-                    log("Running headless Chrome DOM inspection (fallback)...")
-                    app_url = f"{base_url}/?view=network"
-                    chrome_cmd = [
-                        chrome_bin,
-                        "--headless=new",
-                        "--disable-gpu",
-                        "--dump-dom",
-                        app_url
-                    ]
-                    dom_output = subprocess.check_output(chrome_cmd, timeout=15).decode("utf-8")
-                    assert "root" in dom_output, "DOM output missing #root element"
-                    assert "PreBase" in dom_output, "DOM output missing PreBase title"
-                    success("Headless Chrome rendered web UI cleanly with expected DOM components.")
-                else:
-                    log("Neither Playwright nor Google Chrome binary found; skipping headless browser render check.")
+                log("\x1b[1;31m[ERROR]\x1b[0m Playwright is not installed. Full E2E browser inspection requires Playwright.")
+                log("Please install test dependencies: pip install -r requirements-test.txt && playwright install chromium")
+                raise RuntimeError("Playwright is required for browser E2E verification but is not installed.")
 
         finally:
             # 13. Graceful shutdown

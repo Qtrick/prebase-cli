@@ -38,6 +38,9 @@ impl GitEngine {
         cmd.current_dir(&self.root_path)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .args(args)
             .env("LANG", "C")
             .env("LC_ALL", "C")
@@ -154,7 +157,7 @@ impl GitEngine {
 
     fn run_git_str(&self, args: &[&str]) -> Result<String, GitError> {
         let bytes = self.run_git_cmd(args)?;
-        String::from_utf8(bytes).map_err(|e| GitError::ParseError(e.to_string()))
+        Ok(String::from_utf8_lossy(&bytes).to_string())
     }
 
     /// Checks if the target directory is inside a valid git repository or git worktree.

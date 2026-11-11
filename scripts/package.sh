@@ -23,9 +23,9 @@ tar -czf "$PACKAGE_PATH" -C "$TARGET_DIR" prebase
 
 echo "--> Computing SHA256 checksum..."
 if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$PACKAGE_PATH" > "${PACKAGE_PATH}.sha256"
+    (cd "$DIST_DIR" && sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256")
 elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$PACKAGE_PATH" > "${PACKAGE_PATH}.sha256"
+    (cd "$DIST_DIR" && shasum -a 256 "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256")
 fi
 
 echo "==> Package created:"

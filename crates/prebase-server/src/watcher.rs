@@ -29,17 +29,23 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<Event, notify::Error>| match res {
             Ok(event) => match event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                    for path in event.paths {
-                        if let Err(mpsc::error::TrySendError::Full(_)) = tx_clone.try_send(path) {
-                            warn!(
-                                "Filesystem watcher channel full, setting overflow flag for rescan"
-                            );
-                            overflow_cb.store(true, Ordering::SeqCst);
+                EventKind::Access(_) => {}
+                _ => {
+                    if event.paths.is_empty() {
+                        overflow_cb.store(true, Ordering::SeqCst);
+                        let _ = tx_clone.try_send(PathBuf::new());
+                    } else {
+                        for path in event.paths {
+                            if let Err(mpsc::error::TrySendError::Full(_)) = tx_clone.try_send(path)
+                            {
+                                warn!(
+                                    "Filesystem watcher channel full, setting overflow flag for rescan"
+                                );
+                                overflow_cb.store(true, Ordering::SeqCst);
+                            }
                         }
                     }
                 }
-                _ => {}
             },
             Err(e) => {
                 warn!("Filesystem watcher event error: {e}");
@@ -85,10 +91,18 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                 }
                 _ = completion_rx.recv() => {
                     is_analyzing = false;
+                    state.set_analyzing(false);
                     if let Some(handle) = active_task.take() {
                         let _ = handle.await;
                     }
                     debug!("Background repository reanalysis finished");
+
+                    // Drain git ref changes if any arrived while analyzing
+                    if git_ref_changed {
+                        git_ref_changed = false;
+                        debug!("Git ref change detected during reanalysis; notifying subscribers");
+                        state.notify_git_updated();
+                    }
 
                     // If modifications arrived while analysis was running, trigger next single-flight analysis
                     if pending_after_analysis || full_rescan_needed || !changed_sources.is_empty() {
@@ -106,6 +120,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         );
 
                         is_analyzing = true;
+                        state.set_analyzing(true);
                         let generation = state.get_next_generation();
                         active_task = Some(spawn_reanalysis(
                             state.clone(),
@@ -125,19 +140,25 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                             if path.as_os_str().is_empty() {
                                 continue;
                             }
-                            if let Ok(rel) = path.strip_prefix(&state.root_path) {
-                                if is_git_ref_path(rel) {
+                            if let Some(rel) = extract_relative_path(&path, &state.root_path, &state.canonical_root) {
+                                if is_git_ref_path(&rel) {
                                     git_ref_changed = true;
                                     continue;
                                 }
 
-                                if should_ignore_path(rel) {
+                                if should_ignore_path(&rel) {
                                     continue;
                                 }
 
                                 if is_supported_source_file(&path) {
                                     changed_sources.insert(rel.to_string_lossy().replace('\\', "/"));
-                                    if is_analyzing {
+                                    if is_analyzing || state.is_analyzing() {
+                                        pending_after_analysis = true;
+                                    }
+                                } else if path.is_dir() || path.extension().is_none() {
+                                    // A directory mutation (creation, deletion, rename) requires a full rescan
+                                    full_rescan_needed = true;
+                                    if is_analyzing || state.is_analyzing() {
                                         pending_after_analysis = true;
                                     }
                                 }
@@ -149,7 +170,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(200)), if !is_analyzing && (!changed_sources.is_empty() || git_ref_changed || full_rescan_needed || overflow_flag.load(Ordering::SeqCst)) => {
+                _ = tokio::time::sleep(Duration::from_millis(200)), if !is_analyzing && !state.is_analyzing() && (!changed_sources.is_empty() || git_ref_changed || full_rescan_needed || overflow_flag.load(Ordering::SeqCst)) => {
                     if overflow_flag.swap(false, Ordering::SeqCst) {
                         full_rescan_needed = true;
                     }
@@ -171,6 +192,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         );
 
                         is_analyzing = true;
+                        state.set_analyzing(true);
                         let generation = state.get_next_generation();
                         active_task = Some(spawn_reanalysis(
                             state.clone(),
@@ -215,6 +237,7 @@ fn spawn_reanalysis(
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         if state.is_shutting_down() {
+            state.set_analyzing(false);
             let _ = completion_tx.try_send(());
             return;
         }
@@ -223,6 +246,7 @@ fn spawn_reanalysis(
         match analyzer.analyze_path(&state.root_path) {
             Ok(result) => {
                 if state.is_shutting_down() {
+                    state.set_analyzing(false);
                     let _ = completion_tx.try_send(());
                     return;
                 }
@@ -250,8 +274,69 @@ fn spawn_reanalysis(
                 state.set_watcher_health(WatcherHealth::Degraded);
             }
         }
+        state.set_analyzing(false);
         let _ = completion_tx.try_send(());
     })
+}
+
+/// Robustly extracts the relative path of an event target within the repository root,
+/// accounting for macOS `/private/var` vs `/var` symlink aliasing, path canonicalization,
+/// and parent canonicalization for deleted files.
+pub fn extract_relative_path(
+    path: &Path,
+    root_path: &Path,
+    canonical_root: &Path,
+) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(root_path) {
+        return Some(rel.to_path_buf());
+    }
+    if let Ok(rel) = path.strip_prefix(canonical_root) {
+        return Some(rel.to_path_buf());
+    }
+
+    // Helper to normalize macOS `/private/...` to `/...` while preserving absolute path
+    let unprivate = |p: &Path| -> PathBuf {
+        if let Ok(rel) = p.strip_prefix("/private") {
+            Path::new("/").join(rel)
+        } else {
+            p.to_path_buf()
+        }
+    };
+
+    let path_norm = unprivate(path);
+    let root_norm = unprivate(root_path);
+    let canon_norm = unprivate(canonical_root);
+
+    if let Ok(rel) = path_norm.strip_prefix(&root_norm) {
+        return Some(rel.to_path_buf());
+    }
+    if let Ok(rel) = path_norm.strip_prefix(&canon_norm) {
+        return Some(rel.to_path_buf());
+    }
+
+    // Attempt canonicalization for existing path
+    if let Ok(canonical_path) = path.canonicalize() {
+        if let Ok(rel) = canonical_path.strip_prefix(canonical_root) {
+            return Some(rel.to_path_buf());
+        }
+        if let Ok(rel) = canonical_path.strip_prefix(root_path) {
+            return Some(rel.to_path_buf());
+        }
+    } else if let Some(parent) = path.parent() {
+        // For deleted or newly unlinked files, canonicalize existing parent directory
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            if let Some(file_name) = path.file_name() {
+                let canonical_target = canonical_parent.join(file_name);
+                if let Ok(rel) = canonical_target.strip_prefix(canonical_root) {
+                    return Some(rel.to_path_buf());
+                }
+                if let Ok(rel) = canonical_target.strip_prefix(root_path) {
+                    return Some(rel.to_path_buf());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn is_git_ref_path(rel_path: &Path) -> bool {
@@ -375,5 +460,57 @@ mod tests {
 
         assert!(!is_supported_source_file(Path::new("image.png")));
         assert!(!is_supported_source_file(Path::new("binary.exe")));
+    }
+
+    #[test]
+    fn test_extract_relative_path_canonical_and_private_aliasing() {
+        let root = Path::new("/var/folders/3d/project");
+        let canonical_root = Path::new("/private/var/folders/3d/project");
+
+        // Case 1: Exact root prefix
+        assert_eq!(
+            extract_relative_path(
+                Path::new("/var/folders/3d/project/src/app.ts"),
+                root,
+                canonical_root
+            ),
+            Some(PathBuf::from("src/app.ts"))
+        );
+
+        // Case 2: Canonical root prefix
+        assert_eq!(
+            extract_relative_path(
+                Path::new("/private/var/folders/3d/project/src/app.ts"),
+                root,
+                canonical_root
+            ),
+            Some(PathBuf::from("src/app.ts"))
+        );
+
+        // Case 3: Root is non-canonical, path is canonical
+        assert_eq!(
+            extract_relative_path(
+                Path::new("/private/var/folders/3d/project/src/live.ts"),
+                root,
+                root
+            ),
+            Some(PathBuf::from("src/live.ts"))
+        );
+
+        // Case 4: Root is canonical, path is non-canonical
+        assert_eq!(
+            extract_relative_path(
+                Path::new("/var/folders/3d/project/src/live.ts"),
+                canonical_root,
+                canonical_root
+            ),
+            Some(PathBuf::from("src/live.ts"))
+        );
+
+        // Case 5: Path outside root
+        assert_eq!(
+            extract_relative_path(Path::new("/etc/passwd"), root, canonical_root),
+            None
+        );
     }
 }

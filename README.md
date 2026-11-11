@@ -67,10 +67,29 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ## Quick Start
 
-### Prerequisites
-- [Rust toolchain](https://rustup.rs/) (1.75 or later)
-- [Node.js](https://nodejs.org/) (v18+) & `npm` (required only when compiling frontend from source)
-- [Git](https://git-scm.com/)
+### Runtime & Build Prerequisites
+
+- **Runtime (Standalone Binary)**:
+  - **Network Graph (3D & 2D)**: Completely standalone. Zero runtime dependencies (no Node.js, Electron, Python, or external runtime required).
+  - **Temporal Graph (Git History)**: Requires a system `git` CLI executable available in `PATH` (Git 2.20+ recommended). In environments without Git or in non-git directories, PreBase runs seamlessly in Network Graph mode and displays a purposeful informational state for Temporal history.
+  - **Release Binaries & Signing**: PreBase distribution binaries are currently unsigned and un-notarized open-source artifacts. On macOS, if Gatekeeper flags the downloaded binary, remove the quarantine attribute with `xattr -d com.apple.quarantine prebase` or compile locally from source.
+
+- **Supported Platforms & Architecture Matrix**:
+  - **Tier 1 (Automated CI & Full Browser E2E Matrix)**:
+    - macOS Apple Silicon (`aarch64-apple-darwin`, macOS 12+)
+    - Linux x86_64 (`x86_64-unknown-linux-gnu`, glibc 2.31+)
+  - **Tier 2 (Packaged Release Binaries / Best-Effort)**:
+    - macOS Intel (`x86_64-apple-darwin`)
+    - Linux ARM64 (`aarch64-unknown-linux-gnu`)
+    - Windows x86_64 (`x86_64-pc-windows-msvc`)
+
+- **Testing & Headless Browser Verification Prerequisites**:
+  - Python **3.10 – 3.13** (Python 3.14 is not currently supported due to upstream Playwright/greenlet wheel compatibility).
+  - Test dependencies: `pip install -r requirements-test.txt && playwright install chromium`
+
+- **Compiling From Source**:
+  - [Rust toolchain](https://rustup.rs/) (1.75 or later)
+  - [Node.js](https://nodejs.org/) (v18+) & `npm` (required only when building frontend assets into the binary)
 
 ### Build From Source
 
