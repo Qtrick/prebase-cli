@@ -10,12 +10,13 @@ use prebase_core::index::GraphIndex;
 use prebase_core::model::{
     AnalysisCoverage, AnalysisIssue, FileNode, GraphSnapshot, NodeAnalysisStatus, ResolutionStatus,
 };
-use prebase_core::scanner::{DiscoveredFile, RepositoryScanner, ScannerConfig};
+use prebase_core::scanner::{DiscoveredFile, RepositoryScanner, ScanOutput, ScannerConfig};
 
 use crate::ast::SourceParser;
 use crate::resolver::{ImportResolver, ResolvedTarget};
 use crate::tsconfig::TsConfig;
 
+#[derive(Debug)]
 pub struct AnalysisResult {
     pub snapshot: GraphSnapshot,
     pub index: GraphIndex,
@@ -38,27 +39,42 @@ impl RepositoryAnalyzer {
     }
 
     pub fn analyze_path(&self, repo_path: &Path) -> Result<AnalysisResult, String> {
+        self.analyze_path_cancellable(repo_path, || false)
+    }
+
+    pub fn analyze_path_cancellable<F: Fn() -> bool + Send + Sync>(
+        &self,
+        repo_path: &Path,
+        is_cancelled: F,
+    ) -> Result<AnalysisResult, String> {
         let start_time = Instant::now();
+        if is_cancelled() {
+            return Err("Analysis cancelled before starting".to_string());
+        }
 
         let scanner = RepositoryScanner::new(repo_path, self.scanner_config.clone())
             .map_err(|e| format!("Failed to initialize repository scanner: {e}"))?;
 
         let repo_id = scanner.repository_id();
-        let (discovered_files, excluded_count) = scanner.scan();
+        let scan_output = scanner.scan_with_cancellation(&is_cancelled);
+        if is_cancelled() {
+            return Err("Analysis cancelled during scan".to_string());
+        }
 
         info!(
-            "Discovered {} candidate files in {} (excluded: {})",
-            discovered_files.len(),
+            "Discovered {} candidate files in {} (excluded: {}, traversal errors: {})",
+            scan_output.discovered.len(),
             repo_path.display(),
-            excluded_count
+            scan_output.excluded_count,
+            scan_output.traversal_errors.len(),
         );
 
-        let result = self.analyze_discovered(
+        let result = self.analyze_discovered_internal(
             scanner.root(),
             &repo_id,
-            discovered_files,
-            excluded_count,
+            scan_output,
             1, // Initial revision
+            &is_cancelled,
         )?;
 
         let duration_ms = start_time.elapsed().as_millis();
@@ -79,7 +95,31 @@ impl RepositoryAnalyzer {
         excluded_count: usize,
         revision: u64,
     ) -> Result<(GraphSnapshot, GraphIndex), String> {
+        self.analyze_discovered_internal(
+            root,
+            repository_id,
+            ScanOutput {
+                discovered: discovered_files,
+                excluded_count,
+                traversal_errors: Vec::new(),
+            },
+            revision,
+            &|| false,
+        )
+    }
+
+    fn analyze_discovered_internal(
+        &self,
+        root: &Path,
+        repository_id: &str,
+        scan_output: ScanOutput,
+        revision: u64,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(GraphSnapshot, GraphIndex), String> {
         let mut graph = CanonicalGraph::new();
+        let discovered_files = scan_output.discovered;
+        let excluded_count = scan_output.excluded_count;
+        let traversal_errors = scan_output.traversal_errors;
         let mut known_files = HashSet::with_capacity(discovered_files.len());
 
         for file in &discovered_files {
@@ -108,7 +148,20 @@ impl RepositoryAnalyzer {
         let analyzed_counter = AtomicUsize::new(0);
         let mut issues = Vec::new();
 
+        for err_msg in traversal_errors {
+            issues.push(AnalysisIssue {
+                file_path: ".".to_string(),
+                issue_kind: "TraversalError".to_string(),
+                message: err_msg,
+                line: None,
+                column: None,
+            });
+        }
+
         for file in &discovered_files {
+            if is_cancelled() {
+                return Err("Analysis cancelled during AST parsing".to_string());
+            }
             if !file.is_supported_language {
                 continue;
             }

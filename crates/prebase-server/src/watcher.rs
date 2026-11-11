@@ -156,8 +156,9 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                                     if is_analyzing || state.is_analyzing() {
                                         pending_after_analysis = true;
                                     }
-                                } else if path.is_dir() || path.extension().is_none() {
-                                    // A directory mutation (creation, deletion, rename) requires a full rescan
+                                } else {
+                                    // Any other non-ignored filesystem change (e.g. README.md, styles.css, directory changes)
+                                    // requires a full rescan to maintain truthful discovered file counts, coverage, and metadata.
                                     full_rescan_needed = true;
                                     if is_analyzing || state.is_analyzing() {
                                         pending_after_analysis = true;
@@ -243,8 +244,11 @@ fn spawn_reanalysis(
             return;
         }
         let start = std::time::Instant::now();
+        let state_cancel = state.clone();
         let analyzer = RepositoryAnalyzer::default();
-        match analyzer.analyze_path(&state.root_path) {
+        match analyzer
+            .analyze_path_cancellable(&state.root_path, move || state_cancel.is_shutting_down())
+        {
             Ok(result) => {
                 if state.is_shutting_down() {
                     state.set_analyzing(false);
@@ -271,8 +275,10 @@ fn spawn_reanalysis(
                 }
             }
             Err(err) => {
-                error!("Reanalysis failed on filesystem change: {err}");
-                state.set_watcher_health(WatcherHealth::Degraded);
+                if !state.is_shutting_down() {
+                    error!("Reanalysis failed on filesystem change: {err}");
+                    state.set_watcher_health(WatcherHealth::Degraded);
+                }
             }
         }
         state.set_analyzing(false);
@@ -433,6 +439,29 @@ mod tests {
         assert!(should_ignore_path(Path::new("NODE_MODULES/package.json")));
         assert!(should_ignore_path(Path::new(".env")));
         assert!(should_ignore_path(Path::new("secrets.key")));
+    }
+
+    #[test]
+    fn test_watcher_policy_for_unsupported_non_ignored_files() {
+        // Non-source files that are NOT ignored (e.g. README.md, styles.css, notes.txt)
+        assert!(!should_ignore_path(Path::new("README.md")));
+        assert!(!is_supported_source_file(Path::new("README.md")));
+
+        assert!(!should_ignore_path(Path::new("styles.css")));
+        assert!(!is_supported_source_file(Path::new("styles.css")));
+
+        assert!(!should_ignore_path(Path::new("docs/architecture.txt")));
+        assert!(!is_supported_source_file(Path::new(
+            "docs/architecture.txt"
+        )));
+
+        // Ignored files MUST remain ignored
+        assert!(should_ignore_path(Path::new(".DS_Store")));
+        assert!(should_ignore_path(Path::new("nested/.DS_Store")));
+        assert!(should_ignore_path(Path::new(".git/config")));
+        assert!(should_ignore_path(Path::new("node_modules/pkg/index.js")));
+        assert!(should_ignore_path(Path::new(".env")));
+        assert!(should_ignore_path(Path::new("backup.tmp")));
     }
 
     #[test]

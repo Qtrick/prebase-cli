@@ -6,7 +6,7 @@ pub mod scanner;
 pub use graph::CanonicalGraph;
 pub use index::{FileInspection, GraphIndex};
 pub use model::*;
-pub use scanner::{DiscoveredFile, RepositoryScanner, ScanError, ScannerConfig};
+pub use scanner::{DiscoveredFile, RepositoryScanner, ScanError, ScanOutput, ScannerConfig};
 
 #[cfg(test)]
 mod tests {

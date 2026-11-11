@@ -179,7 +179,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
         let initial_gen = state_clone.get_next_generation();
         let analyzer = RepositoryAnalyzer::default();
-        match tokio::task::spawn_blocking(move || analyzer.analyze_path(&root_clone)).await {
+        let state_cancel = state_clone.clone();
+        match tokio::task::spawn_blocking(move || {
+            analyzer.analyze_path_cancellable(&root_clone, move || state_cancel.is_shutting_down())
+        })
+        .await
+        {
             Ok(Ok(result)) => {
                 let duration = start.elapsed().as_millis() as u64;
                 let node_count = result.snapshot.nodes.len();
@@ -203,17 +208,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             Ok(Err(err)) => {
                 state_clone.set_analyzing(false);
-                error!("Repository analysis failed: {err}");
-                eprintln!("\x1b[31m✖\x1b[0m Repository analysis failed: {err}");
-                if state_clone.current_generation() == initial_gen {
-                    state_clone.set_failed(&err);
+                if !state_clone.is_shutting_down() {
+                    error!("Repository analysis failed: {err}");
+                    eprintln!("\x1b[31m✖\x1b[0m Repository analysis failed: {err}");
+                    if state_clone.current_generation() == initial_gen {
+                        state_clone.set_failed(&err);
+                    }
                 }
             }
             Err(join_err) => {
                 state_clone.set_analyzing(false);
-                error!("Analysis task panicked: {join_err}");
-                if state_clone.current_generation() == initial_gen {
-                    state_clone.set_failed("Analysis task panicked");
+                if !state_clone.is_shutting_down() {
+                    error!("Analysis task panicked: {join_err}");
+                    if state_clone.current_generation() == initial_gen {
+                        state_clone.set_failed(&join_err.to_string());
+                    }
                 }
             }
         }

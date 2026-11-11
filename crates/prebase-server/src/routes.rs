@@ -239,18 +239,22 @@ pub async fn handle_inspect_edge(
 /// - Normalizes separators (`\` to `/`).
 /// - Permits legitimate filenames containing adjacent periods, e.g. `src/component..ts` or `src/version..legacy.ts`.
 pub fn is_safe_relative_path(path_str: &str) -> bool {
-    let clean = path_str.trim();
-    if clean.is_empty() || clean.starts_with('/') || clean.starts_with('\\') || clean.contains('\0')
+    if path_str.trim().is_empty()
+        || path_str.starts_with('/')
+        || path_str.starts_with('\\')
+        || path_str.contains('\0')
     {
         return false;
     }
     // Check for Windows drive prefix uniformly across all operating systems (e.g. "C:", "d:/", etc.)
-    if clean.len() >= 2 && clean.as_bytes()[0].is_ascii_alphabetic() && clean.as_bytes()[1] == b':'
+    if path_str.len() >= 2
+        && path_str.as_bytes()[0].is_ascii_alphabetic()
+        && path_str.as_bytes()[1] == b':'
     {
         return false;
     }
     // Normalize backslashes to forward slashes for cross-platform component parsing
-    let normalized = clean.replace('\\', "/");
+    let normalized = path_str.replace('\\', "/");
     let path = std::path::Path::new(&normalized);
     if path.is_absolute() {
         return false;
@@ -276,7 +280,7 @@ pub async fn handle_get_source(
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> Result<Json<SourceContentResponse>, (StatusCode, &'static str)> {
-    let clean_path = file_path.trim();
+    let clean_path = file_path.as_str();
     // Filesystem security check: component-aware validation prevents path traversal!
     if !is_safe_relative_path(clean_path) {
         return Err((StatusCode::BAD_REQUEST, "Invalid path"));

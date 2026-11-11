@@ -395,6 +395,8 @@ def main():
                     page.locator("button.mode-btn:has-text('2D Relationships')").click()
 
                 expect(page.locator(".relationship-container")).to_be_visible(timeout=10000)
+                # Wait for spatial transition to settle completely (350ms CSS transition)
+                page.wait_for_timeout(450)
                 page.screenshot(path=os.path.join(SCREENSHOT_DIR, "21_2d_relationship_deep.png"))
                 success("2D Relationship Explorer rendered focused on Card.tsx.")
 

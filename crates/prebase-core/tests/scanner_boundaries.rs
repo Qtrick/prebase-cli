@@ -677,3 +677,87 @@ fn symlinks_to_sensitive_targets_are_excluded() {
         "expected at least 18 excluded sensitive entries and symlinks, got {excluded}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn scanner_reports_traversal_errors_for_unreadable_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // 1. Legitimate readable file
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(src_dir.join("main.ts"), "export const main = 1;\n").unwrap();
+
+    // 2. Unreadable directory (0o000)
+    let restricted_dir = root.join("restricted");
+    fs::create_dir_all(&restricted_dir).unwrap();
+    fs::write(
+        restricted_dir.join("secret.ts"),
+        "export const secret = 42;\n",
+    )
+    .unwrap();
+    fs::set_permissions(&restricted_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Ensure permissions are restored at test completion so tempdir cleanup succeeds
+    struct PermGuard<'a>(&'a Path);
+    impl<'a> Drop for PermGuard<'a> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _guard = PermGuard(&restricted_dir);
+
+    let scanner = RepositoryScanner::new(root, ScannerConfig::default()).unwrap();
+    let scan_output = scanner.scan_with_cancellation(|| false);
+
+    // Assert readable files are still discovered resiliently
+    assert!(
+        scan_output
+            .discovered
+            .iter()
+            .any(|f| f.relative_path == "src/main.ts"),
+        "readable files must still be discovered"
+    );
+
+    // Assert traversal error was recorded in traversal_errors
+    assert!(
+        !scan_output.traversal_errors.is_empty(),
+        "scanner must capture traversal errors for unreadable directory"
+    );
+    assert!(
+        scan_output.traversal_errors.iter().any(|d| {
+            d.to_lowercase().contains("permission denied") || d.contains("restricted")
+        }),
+        "diagnostic message must identify the restricted directory: {:?}",
+        scan_output.traversal_errors
+    );
+}
+
+#[test]
+fn scanner_cooperative_cancellation_aborts_early() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fixtures = &[
+        ("a.ts", "export const a = 1;\n"),
+        ("b.ts", "export const b = 2;\n"),
+        ("c.ts", "export const c = 3;\n"),
+    ];
+    write_fixtures(root, fixtures);
+
+    let scanner = RepositoryScanner::new(root, ScannerConfig::default()).unwrap();
+
+    // 1. Pre-cancelled scan returns empty discovered files immediately without panicking
+    let res_pre = scanner.scan_with_cancellation(|| true);
+    assert_eq!(
+        res_pre.discovered.len(),
+        0,
+        "scan_with_cancellation must abort immediately when pre-cancelled"
+    );
+
+    // 2. Uncancelled scan succeeds
+    let res_ok = scanner.scan_with_cancellation(|| false);
+    assert_eq!(res_ok.discovered.len(), 3);
+}

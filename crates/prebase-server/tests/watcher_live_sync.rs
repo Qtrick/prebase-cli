@@ -268,13 +268,38 @@ async fn test_watcher_live_sync_lifecycle() {
         "node src/c.ts must be REMOVED from graph snapshot"
     );
 
-    // 7. Modify an unsupported file (notes.txt) and an ignored file (.DS_Store), verify revision does NOT increment
+    // 7a. Add an unsupported non-ignored file (notes.txt), verify it triggers full rescan and revision increments
     fs::write(repo_path.join("notes.txt"), "Architectural notes\n")
         .expect("failed to write notes.txt");
+
+    let (rev_5, changed_5) =
+        wait_for_network_updated(&mut event_rx, 5, Duration::from_secs(5)).await;
+    assert_eq!(rev_5, 5);
+    assert!(
+        changed_5.contains(&"*".to_string()),
+        "unsupported non-ignored file must trigger full rescan wildcard: {changed_5:?}"
+    );
+
+    let pub_5 = state
+        .get_published()
+        .expect("missing published state for rev 5");
+    assert_eq!(pub_5.revision, 5);
+    assert!(
+        pub_5
+            .snapshot
+            .nodes
+            .iter()
+            .any(|n| n.relative_path == "notes.txt"),
+        "notes.txt must appear in snapshot nodes"
+    );
+
+    // 7b. Modify ignored files (.DS_Store, scratch.tmp), verify revision does NOT increment
     fs::write(repo_path.join(".DS_Store"), "mock macos ds store")
         .expect("failed to write .DS_Store");
     fs::write(src_dir.join(".DS_Store"), "mock nested ds store")
         .expect("failed to write src/.DS_Store");
+    fs::write(repo_path.join("scratch.tmp"), "temporary data")
+        .expect("failed to write scratch.tmp");
 
     // Wait longer than the debounce window (200ms) and confirm no NetworkUpdated event is emitted
     let debounce_window = tokio::time::sleep(Duration::from_millis(600));
@@ -284,12 +309,12 @@ async fn test_watcher_live_sync_lifecycle() {
             _ = &mut debounce_window => break,
             evt = event_rx.recv() => {
                 if let Ok(ServerEvent::NetworkUpdated { revision, .. }) = evt {
-                    panic!("Unexpected NetworkUpdated revision {revision} triggered by ignored/unsupported file");
+                    panic!("Unexpected NetworkUpdated revision {revision} triggered by ignored files");
                 }
             }
         }
     }
-    assert_eq!(state.get_current_revision(), 4);
+    assert_eq!(state.get_current_revision(), 5);
     assert!(!state.is_analyzing());
 
     // 8. Update .git/HEAD, verify git.updated event is emitted and NO source reanalysis / revision increment occurs
@@ -307,17 +332,17 @@ async fn test_watcher_live_sync_lifecycle() {
     );
     assert_eq!(
         state.get_current_revision(),
-        4,
+        5,
         "revision must not increment on git ref update"
     );
     assert!(!state.is_analyzing());
 
     // Additional quiet window to ensure no delayed reanalysis occurred
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(state.get_current_revision(), 4);
+    assert_eq!(state.get_current_revision(), 5);
     assert!(!state.is_analyzing());
 
-    // 9. Rapid burst of multiple writes: write 3 files in rapid succession, verify they coalesce into a single follow-up revision
+    // 9. Rapid burst of multiple writes: write 3 files in rapid succession, verify they coalesce into a single follow-up revision (rev 6)
     fs::write(
         src_dir.join("burst1.ts"),
         "export const burst1 = 'burst-1';\n",
@@ -334,43 +359,43 @@ async fn test_watcher_live_sync_lifecycle() {
     )
     .expect("failed to write burst3.ts");
 
-    let (rev_5, changed_5) =
-        wait_for_network_updated(&mut event_rx, 5, Duration::from_secs(5)).await;
-    assert_eq!(rev_5, 5);
+    let (rev_6, changed_6) =
+        wait_for_network_updated(&mut event_rx, 6, Duration::from_secs(5)).await;
+    assert_eq!(rev_6, 6);
 
     assert!(
-        changed_5.contains(&"*".to_string())
-            || (changed_5.contains(&"src/burst1.ts".to_string())
-                && changed_5.contains(&"src/burst2.ts".to_string())
-                && changed_5.contains(&"src/burst3.ts".to_string())),
-        "Coalesced change set must report all burst files: {changed_5:?}"
+        changed_6.contains(&"*".to_string())
+            || (changed_6.contains(&"src/burst1.ts".to_string())
+                && changed_6.contains(&"src/burst2.ts".to_string())
+                && changed_6.contains(&"src/burst3.ts".to_string())),
+        "Coalesced change set must report all burst files: {changed_6:?}"
     );
 
-    let pub_5 = state
+    let pub_6 = state
         .get_published()
-        .expect("missing published state for rev 5");
-    assert_eq!(pub_5.revision, 5);
-    assert!(pub_5
+        .expect("missing published state for rev 6");
+    assert_eq!(pub_6.revision, 6);
+    assert!(pub_6
         .snapshot
         .nodes
         .iter()
         .any(|n| n.relative_path == "src/burst1.ts"));
-    assert!(pub_5
+    assert!(pub_6
         .snapshot
         .nodes
         .iter()
         .any(|n| n.relative_path == "src/burst2.ts"));
-    assert!(pub_5
+    assert!(pub_6
         .snapshot
         .nodes
         .iter()
         .any(|n| n.relative_path == "src/burst3.ts"));
 
-    // Verify coalesce by ensuring no additional revision (rev 6) fires
+    // Verify coalesce by ensuring no additional revision (rev 7) fires
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         state.get_current_revision(),
-        5,
+        6,
         "burst writes must coalesce into exactly one revision increment"
     );
     assert!(!state.is_analyzing());

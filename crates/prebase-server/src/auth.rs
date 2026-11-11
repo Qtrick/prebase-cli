@@ -128,9 +128,12 @@ pub async fn host_and_auth_middleware(
     let is_api_route = path.starts_with("/api/");
     let is_public_api = path == "/api/v1/health" || path == "/api/v1/auth/session";
 
-    // 3. Defense-in-depth Sec-Fetch-Site validation (mitigate browser cross-site ambient cookie requests)
+    // 3. Defense-in-depth Sec-Fetch-Site validation (mitigate browser cross-site & same-site cross-port ambient cookie abuse)
     if let Some(sec_site) = headers.get("sec-fetch-site").and_then(|s| s.to_str().ok()) {
-        if sec_site.eq_ignore_ascii_case("cross-site") {
+        let is_cross_origin = sec_site.eq_ignore_ascii_case("cross-site")
+            || sec_site.eq_ignore_ascii_case("same-site");
+
+        if is_cross_origin {
             let is_top_level_navigation = (req.method() == Method::GET
                 || req.method() == Method::HEAD)
                 && headers.get("sec-fetch-mode").and_then(|m| m.to_str().ok()) == Some("navigate")
@@ -141,7 +144,7 @@ pub async fn host_and_auth_middleware(
                     .is_none_or(|d| d == "document");
 
             if !is_top_level_navigation {
-                warn!("Rejected cross-site request to {path} with Sec-Fetch-Site: {sec_site}");
+                warn!("Rejected cross-origin request to {path} with Sec-Fetch-Site: {sec_site}");
                 return Err((StatusCode::FORBIDDEN, "Forbidden Cross-Site Request"));
             }
         }

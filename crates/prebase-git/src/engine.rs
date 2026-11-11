@@ -155,6 +155,10 @@ impl GitEngine {
         }
     }
 
+    /// Executes git command and converts stdout bytes into a UTF-8 string.
+    /// Uses lossy UTF-8 conversion (`String::from_utf8_lossy`), which preserves valid
+    /// UTF-8 sequences (including multibyte Unicode filenames, messages, and author names)
+    /// while replacing invalid byte sequences with U+FFFD to avoid panicking on arbitrary bytes.
     fn run_git_str(&self, args: &[&str]) -> Result<String, GitError> {
         let bytes = self.run_git_cmd(args)?;
         Ok(String::from_utf8_lossy(&bytes).to_string())

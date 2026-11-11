@@ -292,4 +292,93 @@ mod tests {
         // Only valid parsed files count towards total_analyzed
         assert_eq!(snapshot.coverage.total_analyzed, 2); // main.ts and broken.ts (tree-sitter parses error nodes)
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_analyzer_captures_scanner_traversal_errors_as_issues() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("main.ts"), "export const a = 1;\n").unwrap();
+
+        let unreadable_dir = root.join("locked_dir");
+        fs::create_dir_all(&unreadable_dir).unwrap();
+        fs::write(unreadable_dir.join("hidden.ts"), "const x = 2;\n").unwrap();
+        fs::set_permissions(&unreadable_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        struct PermGuard<'a>(&'a Path);
+        impl<'a> Drop for PermGuard<'a> {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _guard = PermGuard(&unreadable_dir);
+
+        let analyzer = RepositoryAnalyzer::default();
+        let result = analyzer
+            .analyze_path(root)
+            .expect("analysis must complete and record diagnostics");
+
+        let snapshot = result.snapshot;
+        let traversal_issue = snapshot
+            .issues
+            .iter()
+            .find(|i| i.issue_kind == "TraversalError");
+        assert!(
+            traversal_issue.is_some(),
+            "snapshot must contain TraversalError issue: {:?}",
+            snapshot.issues
+        );
+        let issue = traversal_issue.unwrap();
+        assert_eq!(issue.file_path, ".");
+        assert!(!issue.message.is_empty());
+
+        assert!(snapshot.coverage.total_issues > 0);
+        assert!(
+            !snapshot.coverage.is_complete,
+            "coverage.is_complete must be false when traversal issues exist"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_cooperative_cancellation_during_parsing() {
+        use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        for i in 1..=5 {
+            fs::write(
+                src_dir.join(format!("file_{i}.ts")),
+                format!("export const val_{i} = {i};\n"),
+            )
+            .unwrap();
+        }
+
+        let analyzer = RepositoryAnalyzer::default();
+
+        // 1. Pre-cancelled
+        let res_cancelled = analyzer.analyze_path_cancellable(root, || true);
+        assert!(res_cancelled.is_err());
+        assert!(res_cancelled.unwrap_err().contains("Analysis cancelled"));
+
+        // 2. Mid-parse cancellation (abort after reading first file)
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let parse_count_clone = parse_count.clone();
+        let res_mid = analyzer.analyze_path_cancellable(root, move || {
+            parse_count_clone.fetch_add(1, Ordering::SeqCst) >= 2
+        });
+        assert!(res_mid.is_err());
+        assert!(res_mid.unwrap_err().contains("Analysis cancelled"));
+    }
 }

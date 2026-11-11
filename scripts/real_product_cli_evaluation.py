@@ -73,16 +73,16 @@ def test_repository_a_small_deps(p):
         with open(os.path.join(repo_dir, "build.log"), "w") as f:
             f.write('Build completed successfully.\n')
 
-        # Test CLI default map launch
+        # Test CLI default map launch with dynamic port allocation (port 0)
         log_file_path = os.path.join(repo_dir, "server.log")
         log_file = open(log_file_path, "w")
-        cmd = [BIN, "--port", "19971", "--no-open", "map", repo_dir]
+        cmd = [BIN, "--port", "0", "--no-open", "map", repo_dir]
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
         
         try:
             startup_url, token = parse_startup_info(log_file_path)
             assert startup_url and token, "Could not acquire startup URL"
-            success("CLI started on Repo A with clean port allocation")
+            success("CLI started on Repo A with dynamic port allocation")
 
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 800})
@@ -90,18 +90,51 @@ def test_repository_a_small_deps(p):
             expect(page.locator(".status-indicator:has-text('Index Ready')")).to_be_visible(timeout=10000)
             success("Browser loaded Repo A with Ready index")
 
-            # 1. Verify Network Canvas rendered
+            # 1. Verify exact graph topology & isolated file behavior via browser session
+            snap = page.evaluate("() => fetch('/api/v1/network').then(r => r.json())")
+            nodes = {n["id"]: n for n in snap["nodes"]}
+            assert "src/index.ts" in nodes, "src/index.ts must exist in graph nodes"
+            assert "src/components/Card.tsx" in nodes, "src/components/Card.tsx must exist"
+            assert "src/components/Button.tsx" in nodes, "src/components/Button.tsx must exist"
+            assert "src/utils/math.ts" in nodes, "src/utils/math.ts must exist"
+            assert "src/isolated.ts" in nodes, "src/isolated.ts must exist"
+            assert "build.log" in nodes, "build.log must exist as discovered file"
+
+            # Check isolated node semantics
+            assert nodes["src/isolated.ts"]["direct_dependency_count"] == 0
+            assert nodes["src/isolated.ts"]["direct_dependent_count"] == 0
+
+            # Check exact directed edge topology (index -> Card -> Button -> math)
+            edges = [(e["source_file_id"], e["target_file_id"]) for e in snap["edges"]]
+            assert ("src/index.ts", "src/components/Card.tsx") in edges
+            assert ("src/components/Card.tsx", "src/components/Button.tsx") in edges
+            assert ("src/components/Button.tsx", "src/utils/math.ts") in edges
+            assert len(edges) == 3, f"Expected exactly 3 edges, got {len(edges)}: {edges}"
+            success("Exact graph topology, dependencies, evidence, and isolated node verified")
+
+            # 2. Verify Network Canvas rendered
             expect(page.locator(".network-canvas")).to_be_visible(timeout=5000)
             
-            # 2. Select node via search
+            # 3. Select node via search with camera orientation verification
+            cam_before = page.evaluate("() => window.__prebaseNetworkDebug ? window.__prebaseNetworkDebug.getCamera() : null")
+            assert cam_before is not None, "window.__prebaseNetworkDebug must be available"
+
             search_input = page.locator(".search-input")
             search_input.fill("Card")
             page.wait_for_selector("#search-dropdown-list", timeout=5000)
             page.locator("li.search-item:has-text('Card.tsx')").click()
             expect(page.locator(".inspector-panel")).to_contain_text("Card.tsx", timeout=5000)
-            success("Search selection found and selected Card.tsx without moving camera")
 
-            # 3. Direct 2D Exploration
+            cam_after = page.evaluate("() => window.__prebaseNetworkDebug ? window.__prebaseNetworkDebug.getCamera() : null")
+            assert cam_after is not None, "window.__prebaseNetworkDebug must be available"
+            assert abs(cam_before['yaw'] - cam_after['yaw']) < 1e-4, f"Yaw changed: {cam_before['yaw']} vs {cam_after['yaw']}"
+            assert abs(cam_before['pitch'] - cam_after['pitch']) < 1e-4, f"Pitch changed: {cam_before['pitch']} vs {cam_after['pitch']}"
+            assert abs(cam_before['zoom'] - cam_after['zoom']) < 1e-4, f"Zoom changed: {cam_before['zoom']} vs {cam_after['zoom']}"
+            assert abs(cam_before['panX'] - cam_after['panX']) < 1e-4, f"PanX changed: {cam_before['panX']} vs {cam_after['panX']}"
+            assert abs(cam_before['panY'] - cam_after['panY']) < 1e-4, f"PanY changed: {cam_before['panY']} vs {cam_after['panY']}"
+            success("Search selection found and selected Card.tsx with strict camera orientation preservation assertion")
+
+            # 4. Direct 2D Exploration
             page.locator("button.mode-btn:has-text('2D Relationships')").click()
             expect(page.locator(".relationship-container")).to_be_visible(timeout=5000)
             success("Switched to 2D Relationship Explorer")
@@ -111,17 +144,23 @@ def test_repository_a_small_deps(p):
             expect(page.locator(".inspector-panel")).to_contain_text("index.ts", timeout=5000)
             success("Card.tsx direct dependencies and dependents accurately confirmed")
 
-            # 4. Refocus on Button.tsx and Back navigation
-            cand = page.locator("button.candidate-item:has-text('Button.tsx')")
-            if cand.count() > 0:
-                cand.first.click()
-                back_btn = page.locator("button.hud-btn.back-btn")
-                expect(back_btn).to_be_visible(timeout=5000)
-                back_btn.click()
-                expect(page.locator(".inspector-panel")).to_contain_text("Card.tsx", timeout=5000)
-                success("2D Back navigation restored Card.tsx")
+            # 5. Non-optional Refocus on Button.tsx and Back navigation
+            button_rel = page.locator(".inspector-panel .relation-item-btn:has-text('Button.tsx')")
+            expect(button_rel).to_be_visible(timeout=5000)
+            button_rel.click()
 
-            # 5. Return to 3D
+            refocus_btn = page.locator("button.refocus-2d-btn:has-text('Focus relationships here')")
+            expect(refocus_btn).to_be_visible(timeout=5000)
+            refocus_btn.click()
+            expect(page.locator(".inspector-panel h3.file-name")).to_have_text("Button.tsx", timeout=5000)
+
+            back_btn = page.locator("button.hud-btn.back-btn")
+            expect(back_btn).to_be_visible(timeout=5000)
+            back_btn.click()
+            expect(page.locator(".inspector-panel h3.file-name")).to_have_text("Card.tsx", timeout=5000)
+            success("2D Refocus on neighbor and Back navigation verified (non-optional assertion passed)")
+
+            # 6. Return to 3D
             page.locator("button.mode-btn:has-text('3D Overview')").click()
             expect(page.locator(".network-canvas")).to_be_visible(timeout=5000)
             success("Returned from 2D to 3D Overview")
@@ -169,7 +208,7 @@ def test_repository_b_rich_git(p):
 
         log_file_path = os.path.join(repo_dir, "server.log")
         log_file = open(log_file_path, "w")
-        cmd = [BIN, "--port", "19972", "--no-open", "history", repo_dir]
+        cmd = [BIN, "--port", "0", "--no-open", "history", repo_dir]
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
         
         try:
@@ -220,7 +259,7 @@ def test_repository_c_read_only_prebase(p):
     log("REPO-C", "Launching PreBase against its own codebase (read-only)...")
     log_file_path = os.path.join(tempfile.gettempdir(), "prebase-self.log")
     log_file = open(log_file_path, "w")
-    cmd = [BIN, "--port", "19973", "--no-open", "map", ROOT_DIR]
+    cmd = [BIN, "--port", "0", "--no-open", "map", ROOT_DIR]
     proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
     try:
         startup_url, token = parse_startup_info(log_file_path)
@@ -270,15 +309,15 @@ def test_failure_behaviors():
     assert res.returncode != 0, "CLI must fail on non-existent path"
     success("Non-existent repository path rejected with non-zero exit code")
 
-    # 2. No-watch mode
+    # 2. No-watch mode with dynamic port allocation (port 0)
     tmp = tempfile.mkdtemp()
     try:
-        proc = subprocess.Popen([BIN, "--port", "19974", "--no-open", "--no-watch", "map", tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen([BIN, "--port", "0", "--no-open", "--no-watch", "map", tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.0)
         assert proc.poll() is None, "Server must remain running in --no-watch mode"
         proc.terminate()
         proc.wait(timeout=5)
-        success("--no-watch mode launches cleanly and terminates gracefully")
+        success("--no-watch mode launches cleanly on port 0 and terminates gracefully")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

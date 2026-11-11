@@ -15,7 +15,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use prebase_core::index::GraphIndex;
-    use prebase_core::model::{AnalysisCoverage, GraphSnapshot};
+    use prebase_core::model::{
+        AnalysisCoverage, FileKind, FileNode, GraphSnapshot, NodeAnalysisStatus,
+    };
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -802,6 +804,22 @@ mod tests {
                 path
             );
         }
+
+        // 5. Legitimate filenames containing leading or trailing whitespace inside path components
+        let valid_whitespace_paths = [
+            "src/ leading.ts",
+            "src/trailing .ts",
+            " leading.ts",
+            "trailing .ts",
+            "src/ leading and trailing .ts",
+            "nested dir/ spaced component / file.tsx",
+        ];
+        for path in &valid_whitespace_paths {
+            assert!(
+                is_safe_relative_path(path),
+                "Expected legitimate whitespace path '{path}' to be accepted without destructive trimming"
+            );
+        }
     }
 
     #[tokio::test]
@@ -994,5 +1012,116 @@ mod tests {
             published_after.revision, 1,
             "Published state revision must remain untouched at 1"
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_source_preserves_whitespace_filenames() {
+        use tower::ServiceExt;
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().canonicalize().unwrap();
+        let src_dir = repo_root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        // Create real files with leading and trailing spaces in filename components
+        let leading_name = "src/ leading.ts";
+        let trailing_name = "src/trailing .ts";
+
+        let leading_content = "export const leading = true;";
+        let trailing_content = "export const trailing = true;";
+
+        std::fs::write(repo_root.join(leading_name), leading_content).unwrap();
+        std::fs::write(repo_root.join(trailing_name), trailing_content).unwrap();
+
+        let state = Arc::new(AppState::new(
+            repo_root.clone(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        let snap = GraphSnapshot {
+            schema_version: "1.0.0".into(),
+            repository_id: "repo-123".into(),
+            revision: 1,
+            nodes: vec![
+                FileNode {
+                    id: leading_name.into(),
+                    relative_path: leading_name.into(),
+                    filename: " leading.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: leading_content.len() as u64,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+                FileNode {
+                    id: trailing_name.into(),
+                    relative_path: trailing_name.into(),
+                    filename: "trailing .ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: trailing_content.len() as u64,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 0,
+                    direct_dependent_count: 0,
+                },
+            ],
+            edges: vec![],
+            coverage: AnalysisCoverage::default(),
+            issues: vec![],
+        };
+        let index = GraphIndex::build(&snap);
+        state.publish_network(snap, index, vec![], None).unwrap();
+
+        let app = create_router(state);
+
+        // Case 1: Access leading space filename -> 200 OK with exact path and content preserved
+        let req_leading = Request::builder()
+            .uri("/api/v1/source/src/%20leading.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_leading = app.clone().oneshot(req_leading).await.unwrap();
+        assert_eq!(resp_leading.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp_leading.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["path"], leading_name,
+            "Target path must not be destructively trimmed"
+        );
+        assert_eq!(json["content"], leading_content);
+
+        // Case 2: Access trailing space filename -> 200 OK
+        let req_trailing = Request::builder()
+            .uri("/api/v1/source/src/trailing%20.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_trailing = app.clone().oneshot(req_trailing).await.unwrap();
+        assert_eq!(resp_trailing.status(), StatusCode::OK);
+        let bytes_trailing = axum::body::to_bytes(resp_trailing.into_body(), 1024)
+            .await
+            .unwrap();
+        let json_trailing: serde_json::Value = serde_json::from_slice(&bytes_trailing).unwrap();
+        assert_eq!(json_trailing["path"], trailing_name);
+        assert_eq!(json_trailing["content"], trailing_content);
+
+        // Case 3: Path traversal attempt -> 400 BAD_REQUEST
+        let req_trav = Request::builder()
+            .uri("/api/v1/source/src/..%2Fmain.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp_trav = app.clone().oneshot(req_trav).await.unwrap();
+        assert_eq!(resp_trav.status(), StatusCode::BAD_REQUEST);
     }
 }

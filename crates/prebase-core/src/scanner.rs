@@ -28,6 +28,13 @@ pub struct DiscoveredFile {
     pub is_supported_language: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ScanOutput {
+    pub discovered: Vec<DiscoveredFile>,
+    pub excluded_count: usize,
+    pub traversal_errors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
     pub max_file_size_bytes: u64,
@@ -153,8 +160,14 @@ impl RepositoryScanner {
     }
 
     pub fn scan(&self) -> (Vec<DiscoveredFile>, usize) {
+        let output = self.scan_with_cancellation(|| false);
+        (output.discovered, output.excluded_count)
+    }
+
+    pub fn scan_with_cancellation<F: Fn() -> bool>(&self, is_cancelled: F) -> ScanOutput {
         let mut discovered = Vec::new();
         let mut excluded_count = 0;
+        let mut traversal_errors = Vec::new();
 
         let walker = ignore::WalkBuilder::new(&self.root)
             .hidden(false) // Let us handle hidden files explicitly
@@ -164,7 +177,19 @@ impl RepositoryScanner {
             .follow_links(false) // Symlink security: do not blindly follow symlinks
             .build();
 
-        for entry in walker.flatten() {
+        for result in walker {
+            if is_cancelled() {
+                break;
+            }
+            let entry = match result {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!("Filesystem traversal error: {err}");
+                    traversal_errors.push(err.to_string());
+                    continue;
+                }
+            };
+
             let path = entry.path();
             if path == self.root || path.is_dir() {
                 continue;
@@ -303,7 +328,11 @@ impl RepositoryScanner {
         // Deterministic sorting by relative path
         discovered.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-        (discovered, excluded_count)
+        ScanOutput {
+            discovered,
+            excluded_count,
+            traversal_errors,
+        }
     }
 }
 
@@ -313,14 +342,6 @@ mod tests {
 
     #[test]
     fn test_is_excluded_relative_path() {
-        // Safe source paths
-        assert!(!RepositoryScanner::is_excluded_relative_path("src/main.ts"));
-        assert!(!RepositoryScanner::is_excluded_relative_path(
-            "components/Button.tsx"
-        ));
-        assert!(!RepositoryScanner::is_excluded_relative_path("README.md"));
-
-        // Excluded directories
         assert!(RepositoryScanner::is_excluded_relative_path(
             "node_modules/foo/index.js"
         ));
@@ -329,37 +350,71 @@ mod tests {
         ));
         assert!(RepositoryScanner::is_excluded_relative_path(".git/HEAD"));
         assert!(RepositoryScanner::is_excluded_relative_path(
-            ".vscode/settings.json"
+            "src/.env.local"
         ));
-
-        // Windows path separators
-        assert!(RepositoryScanner::is_excluded_relative_path(
-            "node_modules\\foo\\index.js"
-        ));
-        assert!(RepositoryScanner::is_excluded_relative_path(
-            "src\\secrets\\.env"
-        ));
-
-        // Secret files
         assert!(RepositoryScanner::is_excluded_relative_path(".env"));
-        assert!(RepositoryScanner::is_excluded_relative_path(".env.local"));
         assert!(RepositoryScanner::is_excluded_relative_path(
-            ".env.production"
+            "secrets/key.pem"
         ));
-        assert!(RepositoryScanner::is_excluded_relative_path("server.key"));
-        assert!(RepositoryScanner::is_excluded_relative_path("cert.pem"));
         assert!(RepositoryScanner::is_excluded_relative_path(
-            "credentials.json"
+            "config/credentials.json"
         ));
-        assert!(RepositoryScanner::is_excluded_relative_path("id_rsa"));
-        assert!(RepositoryScanner::is_excluded_relative_path("id_rsa.pub"));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".reference/vscode/src/vs/editor/common/model.ts"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".cache/turbopack.bin"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".turbo/cache.json"
+        ));
 
-        // Trailing slashes and repeated separators
+        // Modern SSH keys, credentials, and sensitive dot directories
+        assert!(RepositoryScanner::is_excluded_relative_path("id_ed25519"));
+        assert!(RepositoryScanner::is_excluded_relative_path("id_ecdsa"));
+        assert!(RepositoryScanner::is_excluded_relative_path("id_dsa"));
+        assert!(RepositoryScanner::is_excluded_relative_path("src/identity"));
         assert!(RepositoryScanner::is_excluded_relative_path(
-            "secrets/.env/"
+            "src/identity.pub"
         ));
         assert!(RepositoryScanner::is_excluded_relative_path(
-            "secrets//.env"
+            ".ssh/known_hosts"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".aws/credentials"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            ".gnupg/trustdb.gpg"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(".netrc"));
+
+        // Case-insensitive exclusion check (crucial for macOS/Windows default filesystems)
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "NODE_MODULES/package/index.js"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "DIST/bundle.js"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "SRC/.ENV.PRODUCTION"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "CERTS/SERVER.PEM"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(".AWS/CONFIG"));
+
+        // Normal files should not be excluded
+        assert!(!RepositoryScanner::is_excluded_relative_path(
+            "src/index.ts"
+        ));
+        assert!(!RepositoryScanner::is_excluded_relative_path(
+            "packages/core/src/index.ts"
+        ));
+        assert!(!RepositoryScanner::is_excluded_relative_path("README.md"));
+
+        // Normalise separators
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "node_modules\\foo\\bar.js"
         ));
         assert!(RepositoryScanner::is_excluded_relative_path(
             "/node_modules/pkg/"
