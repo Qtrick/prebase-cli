@@ -761,3 +761,84 @@ fn scanner_cooperative_cancellation_aborts_early() {
     let res_ok = scanner.scan_with_cancellation(|| false);
     assert_eq!(res_ok.discovered.len(), 3);
 }
+
+#[test]
+fn test_scanner_watcher_agreement_on_server_log_and_prebase_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let fixtures = &[
+        (
+            "server.log",
+            "[2026-11-12 12:00:00] User server initialized\n",
+        ),
+        ("app.log", "App started\n"),
+        ("build.log", "Build complete\n"),
+        ("src/index.ts", "export const app = 1;\n"),
+        ("prebase.log", "PreBase diagnostic log\n"),
+        ("prebase_server.log", "PreBase server log\n"),
+        ("prebase_debug.log", "PreBase debug output\n"),
+    ];
+    write_fixtures(root, fixtures);
+
+    let scanner = RepositoryScanner::new(root, ScannerConfig::default()).unwrap();
+    let (files, excluded_count) = scanner.scan();
+
+    let paths = rel_paths(&files);
+    // User log files must be discovered
+    assert!(
+        paths.contains(&"server.log".to_string()),
+        "server.log must be discovered"
+    );
+    assert!(
+        paths.contains(&"app.log".to_string()),
+        "app.log must be discovered"
+    );
+    assert!(
+        paths.contains(&"build.log".to_string()),
+        "build.log must be discovered"
+    );
+    assert!(
+        paths.contains(&"src/index.ts".to_string()),
+        "src/index.ts must be discovered"
+    );
+
+    // PreBase process logs must be excluded
+    assert!(
+        !paths.contains(&"prebase.log".to_string()),
+        "prebase.log must be excluded"
+    );
+    assert!(
+        !paths.contains(&"prebase_server.log".to_string()),
+        "prebase_server.log must be excluded"
+    );
+    assert!(
+        !paths.contains(&"prebase_debug.log".to_string()),
+        "prebase_debug.log must be excluded"
+    );
+
+    assert_eq!(
+        excluded_count, 3,
+        "Exactly 3 PreBase logs should be excluded"
+    );
+
+    // Direct static boundary checks
+    assert!(!RepositoryScanner::is_excluded_relative_path("server.log"));
+    assert!(!RepositoryScanner::is_excluded_relative_path(
+        "logs/server.log"
+    ));
+    assert!(!RepositoryScanner::is_excluded_relative_path("build.log"));
+    assert!(RepositoryScanner::is_excluded_relative_path("prebase.log"));
+    assert!(RepositoryScanner::is_excluded_relative_path(
+        "prebase_server.log"
+    ));
+    assert!(RepositoryScanner::is_excluded_relative_path(
+        "prebase_test.log"
+    ));
+    assert!(RepositoryScanner::is_excluded_relative_path(" .env "));
+    assert!(RepositoryScanner::is_excluded_relative_path(
+        "  node_modules  /index.js"
+    ));
+    assert!(RepositoryScanner::is_excluded_relative_path(
+        "src/ .git /config"
+    ));
+}

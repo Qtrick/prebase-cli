@@ -128,7 +128,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                                     continue;
                                 }
 
-                                if should_ignore_path(&rel) {
+                                if should_ignore_path(&rel, Some(&state)) {
                                     continue;
                                 }
 
@@ -342,7 +342,7 @@ fn is_git_ref_path(rel_path: &Path) -> bool {
     }
 }
 
-fn should_ignore_path(rel_path: &Path) -> bool {
+fn should_ignore_path(rel_path: &Path, state: Option<&AppState>) -> bool {
     let rel_str = rel_path.to_string_lossy();
     if RepositoryScanner::is_excluded_relative_path(&rel_str) {
         return true;
@@ -352,14 +352,20 @@ fn should_ignore_path(rel_path: &Path) -> bool {
         if file_name == ".DS_Store" || file_name.ends_with('~') || file_name.ends_with(".tmp") {
             return true;
         }
-        // ponytail: Ignore PreBase's own default runtime/server log filenames to prevent
-        // self-observation loops when stdout/stderr is redirected into the watched repository root,
-        // while preserving general user and build logs (e.g. build.log, app.log) as discoverable.
-        if file_name == "server.log"
-            || file_name == "prebase.log"
+        // ponytail: Ignore PreBase's own default runtime log filenames (prebase.log, prebase_server.log, prebase_*.log)
+        // to prevent self-observation loops when default PreBase output is written to the repository root.
+        // Legitimate user files such as server.log, build.log, app.log remain discoverable and monitored.
+        if file_name == "prebase.log"
             || file_name == "prebase_server.log"
             || (file_name.starts_with("prebase_") && file_name.ends_with(".log"))
         {
+            return true;
+        }
+    }
+
+    // Ignore exact paths registered or detected as active process output destinations
+    if let Some(st) = state {
+        if st.is_process_output_path(rel_path) {
             return true;
         }
     }
@@ -407,61 +413,97 @@ mod tests {
     #[test]
     fn test_component_aware_filesystem_filtering() {
         // Files containing 'dist' or 'target' as substrings must NOT be ignored
-        assert!(!should_ignore_path(Path::new("src/distribution.ts")));
-        assert!(!should_ignore_path(Path::new("src/distance.tsx")));
-        assert!(!should_ignore_path(Path::new("src/targeting/index.ts")));
-        assert!(!should_ignore_path(Path::new("target_file.js")));
+        assert!(!should_ignore_path(Path::new("src/distribution.ts"), None));
+        assert!(!should_ignore_path(Path::new("src/distance.tsx"), None));
+        assert!(!should_ignore_path(
+            Path::new("src/targeting/index.ts"),
+            None
+        ));
+        assert!(!should_ignore_path(Path::new("target_file.js"), None));
 
         // Exact folder components MUST be ignored
-        assert!(should_ignore_path(Path::new("dist/index.js")));
-        assert!(should_ignore_path(Path::new("target/debug/prebase")));
-        assert!(should_ignore_path(Path::new("node_modules/pkg/index.js")));
-        assert!(should_ignore_path(Path::new(".next/server/page.js")));
-        assert!(should_ignore_path(Path::new("build/static/bundle.js")));
-        assert!(should_ignore_path(Path::new("coverage/lcov.info")));
-        assert!(should_ignore_path(Path::new(".git/config")));
-        assert!(should_ignore_path(Path::new("src/.DS_Store")));
-        assert!(should_ignore_path(Path::new("src/temp.tmp")));
+        assert!(should_ignore_path(Path::new("dist/index.js"), None));
+        assert!(should_ignore_path(Path::new("target/debug/prebase"), None));
+        assert!(should_ignore_path(
+            Path::new("node_modules/pkg/index.js"),
+            None
+        ));
+        assert!(should_ignore_path(Path::new(".next/server/page.js"), None));
+        assert!(should_ignore_path(
+            Path::new("build/static/bundle.js"),
+            None
+        ));
+        assert!(should_ignore_path(Path::new("coverage/lcov.info"), None));
+        assert!(should_ignore_path(Path::new(".git/config"), None));
+        assert!(should_ignore_path(Path::new("src/.DS_Store"), None));
+        assert!(should_ignore_path(Path::new("src/temp.tmp"), None));
 
         // Sensitive and case-insensitive folders match scanner boundaries
-        assert!(should_ignore_path(Path::new(".ssh/id_rsa")));
-        assert!(should_ignore_path(Path::new(".aws/credentials")));
-        assert!(should_ignore_path(Path::new(".gnupg/secring.gpg")));
-        assert!(should_ignore_path(Path::new("NODE_MODULES/package.json")));
-        assert!(should_ignore_path(Path::new(".env")));
-        assert!(should_ignore_path(Path::new("secrets.key")));
+        assert!(should_ignore_path(Path::new(".ssh/id_rsa"), None));
+        assert!(should_ignore_path(Path::new(".aws/credentials"), None));
+        assert!(should_ignore_path(Path::new(".gnupg/secring.gpg"), None));
+        assert!(should_ignore_path(
+            Path::new("NODE_MODULES/package.json"),
+            None
+        ));
+        assert!(should_ignore_path(Path::new(".env"), None));
+        assert!(should_ignore_path(Path::new("secrets.key"), None));
     }
 
     #[test]
     fn test_watcher_policy_for_unsupported_non_ignored_files() {
         // Non-source files that are NOT ignored (e.g. README.md, styles.css, notes.txt, build.log)
-        assert!(!should_ignore_path(Path::new("README.md")));
+        assert!(!should_ignore_path(Path::new("README.md"), None));
         assert!(!is_supported_source_file(Path::new("README.md")));
 
-        assert!(!should_ignore_path(Path::new("styles.css")));
+        assert!(!should_ignore_path(Path::new("styles.css"), None));
         assert!(!is_supported_source_file(Path::new("styles.css")));
 
-        assert!(!should_ignore_path(Path::new("docs/architecture.txt")));
+        assert!(!should_ignore_path(
+            Path::new("docs/architecture.txt"),
+            None
+        ));
         assert!(!is_supported_source_file(Path::new(
             "docs/architecture.txt"
         )));
 
-        assert!(!should_ignore_path(Path::new("build.log")));
+        assert!(!should_ignore_path(Path::new("build.log"), None));
         assert!(!is_supported_source_file(Path::new("build.log")));
 
+        // Legitimate user server.log is NOT ignored by default:
+        assert!(!should_ignore_path(Path::new("server.log"), None));
+
         // PreBase runtime logs are ignored in watcher to prevent self-observation loops
-        assert!(should_ignore_path(Path::new("server.log")));
-        assert!(should_ignore_path(Path::new("prebase.log")));
-        assert!(should_ignore_path(Path::new("prebase_server.log")));
-        assert!(should_ignore_path(Path::new("prebase_2d.log")));
+        assert!(should_ignore_path(Path::new("prebase.log"), None));
+        assert!(should_ignore_path(Path::new("prebase_server.log"), None));
+        assert!(should_ignore_path(Path::new("prebase_2d.log"), None));
+
+        // Process-owned log path registered on AppState is ignored:
+        let test_state = Arc::new(AppState::new(
+            PathBuf::from("/test"),
+            "test".to_string(),
+            "test".to_string(),
+            "token".to_string(),
+            None,
+            3000,
+            false,
+        ));
+        test_state.register_process_log_path(Path::new("server.log"));
+        assert!(should_ignore_path(
+            Path::new("server.log"),
+            Some(&test_state)
+        ));
 
         // Ignored files MUST remain ignored
-        assert!(should_ignore_path(Path::new(".DS_Store")));
-        assert!(should_ignore_path(Path::new("nested/.DS_Store")));
-        assert!(should_ignore_path(Path::new(".git/config")));
-        assert!(should_ignore_path(Path::new("node_modules/pkg/index.js")));
-        assert!(should_ignore_path(Path::new(".env")));
-        assert!(should_ignore_path(Path::new("backup.tmp")));
+        assert!(should_ignore_path(Path::new(".DS_Store"), None));
+        assert!(should_ignore_path(Path::new("nested/.DS_Store"), None));
+        assert!(should_ignore_path(Path::new(".git/config"), None));
+        assert!(should_ignore_path(
+            Path::new("node_modules/pkg/index.js"),
+            None
+        ));
+        assert!(should_ignore_path(Path::new(".env"), None));
+        assert!(should_ignore_path(Path::new("backup.tmp"), None));
     }
 
     #[test]

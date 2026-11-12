@@ -676,8 +676,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
         // 4. Draw Node Labels (Decoupled Priority Ordering + Screen-Space Spatial Collision Hash)
         const isLight = theme === 'light';
-        const fontSize = Math.max(10, Math.min(14, 11 * Math.sqrt(camera.zoom)));
-        ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+        const fontSize = Math.max(11, Math.min(15, 12 * Math.sqrt(camera.zoom)));
+        const monoFont = `${fontSize}px "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+        ctx.font = `500 ${monoFont}`;
 
         interface CandidateLabel {
           pNode: ProjectedNode;
@@ -765,7 +766,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           collisionGrid.insert(cand.rect);
 
           ctx.save();
-          ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+          ctx.font = isPriority ? `600 ${monoFont}` : `500 ${monoFont}`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
 

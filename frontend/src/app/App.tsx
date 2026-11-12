@@ -12,6 +12,7 @@ import {
 } from '../transport/statusInfo';
 import {
   reconcileFocusNodeOnSnapshot,
+  reconcileFocusHistoryOnSnapshot,
   pushFocusHistory,
   popFocusHistory,
   resolveBackTargetName,
@@ -65,6 +66,27 @@ export function parseInitialUrlParams(search: string): InitialUrlParams {
       initialFocusPath: null,
     };
   }
+}
+
+/**
+ * Resolves the initial focus node from the requested focus path against snapshot nodes.
+ * Preserves exact whitespace (leading, trailing, and internal) so filenames or paths
+ * with whitespace are not stripped or corrupted.
+ */
+export function resolveInitialFocusNode(
+  targetPath: string | null | undefined,
+  nodes: readonly FileNode[]
+): FileNode | null {
+  if (!targetPath) return null;
+  return (
+    nodes.find(
+      (n) =>
+        n.relative_path === targetPath ||
+        n.id === targetPath ||
+        n.filename === targetPath ||
+        n.relative_path.toLowerCase() === targetPath.toLowerCase()
+    ) || null
+  );
 }
 
 export interface KeyboardShortcutTargetLike {
@@ -179,6 +201,7 @@ export const App: React.FC = () => {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const latestAppliedRevisionRef = useRef<number>(0);
+  const highestObservedRevisionRef = useRef<number>(0);
 
   // View triggers (true bounding box fit view & reset view)
   const [fitViewCounter, setFitViewCounter] = useState(0);
@@ -234,20 +257,15 @@ export const App: React.FC = () => {
           const snap = await api.getNetwork();
           if (snap.revision >= latestAppliedRevisionRef.current) {
             latestAppliedRevisionRef.current = snap.revision;
+            highestObservedRevisionRef.current = Math.max(highestObservedRevisionRef.current, snap.revision);
             setSnapshot(snap);
             setLiveRevision(snap.revision);
 
             // Resolve initial focus target from CLI or URL parameters
             if (initialParams.initialFocusPath && !focusResolvedRef.current) {
               focusResolvedRef.current = true;
-              const targetPath = initialParams.initialFocusPath.trim();
-              const matched = snap.nodes.find(
-                (n) =>
-                  n.relative_path === targetPath ||
-                  n.id === targetPath ||
-                  n.filename === targetPath ||
-                  n.relative_path.toLowerCase() === targetPath.toLowerCase()
-              );
+              const targetPath = initialParams.initialFocusPath;
+              const matched = resolveInitialFocusNode(targetPath, snap.nodes);
               if (matched) {
                 setSelectedNode(matched);
                 setFocusNodeId(matched.id);
@@ -405,7 +423,7 @@ export const App: React.FC = () => {
     if (!sessionInitialized) return;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
-      if (newSnap.revision >= latestAppliedRevisionRef.current) {
+      if (newSnap.revision > latestAppliedRevisionRef.current) {
         latestAppliedRevisionRef.current = newSnap.revision;
         setSnapshot(newSnap);
         setLiveRevision(newSnap.revision);
@@ -430,6 +448,17 @@ export const App: React.FC = () => {
           if (missingNotice) setMissingFocusPath(missingNotice);
           return nextFocusNodeId;
         });
+        // Re-sync 2D focus history by pruning entries deleted on disk
+        setFocusHistory((prev) => reconcileFocusHistoryOnSnapshot(prev, newSnap.nodes));
+      }
+
+      // If a newer revision was announced while this network fetch was in flight,
+      // trigger follow-up fetch so the UI never remains on a stale snapshot
+      if (highestObservedRevisionRef.current > latestAppliedRevisionRef.current) {
+        api
+          .getNetwork()
+          .then((newerSnap) => applySnapshot(newerSnap, ['*']))
+          .catch(() => { });
       }
     };
 
@@ -438,6 +467,9 @@ export const App: React.FC = () => {
         setSseState('connected');
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
+          if (revision > highestObservedRevisionRef.current) {
+            highestObservedRevisionRef.current = revision;
+          }
           if (revision > latestAppliedRevisionRef.current) {
             api
               .getNetwork()
@@ -452,6 +484,9 @@ export const App: React.FC = () => {
         } else if (event.type === 'reconcile.required') {
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
+            if (st.revision > highestObservedRevisionRef.current) {
+              highestObservedRevisionRef.current = st.revision;
+            }
             if (st.revision > latestAppliedRevisionRef.current) {
               api
                 .getNetwork()
@@ -467,6 +502,9 @@ export const App: React.FC = () => {
           // Re-fetch status on reconnect to reconcile any missed updates
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
+            if (st.revision > highestObservedRevisionRef.current) {
+              highestObservedRevisionRef.current = st.revision;
+            }
             if (st.revision > latestAppliedRevisionRef.current) {
               api
                 .getNetwork()
@@ -560,15 +598,23 @@ export const App: React.FC = () => {
   );
 
   const handleBackFocus2D = useCallback(() => {
-    const { nextHistory, prevFocusId } = popFocusHistory(focusHistory);
-    if (!prevFocusId) return;
-    setFocusHistory(nextHistory);
-    setFocusNodeId(prevFocusId);
-    setMissingFocusPath(null);
-    const node = snapshot?.nodes.find((n) => n.id === prevFocusId);
-    if (node) {
-      setSelectedNode(node);
+    let remaining = [...focusHistory];
+    while (remaining.length > 0) {
+      const { nextHistory, prevFocusId } = popFocusHistory(remaining);
+      remaining = nextHistory;
+      if (prevFocusId) {
+        const node = snapshot?.nodes.find((n) => n.id === prevFocusId);
+        if (node) {
+          setFocusHistory(remaining);
+          setFocusNodeId(prevFocusId);
+          setSelectedNode(node);
+          setSelectedEdge(null);
+          setMissingFocusPath(null);
+          return;
+        }
+      }
     }
+    setFocusHistory([]);
   }, [focusHistory, snapshot]);
 
   // URL synchronization: updates view and focus parameters using history.replaceState

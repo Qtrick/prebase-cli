@@ -26,6 +26,19 @@ export function reconcileFocusNodeOnSnapshot(
 }
 
 /**
+ * Reconciles the 2D focus history stack when a new graph snapshot arrives:
+ * - Prunes historical node IDs that no longer exist in the new snapshot.
+ */
+export function reconcileFocusHistoryOnSnapshot(
+  history: readonly string[],
+  newSnapshotNodes: readonly FileNode[]
+): string[] {
+  if (history.length === 0) return [];
+  const validNodeIds = new Set(newSnapshotNodes.map((n) => n.id));
+  return history.filter((id) => validNodeIds.has(id));
+}
+
+/**
  * Pushes a new node onto the focus history stack.
  * If currentFocusId is null or identical to nextFocusId, history is unchanged.
  */

@@ -378,6 +378,23 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_map_focus_preserves_leading_and_trailing_whitespace() {
+        let raw_focus = "  src/ leading and trailing.ts  ";
+        let args =
+            CliArgs::try_parse_from(["prebase", "map", "--view", "2d", "--focus", raw_focus])
+                .unwrap();
+        match args.command {
+            Some(Commands::Map { view, focus, .. }) => {
+                assert_eq!(view, MapViewMode::TwoD);
+                assert_eq!(focus, Some(raw_focus.to_string()));
+                let encoded = percent_encode_query_param(focus.as_deref().unwrap());
+                assert_eq!(encoded, "%20%20src%2F%20leading%20and%20trailing.ts%20%20");
+            }
+            _ => panic!("Expected Commands::Map"),
+        }
+    }
+
+    #[test]
     fn test_cli_map_argument_ordering_with_path() {
         let args1 = CliArgs::try_parse_from(["prebase", "map", "src", "--view", "3d"]).unwrap();
         match args1.command {

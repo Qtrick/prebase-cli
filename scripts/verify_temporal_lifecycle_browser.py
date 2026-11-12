@@ -353,8 +353,14 @@ def main():
                 initial_sha = page.locator(".inspector-panel .sha-text").inner_text()
                 log(f"CommitInspector displayed commit SHA: {initial_sha}")
                 assert len(initial_sha) == 40, f"Expected 40-character commit SHA, got: {initial_sha}"
+
+                # Ensure commit details and diff stats have completely loaded (not in loading spinner state)
+                expect(page.locator(".inspector-panel .loading-box")).not_to_be_visible(timeout=10000)
+                expect(page.locator(".inspector-panel .commit-diff-summary-bar")).to_be_visible(timeout=10000)
+                expect(page.locator(".inspector-panel .file-changes-list")).to_be_visible(timeout=10000)
+
                 page.screenshot(path=os.path.join(SCREENSHOT_DIR, "20_temporal_commit_inspector.png"))
-                success("CommitInspector displayed via genuine mouse click with full SHA, author, date, and diff stats.")
+                success("CommitInspector fully loaded and verified via genuine mouse click with full SHA, author, date, diff stats, and file changes.")
 
                 # 3f-2. Test Accessible Keyboard Selection (canvas focus, ArrowDown, ArrowUp)
                 log("Testing accessible keyboard selection on Temporal Canvas...")

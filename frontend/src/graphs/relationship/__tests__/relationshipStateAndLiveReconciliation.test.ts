@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   reconcileFocusNodeOnSnapshot,
+  reconcileFocusHistoryOnSnapshot,
   pushFocusHistory,
   popFocusHistory,
   resolveBackTargetName,
@@ -94,6 +95,114 @@ describe('Relationship State, Navigation Stack, and Live Reconciliation', () => 
       expect(resolveBackTargetName(['auth-svc', 'user-db'], nodes)).toBe('UserDatabase.ts');
       expect(resolveBackTargetName([], nodes)).toBeNull();
       expect(resolveBackTargetName(['unknown-id'], nodes)).toBeNull();
+    });
+  });
+
+  describe('Finding C: 2D Back history reconciliation & stale inspector prevention', () => {
+    it('prunes deleted nodes from focus history stack while preserving chronological order', () => {
+      const nodeA = makeNode('service-a', 'ServiceA.ts');
+      const nodeC = makeNode('service-c', 'ServiceC.ts');
+      const history = ['service-a', 'service-b', 'service-c'];
+
+      // Snapshot where intermediate node-b was deleted on disk
+      const newSnapshotNodes = [nodeA, nodeC];
+      const reconciled = reconcileFocusHistoryOnSnapshot(history, newSnapshotNodes);
+
+      expect(reconciled).toEqual(['service-a', 'service-c']);
+    });
+
+    it('prunes multiple deleted historical entries and returns empty array when all were deleted', () => {
+      const history = ['deleted-1', 'deleted-2', 'deleted-3'];
+      const survivingNodes = [makeNode('other-service', 'Other.ts')];
+
+      const reconciled = reconcileFocusHistoryOnSnapshot(history, survivingNodes);
+      expect(reconciled).toEqual([]);
+      expect(reconcileFocusHistoryOnSnapshot([], survivingNodes)).toEqual([]);
+    });
+
+    it('resolves back target name accurately following history reconciliation on disk mutations', () => {
+      const nodeA = makeNode('service-a', 'ServiceA.ts');
+      const nodeB = makeNode('service-b', 'ServiceB.ts');
+      let history = ['service-a', 'service-b'];
+
+      // Before deletion: back target is service-b
+      expect(resolveBackTargetName(history, [nodeA, nodeB])).toBe('ServiceB.ts');
+
+      // service-b deleted on disk:
+      const surviving = [nodeA];
+      history = reconcileFocusHistoryOnSnapshot(history, surviving);
+
+      // After reconciliation: back target seamlessly updates to service-a
+      expect(history).toEqual(['service-a']);
+      expect(resolveBackTargetName(history, surviving)).toBe('ServiceA.ts');
+    });
+
+    it('pops with missing historical nodes, skipping dead entries and updating inspector without stale state', () => {
+      const nodeA = makeNode('service-a', 'ServiceA.ts');
+      const snapshotNodes = [nodeA]; // service-b was deleted on disk without prior history reconciliation
+
+      // History has service-b on top, service-a below
+      const focusHistory = ['service-a', 'deleted-service-b'];
+      let inspectorSelectedNode: FileNode | null = makeNode('current-active', 'Current.ts');
+      let currentFocusId: string | null = 'current-active';
+      let nextHistoryState: string[] = [];
+
+      // Behavioral back navigation algorithm matching App.tsx handleBackFocus2D
+      let remaining = [...focusHistory];
+      let navigated = false;
+      while (remaining.length > 0) {
+        const { nextHistory, prevFocusId } = popFocusHistory(remaining);
+        remaining = nextHistory;
+        if (prevFocusId) {
+          const targetNode = snapshotNodes.find((n) => n.id === prevFocusId);
+          if (targetNode) {
+            nextHistoryState = remaining;
+            currentFocusId = prevFocusId;
+            inspectorSelectedNode = targetNode; // Stale inspector state prevented!
+            navigated = true;
+            break;
+          }
+        }
+      }
+      if (!navigated) {
+        nextHistoryState = [];
+        inspectorSelectedNode = null;
+      }
+
+      // Must have skipped 'deleted-service-b' and landed on 'service-a'
+      expect(navigated).toBe(true);
+      expect(currentFocusId).toBe('service-a');
+      expect(inspectorSelectedNode).toBe(nodeA);
+      expect(inspectorSelectedNode?.filename).toBe('ServiceA.ts');
+      expect(nextHistoryState).toEqual([]);
+    });
+
+    it('clears inspector and history when popping with all missing historical nodes', () => {
+      const snapshotNodes = [makeNode('unrelated-node', 'Unrelated.ts')];
+      const focusHistory = ['dead-node-1', 'dead-node-2'];
+      let inspectorSelectedNode: FileNode | null = makeNode('old-node', 'Old.ts');
+
+      let remaining = [...focusHistory];
+      let navigated = false;
+      while (remaining.length > 0) {
+        const { nextHistory, prevFocusId } = popFocusHistory(remaining);
+        remaining = nextHistory;
+        if (prevFocusId) {
+          const targetNode = snapshotNodes.find((n) => n.id === prevFocusId);
+          if (targetNode) {
+            inspectorSelectedNode = targetNode;
+            navigated = true;
+            break;
+          }
+        }
+      }
+      if (!navigated) {
+        // Prevent stale inspector state
+        inspectorSelectedNode = null;
+      }
+
+      expect(navigated).toBe(false);
+      expect(inspectorSelectedNode).toBeNull();
     });
   });
 

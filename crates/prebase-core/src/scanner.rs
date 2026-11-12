@@ -121,10 +121,11 @@ impl RepositoryScanner {
         let normalized = rel_path.replace('\\', "/");
         let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
         for part in &parts {
-            // Compare case-insensitively: on macOS/Windows (case-insensitive by
+            // Compare case-insensitively and trimmed: on macOS/Windows (case-insensitive by
             // default) "NODE_MODULES" and "node_modules" are the same directory,
-            // so an exact-case check would walk dependency trees and dot-dirs.
-            match part.to_ascii_lowercase().as_str() {
+            // and names with surrounding whitespace must not bypass boundary checks.
+            let part_lower = part.to_ascii_lowercase();
+            match part_lower.trim() {
                 ".git" | "node_modules" | "dist" | "build" | ".build" | ".next" | ".nuxt"
                 | "coverage" | "target" | ".reference" | ".cache" | ".turbo" | ".vscode"
                 | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws" | ".gnupg" => {
@@ -135,27 +136,29 @@ impl RepositoryScanner {
         }
 
         let filename = parts.last().copied().unwrap_or(rel_path);
-        // Secret names are also matched case-insensitively for the same reason:
-        // `.ENV` on a case-insensitive filesystem is the same file as `.env`.
+        // Secret names are also matched case-insensitively and trimmed for security:
+        // `.ENV` on a case-insensitive filesystem is the same file as `.env`, and
+        // files named with leading/trailing spaces (e.g. ` .env`) must be excluded.
         let filename_lower = filename.to_ascii_lowercase();
-        if filename_lower.starts_with(".env")
-            || filename_lower.ends_with(".pem")
-            || filename_lower.ends_with(".key")
-            || filename_lower.ends_with(".p12")
-            || filename_lower.ends_with(".pfx")
-            || filename_lower.starts_with("id_rsa")
-            || filename_lower.starts_with("id_dsa")
-            || filename_lower.starts_with("id_ecdsa")
-            || filename_lower.starts_with("id_ed25519")
-            || filename_lower == "identity"
-            || filename_lower == "identity.pub"
-            || filename_lower == ".netrc"
-            || filename_lower == "credentials"
-            || filename_lower == "credentials.json"
+        let filename_clean = filename_lower.trim();
+        if filename_clean.starts_with(".env")
+            || filename_clean.ends_with(".pem")
+            || filename_clean.ends_with(".key")
+            || filename_clean.ends_with(".p12")
+            || filename_clean.ends_with(".pfx")
+            || filename_clean.starts_with("id_rsa")
+            || filename_clean.starts_with("id_dsa")
+            || filename_clean.starts_with("id_ecdsa")
+            || filename_clean.starts_with("id_ed25519")
+            || filename_clean == "identity"
+            || filename_clean == "identity.pub"
+            || filename_clean == ".netrc"
+            || filename_clean == "credentials"
+            || filename_clean == "credentials.json"
             // ponytail: align scanner with watcher for PreBase application-owned log outputs
-            || filename_lower == "prebase.log"
-            || filename_lower == "prebase_server.log"
-            || (filename_lower.starts_with("prebase_") && filename_lower.ends_with(".log"))
+            || filename_clean == "prebase.log"
+            || filename_clean == "prebase_server.log"
+            || (filename_clean.starts_with("prebase_") && filename_clean.ends_with(".log"))
         {
             return true;
         }

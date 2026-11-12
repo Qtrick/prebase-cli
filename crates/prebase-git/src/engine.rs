@@ -512,7 +512,9 @@ impl GitEngine {
 
         // 2. Commit stats (insertions, deletions, files_changed)
         let mut stats = CommitStats::default();
-        if let Ok(stat_output) = self.run_git_str(&["show", "--shortstat", "--format=", hash]) {
+        if let Ok(stat_output) =
+            self.run_git_str(&["show", "--no-ext-diff", "--shortstat", "--format=", hash])
+        {
             parse_shortstat(&stat_output, &mut stats);
         }
 

@@ -74,13 +74,13 @@ export interface RelationshipLayoutResult {
   isVertical: boolean;
 }
 
-const FOCUS_WIDTH = 230;
-const FOCUS_HEIGHT = 56;
-const NEIGHBOR_WIDTH = 196;
-const NEIGHBOR_HEIGHT = 44;
-const COL_SPACING = 270;
+const FOCUS_WIDTH = 250;
+const FOCUS_HEIGHT = 58;
+const NEIGHBOR_WIDTH = 220;
+const NEIGHBOR_HEIGHT = 48;
+const COL_SPACING = 300;
 const ROW_GAP = 14;
-const HEADER_OFFSET_Y = 50;
+const HEADER_OFFSET_Y = 52;
 
 export function computeRelationshipLayout(
   graphData: RelationshipGraphData,

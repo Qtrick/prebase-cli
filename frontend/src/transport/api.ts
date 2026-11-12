@@ -105,6 +105,8 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json();
 }
 
+let inFlightNetworkPromise: Promise<GraphSnapshot> | null = null;
+
 export const api = {
   getHealth: (signal?: AbortSignal) =>
     request<{ status: string; version: string }>('/api/v1/health', signal),
@@ -112,8 +114,20 @@ export const api = {
     request<{ indexing_status: string; revision: number; watcher_health: WatcherHealth }>('/api/v1/status', signal),
   getRepository: (signal?: AbortSignal) =>
     request<RepositoryInfo>('/api/v1/repository', signal),
-  getNetwork: (signal?: AbortSignal) =>
-    request<GraphSnapshot>('/api/v1/network', signal),
+  getNetwork: (signal?: AbortSignal): Promise<GraphSnapshot> => {
+    if (!signal && inFlightNetworkPromise) {
+      return inFlightNetworkPromise;
+    }
+    const p = request<GraphSnapshot>('/api/v1/network', signal).finally(() => {
+      if (inFlightNetworkPromise === p) {
+        inFlightNetworkPromise = null;
+      }
+    });
+    if (!signal) {
+      inFlightNetworkPromise = p;
+    }
+    return p;
+  },
   searchFiles: (query: string, limit = 50, signal?: AbortSignal) =>
     request<FileNode[]>(`/api/v1/files?q=${encodeURIComponent(query)}&limit=${limit}`, signal),
   inspectFile: (fileId: string, signal?: AbortSignal) =>

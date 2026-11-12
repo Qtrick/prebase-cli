@@ -19,6 +19,7 @@ import {
   recenterViewportForResize,
   type Viewport2D,
 } from './relationshipViewport';
+import { computeRelationshipLayoutKey } from './relationshipLayoutKey';
 import {
   ArrowLeft,
   Search,
@@ -232,7 +233,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     const sizeChanged =
       previous !== null &&
       (previous.width !== dimensions.width || previous.height !== dimensions.height);
-    const boundsKey = `${Math.round(layout.bounds.minX)}:${Math.round(layout.bounds.maxX)}:${Math.round(layout.bounds.minY)}:${Math.round(layout.bounds.maxY)}:${layout.nodes.length}`;
+    const boundsKey = computeRelationshipLayoutKey(layout);
     const layoutChanged = previous !== null && previous.boundsKey !== boundsKey;
 
     if (!focusChanged && !sizeChanged && !layoutChanged) return;
@@ -542,29 +543,29 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.textBaseline = 'alphabetic';
 
       const textX = dotX + (isFocus ? 12 : 10);
-      const nameY = top + (isFocus ? 22 : 18);
-      const maxTextW = node.width - (textX - left) - (isFocus ? 45 : 12);
+      const nameY = top + (isFocus ? 23 : 20);
+      const maxTextW = node.width - (textX - left) - (isFocus ? 52 : 12);
 
       const displayFilename = getTruncatedText(ctx, node.node.filename, maxTextW, filenameFont, false);
       ctx.fillText(displayFilename, textX, nameY);
 
       // Relative Path
-      const pathFont = '400 10px monospace';
+      const pathFont = '400 11px monospace';
       ctx.font = pathFont;
       ctx.fillStyle = palette.textMuted;
-      const pathY = top + (isFocus ? 38 : 32);
+      const pathY = top + (isFocus ? 40 : 35);
 
       const displayPath = getTruncatedText(ctx, node.node.relative_path, maxTextW, pathFont, true);
       ctx.fillText(displayPath, textX, pathY);
 
       // Badges for Focus Node (dependencies and dependents counts in clear, plain language)
       if (isFocus) {
-        ctx.font = '600 9px system-ui, -apple-system, sans-serif';
+        ctx.font = '600 10px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = isLight ? '#0284c7' : '#38bdf8';
-        ctx.fillText(`Used by: ${node.node.direct_dependent_count}`, left + node.width - 10, top + 20);
+        ctx.fillText(`Used by: ${node.node.direct_dependent_count}`, left + node.width - 12, top + 22);
         ctx.fillStyle = isLight ? '#0d9488' : '#2dd4bf';
-        ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 10, top + 36);
+        ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 12, top + 40);
       }
     }
 

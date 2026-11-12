@@ -73,12 +73,12 @@ describe('computeRelationshipLayout', () => {
       const nodeM1 = layout.nodes.find((n) => n.id === 'm1')!;
       const nodeM2 = layout.nodes.find((n) => n.id === 'm2')!;
 
-      // Column spacing is 270px
-      expect(nodeD2.x).toBe(-540);
-      expect(nodeD1.x).toBe(-270);
+      // Column spacing is 300px
+      expect(nodeD2.x).toBe(-600);
+      expect(nodeD1.x).toBe(-300);
       expect(nodeF.x).toBe(0);
-      expect(nodeM1.x).toBe(270);
-      expect(nodeM2.x).toBe(540);
+      expect(nodeM1.x).toBe(300);
+      expect(nodeM2.x).toBe(600);
 
       // Strictly monotonic ordering from Dependents to Focus to Dependencies
       expect(nodeD2.x).toBeLessThan(nodeD1.x);
@@ -104,14 +104,14 @@ describe('computeRelationshipLayout', () => {
       const focusNode = layout.nodes.find((n) => n.id === 'f')!;
       const neighborNode = layout.nodes.find((n) => n.id === 'm1')!;
 
-      // Focus card is wider and taller (230x56 vs 196x44)
+      // Focus card is wider and taller (250x58 vs 220x48)
       expect(focusNode.isFocus).toBe(true);
-      expect(focusNode.width).toBe(230);
-      expect(focusNode.height).toBe(56);
+      expect(focusNode.width).toBe(250);
+      expect(focusNode.height).toBe(58);
 
       expect(neighborNode.isFocus).toBe(false);
-      expect(neighborNode.width).toBe(196);
-      expect(neighborNode.height).toBe(44);
+      expect(neighborNode.width).toBe(220);
+      expect(neighborNode.height).toBe(48);
 
       // Horizontal ports: inPort at left edge, outPort at right edge, centered vertically
       expect(focusNode.inPort.x).toBe(focusNode.x - focusNode.width / 2);

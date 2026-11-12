@@ -101,8 +101,11 @@ async fn test_server_log_ignored_no_feedback_loop() {
     assert_eq!(rev_1, 1);
     assert_eq!(state.get_current_revision(), 1);
 
-    // Rapidly write to server.log 50 times (simulating server logger stdout)
+    // Register the server log path on state as the process output destination
     let log_file = repo_path.join("server.log");
+    state.register_process_log_path(&log_file);
+
+    // Rapidly write to server.log 50 times (simulating server logger stdout)
     for i in 0..50 {
         let mut f = OpenOptions::new()
             .create(true)
@@ -191,6 +194,86 @@ async fn test_high_frequency_modifications_coalesced_and_throttled() {
     assert!(
         (2..=3).contains(&final_rev),
         "Expected revisions to be coalesced to 2..=3, but got revision {final_rev}"
+    );
+
+    let _ = watcher_handle.shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_legitimate_user_server_log_is_discovered_and_watched() {
+    let temp_dir = tempdir().expect("failed to create temp dir");
+    let repo_path = temp_dir.path();
+    let src_dir = repo_path.join("src");
+    fs::create_dir_all(&src_dir).expect("failed to create src dir");
+
+    fs::write(src_dir.join("main.ts"), "export const count = 0;\n")
+        .expect("failed to write main.ts");
+
+    // Legitimate user server.log in repo
+    let user_log = repo_path.join("server.log");
+    fs::write(&user_log, "Initial user server log content\n").expect("failed to write server.log");
+
+    init_git_repo(repo_path);
+
+    let canonical_root = repo_path
+        .canonicalize()
+        .expect("failed to canonicalize repo path");
+
+    let state = Arc::new(AppState::new(
+        canonical_root.clone(),
+        "user-log-test".to_string(),
+        "repo-fl-3".to_string(),
+        "session-secret".to_string(),
+        None,
+        9996,
+        true,
+    ));
+    let watcher_handle =
+        start_repo_watcher(state.clone()).expect("failed to start repo filesystem watcher");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Initial analysis: user server.log is discovered by scanner
+    let initial_gen = state.get_next_generation();
+    let analyzer = RepositoryAnalyzer::default();
+    let initial_analysis = analyzer
+        .analyze_path(&canonical_root)
+        .expect("initial analysis failed");
+
+    // User server.log must be discovered
+    assert!(
+        initial_analysis.snapshot.coverage.total_discovered >= 2,
+        "User server.log must be included in discovered files"
+    );
+
+    let rev_1 = state
+        .publish_network(
+            initial_analysis.snapshot,
+            initial_analysis.index,
+            vec![],
+            Some(initial_gen),
+        )
+        .expect("failed to publish initial network state");
+
+    assert_eq!(rev_1, 1);
+
+    // Now user edits their server.log (not a process output destination)
+    {
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&user_log)
+            .expect("failed to open user server.log");
+        writeln!(f, "[USER APPLICATION] Server started on port 8080")
+            .expect("failed to write user server.log");
+    }
+
+    // Wait for watcher debounce & rescan
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // The revision must increment because a user file changed!
+    assert!(
+        state.get_current_revision() > 1,
+        "Revision must advance when legitimate user server.log is edited!"
     );
 
     let _ = watcher_handle.shutdown_tx.send(());

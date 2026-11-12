@@ -9,6 +9,7 @@ import {
   MARGIN_LEFT,
   ROW_HEIGHT,
 } from './temporalLayout';
+import { computeTemporalTextLayout } from './temporalTextLayout';
 
 interface TemporalCanvasProps {
   commits: CommitSummary[];
@@ -251,18 +252,26 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
         ? (isLight ? '#0f172a' : '#f8fafc')
         : (isLight ? '#1e293b' : '#e2e8f0');
 
-      // Adaptive summary text width based on available canvas space
-      const maxSummaryWidth = Math.max(380, Math.min(580, (containerRef.current?.clientWidth || 900) - textStartX - 260));
-      const summaryText = truncateText(ctx, item.commit.summary, maxSummaryWidth);
-      ctx.fillText(summaryText, summaryX, item.y);
-
-      // Author & Relative Date
-      const summaryWidth = ctx.measureText(summaryText).width;
-      const metaX = summaryX + Math.max(summaryWidth + 24, 400);
-      ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-      ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+      // Responsive commit summary and author placement
+      const containerWidth = containerRef.current?.clientWidth || 900;
       const relTime = formatRelativeTime(item.commit.author_timestamp);
-      ctx.fillText(`${item.commit.author_name} • ${relTime}`, metaX, item.y);
+      const metaText = `${item.commit.author_name} • ${relTime}`;
+      const textLayout = computeTemporalTextLayout({
+        containerWidth,
+        summaryX,
+        summaryText: item.commit.summary,
+        metaText,
+        measureText: (txt: string) => ctx.measureText(txt).width,
+      });
+
+      ctx.fillText(textLayout.displaySummary, textLayout.summaryX, item.y);
+
+      // Render author & relative date if space permits without clipping
+      if (textLayout.metaX !== null && textLayout.displayMeta) {
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+        ctx.fillText(textLayout.displayMeta, textLayout.metaX, item.y);
+      }
     }
 
     ctx.restore();
@@ -493,16 +502,5 @@ function roundRect(
   ctx.lineTo(x, y + radius);
   ctx.quadraticCurveTo(x, y, x + radius, y);
   ctx.closePath();
-}
-
-function truncateText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
-  if (ctx.measureText(text).width <= maxWidth) {
-    return text;
-  }
-  let current = text;
-  while (current.length > 4 && ctx.measureText(current + '…').width > maxWidth) {
-    current = current.slice(0, -1);
-  }
-  return current + '…';
 }
 

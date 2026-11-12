@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -57,6 +58,7 @@ pub struct AppState {
     pub event_sender: broadcast::Sender<ServerEvent>,
     pub is_shutting_down: AtomicBool,
     pub is_analyzing: AtomicBool,
+    pub process_output_paths: RwLock<HashSet<PathBuf>>,
 }
 
 impl AppState {
@@ -85,7 +87,7 @@ impl AppState {
             bootstrap_token: RwLock::new(bootstrap_token),
             allocated_port,
             root_path,
-            canonical_root,
+            canonical_root: canonical_root.clone(),
             repo_name,
             repo_id,
             status: RwLock::new(IndexingStatus::NotStarted),
@@ -98,7 +100,47 @@ impl AppState {
             event_sender,
             is_shutting_down: AtomicBool::new(false),
             is_analyzing: AtomicBool::new(false),
+            process_output_paths: RwLock::new(detect_process_output_paths(&canonical_root)),
         }
+    }
+
+    /// Register an exact path (relative to canonical_root, or absolute) as a process-owned log destination.
+    /// Files matching these registered paths are ignored by the filesystem watcher to prevent
+    /// self-observation feedback loops when process stdout/stderr or diagnostics are written into the repository.
+    pub fn register_process_log_path(&self, path: &Path) {
+        let norm = if path.is_relative() {
+            path.to_path_buf()
+        } else {
+            let canon_opt = path.canonicalize().ok().or_else(|| {
+                path.parent()
+                    .and_then(|p| p.canonicalize().ok())
+                    .and_then(|parent_canon| path.file_name().map(|f| parent_canon.join(f)))
+            });
+
+            if let Some(ref canon) = canon_opt {
+                if let Ok(rel) = canon.strip_prefix(&self.canonical_root) {
+                    rel.to_path_buf()
+                } else if let Ok(rel) = canon.strip_prefix(&self.root_path) {
+                    rel.to_path_buf()
+                } else {
+                    path.to_path_buf()
+                }
+            } else if let Ok(rel) = path.strip_prefix(&self.canonical_root) {
+                rel.to_path_buf()
+            } else if let Ok(rel) = path.strip_prefix(&self.root_path) {
+                rel.to_path_buf()
+            } else {
+                path.to_path_buf()
+            }
+        };
+        let mut guard = self.process_output_paths.write().unwrap();
+        guard.insert(norm);
+    }
+
+    /// Check if a relative path matches any registered or detected process-owned log destination.
+    pub fn is_process_output_path(&self, rel_path: &Path) -> bool {
+        let guard = self.process_output_paths.read().unwrap();
+        guard.contains(rel_path)
     }
 
     /// Validates and consumes the single-use bootstrap token, returning the session token.
@@ -282,4 +324,63 @@ impl AppState {
     pub fn root_path(&self) -> &Path {
         &self.root_path
     }
+}
+
+fn detect_process_output_paths(canonical_root: &Path) -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
+    // Check stdout (fd 1) and stderr (fd 2) for redirected process output files
+    for fd in [1, 2] {
+        if let Some(target) = get_fd_path(fd) {
+            if let Ok(canon_target) = target.canonicalize() {
+                if let Ok(rel) = canon_target.strip_prefix(canonical_root) {
+                    paths.insert(rel.to_path_buf());
+                }
+            } else if let Ok(rel) = target.strip_prefix(canonical_root) {
+                paths.insert(rel.to_path_buf());
+            }
+        }
+    }
+    // Also check PREBASE_PROCESS_LOG_PATH or PREBASE_LOG_FILE env var if set
+    if let Ok(env_path) =
+        std::env::var("PREBASE_PROCESS_LOG_PATH").or_else(|_| std::env::var("PREBASE_LOG_FILE"))
+    {
+        let p = PathBuf::from(env_path);
+        if let Ok(canon_target) = p.canonicalize() {
+            if let Ok(rel) = canon_target.strip_prefix(canonical_root) {
+                paths.insert(rel.to_path_buf());
+            }
+        } else if let Ok(rel) = p.strip_prefix(canonical_root) {
+            paths.insert(rel.to_path_buf());
+        } else {
+            paths.insert(p);
+        }
+    }
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn get_fd_path(fd: i32) -> Option<PathBuf> {
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    const F_GETPATH: i32 = 50;
+    let mut buf = vec![0u8; 1024];
+    let res = unsafe { fcntl(fd, F_GETPATH, buf.as_mut_ptr()) };
+    if res != -1 {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let s = std::str::from_utf8(&buf[..len]).ok()?;
+        Some(PathBuf::from(s))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_fd_path(fd: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_fd_path(_fd: i32) -> Option<PathBuf> {
+    None
 }
