@@ -1,4 +1,5 @@
-import { FileNode, WatcherHealth } from '../types/graph';
+import { DependencyEdge, FileNode, WatcherHealth } from '../types/graph';
+import { getAreaIdForPath } from '../utils/repositoryAreas';
 
 export interface WatcherStatusBadgeInfo {
   text: string;
@@ -75,4 +76,41 @@ export function reconcileSelectedNodeOnSnapshot(
 ): FileNode | null {
   if (!prevSelectedNode) return null;
   return newSnapshotNodes.find((n) => n.id === prevSelectedNode.id) || null;
+}
+
+/**
+ * Reconciles the selected edge across snapshot revisions:
+ * Returns the fresh edge object if the relationship still exists in the new snapshot;
+ * returns null if the edge or either of its endpoint files was deleted or modified away.
+ */
+export function reconcileSelectedEdgeOnSnapshot(
+  prevSelectedEdge: DependencyEdge | null,
+  newSnapshotEdges: readonly DependencyEdge[]
+): DependencyEdge | null {
+  if (!prevSelectedEdge) return null;
+  // Match on authoritative ID or identical (source, target) endpoint pair
+  return (
+    newSnapshotEdges.find(
+      (e) =>
+        e.id === prevSelectedEdge.id ||
+        (e.source_file_id === prevSelectedEdge.source_file_id &&
+          e.target_file_id === prevSelectedEdge.target_file_id)
+    ) || null
+  );
+}
+
+/**
+ * Reconciles the selected architectural area across snapshot revisions:
+ * Preserves the selection if at least one file still belongs to the area;
+ * returns null if the directory was deleted or renamed.
+ */
+export function reconcileSelectedAreaOnSnapshot(
+  prevAreaId: string | null,
+  newSnapshotNodes: readonly FileNode[]
+): string | null {
+  if (!prevAreaId) return null;
+  const hasMatchingFiles = newSnapshotNodes.some(
+    (node) => getAreaIdForPath(node.relative_path) === prevAreaId
+  );
+  return hasMatchingFiles ? prevAreaId : null;
 }

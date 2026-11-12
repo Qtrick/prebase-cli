@@ -17,6 +17,7 @@ interface TemporalCanvasProps {
   isFiltered?: boolean;
   fitViewTrigger?: number;
   resetViewTrigger?: number;
+  theme?: 'dark' | 'light';
 }
 
 export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
@@ -26,6 +27,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   isFiltered,
   fitViewTrigger,
   resetViewTrigger,
+  theme = 'dark',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -180,6 +182,8 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
 
     ctx.globalAlpha = 1.0;
 
+    const isLight = theme === 'light';
+
     // 2. Draw commit nodes & labels
     for (let i = 0; i < layout.nodes.length; i++) {
       const item = layout.nodes[i];
@@ -195,7 +199,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
         ctx.beginPath();
         ctx.arc(item.x, item.y, radius + 5, 0, Math.PI * 2);
         ctx.fillStyle = color;
-        ctx.globalAlpha = 0.3;
+        ctx.globalAlpha = isLight ? 0.2 : 0.3;
         ctx.fill();
         ctx.globalAlpha = 1.0;
       }
@@ -203,10 +207,10 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       // Inner circle
       ctx.beginPath();
       ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? '#ffffff' : color;
+      ctx.fillStyle = isSelected ? (isLight ? '#0284c7' : '#ffffff') : color;
       ctx.fill();
       ctx.lineWidth = 2;
-      ctx.strokeStyle = isSelected ? color : '#0f172a';
+      ctx.strokeStyle = isSelected ? (isLight ? '#0284c7' : color) : (isLight ? '#ffffff' : '#0f172a');
       ctx.stroke();
 
       // 3. Draw text and badges on the right side of the lanes
@@ -218,15 +222,21 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       const badgeX = textStartX;
       const badgeY = item.y - badgeHeight / 2;
 
-      ctx.fillStyle = isSelected ? 'rgba(56, 189, 248, 0.25)' : 'rgba(30, 41, 59, 0.8)';
-      ctx.strokeStyle = isSelected ? '#38bdf8' : 'rgba(71, 85, 105, 0.6)';
+      ctx.fillStyle = isSelected
+        ? (isLight ? 'rgba(2, 132, 199, 0.15)' : 'rgba(56, 189, 248, 0.25)')
+        : (isLight ? 'rgba(241, 245, 249, 0.95)' : 'rgba(30, 41, 59, 0.8)');
+      ctx.strokeStyle = isSelected
+        ? (isLight ? '#0284c7' : '#38bdf8')
+        : (isLight ? 'rgba(203, 213, 225, 0.8)' : 'rgba(71, 85, 105, 0.6)');
       ctx.lineWidth = 1;
       roundRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 4);
       ctx.fill();
       ctx.stroke();
 
       ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-      ctx.fillStyle = isSelected ? '#38bdf8' : '#94a3b8';
+      ctx.fillStyle = isSelected
+        ? (isLight ? '#0284c7' : '#38bdf8')
+        : (isLight ? '#475569' : '#94a3b8');
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       ctx.fillText(item.commit.short_hash, badgeX + badgeWidth / 2, item.y);
@@ -237,22 +247,26 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       ctx.font = isSelected
         ? '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
         : '500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-      ctx.fillStyle = isSelected ? '#f8fafc' : '#e2e8f0';
+      ctx.fillStyle = isSelected
+        ? (isLight ? '#0f172a' : '#f8fafc')
+        : (isLight ? '#1e293b' : '#e2e8f0');
 
-      const maxSummaryWidth = 360;
+      // Adaptive summary text width based on available canvas space
+      const maxSummaryWidth = Math.max(380, Math.min(580, (containerRef.current?.clientWidth || 900) - textStartX - 260));
       const summaryText = truncateText(ctx, item.commit.summary, maxSummaryWidth);
       ctx.fillText(summaryText, summaryX, item.y);
 
       // Author & Relative Date
-      const metaX = summaryX + 380;
+      const summaryWidth = ctx.measureText(summaryText).width;
+      const metaX = summaryX + Math.max(summaryWidth + 24, 400);
       ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-      ctx.fillStyle = '#64748b';
+      ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
       const relTime = formatRelativeTime(item.commit.author_timestamp);
       ctx.fillText(`${item.commit.author_name} • ${relTime}`, metaX, item.y);
     }
 
     ctx.restore();
-  }, [layout, transform, selectedCommitHash, hoveredHash]);
+  }, [layout, transform, selectedCommitHash, hoveredHash, theme]);
 
   // Coordinate projection from screen to world
   const toWorld = useCallback(

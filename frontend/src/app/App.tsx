@@ -7,6 +7,8 @@ import { RelationshipCanvas, Viewport2D } from '../graphs/relationship/Relations
 import {
   resolveWatcherStatusInfo,
   reconcileSelectedNodeOnSnapshot,
+  reconcileSelectedEdgeOnSnapshot,
+  reconcileSelectedAreaOnSnapshot,
 } from '../transport/statusInfo';
 import {
   reconcileFocusNodeOnSnapshot,
@@ -418,6 +420,10 @@ export const App: React.FC = () => {
 
         // Re-sync selected node if still exists in the new snapshot
         setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
+        // Re-sync selected edge if still exists in the new snapshot (reconciles stale evidence)
+        setSelectedEdge((prev) => reconcileSelectedEdgeOnSnapshot(prev, newSnap.edges));
+        // Re-sync selected area if still has files in the new snapshot
+        setSelectedAreaId((prev) => reconcileSelectedAreaOnSnapshot(prev, newSnap.nodes));
         // Re-sync 2D focus node if still exists; do not auto-select random node on deletion
         setFocusNodeId((prev) => {
           const { nextFocusNodeId, missingNotice } = reconcileFocusNodeOnSnapshot(prev, newSnap.nodes);
@@ -1007,6 +1013,7 @@ export const App: React.FC = () => {
                   isFiltered={Boolean(temporalFilterPath)}
                   fitViewTrigger={fitViewCounter}
                   resetViewTrigger={resetViewCounter}
+                  theme={theme}
                 />
 
                 {/* Floating Load More Commits Button */}

@@ -152,6 +152,10 @@ impl RepositoryScanner {
             || filename_lower == ".netrc"
             || filename_lower == "credentials"
             || filename_lower == "credentials.json"
+            // ponytail: align scanner with watcher for PreBase application-owned log outputs
+            || filename_lower == "prebase.log"
+            || filename_lower == "prebase_server.log"
+            || (filename_lower.starts_with("prebase_") && filename_lower.ends_with(".log"))
         {
             return true;
         }
@@ -387,6 +391,18 @@ mod tests {
             ".gnupg/trustdb.gpg"
         ));
         assert!(RepositoryScanner::is_excluded_relative_path(".netrc"));
+
+        // PreBase application-owned runtime logs
+        assert!(RepositoryScanner::is_excluded_relative_path("prebase.log"));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "prebase_server.log"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "prebase_test.log"
+        ));
+        assert!(RepositoryScanner::is_excluded_relative_path(
+            "src/PREBASE.LOG"
+        ));
 
         // Case-insensitive exclusion check (crucial for macOS/Windows default filesystems)
         assert!(RepositoryScanner::is_excluded_relative_path(

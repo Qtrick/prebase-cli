@@ -216,14 +216,12 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   );
 
   // Auto-fit on focus change, and refit (or recenter) when the container is
-  // measured/resized. The initial fallback dimensions are intentionally not
-  // trusted for framing: the ResizeObserver reports the real size right after
-  // mount, so this effect must react to that change or the rightmost column is
-  // rendered outside the canvas.
+  // measured/resized or when layout bounds change under live updates.
   const lastAutoFitRef = useRef<{
     focusNodeId: string | null;
     width: number;
     height: number;
+    boundsKey: string;
   } | null>(null);
 
   useEffect(() => {
@@ -234,23 +232,29 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     const sizeChanged =
       previous !== null &&
       (previous.width !== dimensions.width || previous.height !== dimensions.height);
+    const boundsKey = `${Math.round(layout.bounds.minX)}:${Math.round(layout.bounds.maxX)}:${Math.round(layout.bounds.minY)}:${Math.round(layout.bounds.maxY)}:${layout.nodes.length}`;
+    const layoutChanged = previous !== null && previous.boundsKey !== boundsKey;
 
-    if (!focusChanged && !sizeChanged) return;
+    if (!focusChanged && !sizeChanged && !layoutChanged) return;
 
     lastAutoFitRef.current = {
       focusNodeId,
       width: dimensions.width,
       height: dimensions.height,
+      boundsKey,
     };
 
     if (focusChanged) {
-      // A new focus is always framed, discarding camera state from the previous
-      // neighborhood.
+      // A new focus is always framed, discarding camera state from the previous neighborhood.
       hasUserAdjustedViewRef.current = false;
       fitToGraph(layout.bounds, dimensions.width, dimensions.height);
     } else if (hasUserAdjustedViewRef.current && previous) {
-      applyViewport(recenterViewportForResize(viewportRef.current, previous, dimensions));
+      // If the user has manually adjusted the view, preserve their custom framing during live updates
+      if (sizeChanged) {
+        applyViewport(recenterViewportForResize(viewportRef.current, previous, dimensions));
+      }
     } else {
+      // If the user has not manually adjusted, re-fit so newly added or removed dependencies are framed
       fitToGraph(layout.bounds, dimensions.width, dimensions.height);
     }
   }, [focusNodeId, layout, dimensions, fitToGraph, applyViewport]);

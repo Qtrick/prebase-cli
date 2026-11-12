@@ -6,8 +6,12 @@ import {
   resolveBackTargetName,
 } from '../relationshipHistory';
 import { Viewport2D } from '../RelationshipCanvas';
-import { FileNode, NetworkCamera } from '../../../types/graph';
+import { DependencyEdge, FileNode, NetworkCamera } from '../../../types/graph';
 import { DEFAULT_YAW, DEFAULT_PITCH, DEFAULT_ZOOM } from '../../network/render/networkRenderMath';
+import {
+  reconcileSelectedEdgeOnSnapshot,
+  reconcileSelectedAreaOnSnapshot,
+} from '../../../transport/statusInfo';
 
 const makeNode = (id: string, filename = `${id}.ts`): FileNode => ({
   id,
@@ -19,6 +23,20 @@ const makeNode = (id: string, filename = `${id}.ts`): FileNode => ({
   analysis_status: 'Analyzed',
   direct_dependency_count: 2,
   direct_dependent_count: 3,
+});
+
+const makeEdge = (
+  id: string,
+  source_file_id: string,
+  target_file_id: string,
+  relationship_kind: 'Import' | 'Export' | 'DynamicImport' | 'TypeOnly' = 'Import'
+): DependencyEdge => ({
+  id,
+  source_file_id,
+  target_file_id,
+  relationship_kind,
+  resolution_status: 'ResolvedInternal',
+  evidence: [],
 });
 
 describe('Relationship State, Navigation Stack, and Live Reconciliation', () => {
@@ -108,6 +126,51 @@ describe('Relationship State, Navigation Stack, and Live Reconciliation', () => 
 
       expect(reconciliation.nextFocusNodeId).toBeNull();
       expect(reconciliation.missingNotice).toBeNull();
+    });
+
+    it('preserves and updates selected edge when it still exists in new snapshot (matching by ID or endpoints)', () => {
+      const prevEdge = makeEdge('edge-1', 'auth-svc', 'user-db', 'Import');
+      const updatedEdge = makeEdge('edge-1', 'auth-svc', 'user-db', 'TypeOnly');
+      const snapshotEdges = [updatedEdge, makeEdge('edge-2', 'auth-svc', 'token-util')];
+
+      const reconciledById = reconcileSelectedEdgeOnSnapshot(prevEdge, snapshotEdges);
+      expect(reconciledById).toBe(updatedEdge);
+      expect(reconciledById?.relationship_kind).toBe('TypeOnly');
+
+      // Preserves match when edge ID changed across snapshot revisions but source and target endpoints match
+      const edgeWithNewId = makeEdge('edge-regenerated-id', 'auth-svc', 'user-db', 'Import');
+      const reconciledByEndpoints = reconcileSelectedEdgeOnSnapshot(prevEdge, [edgeWithNewId]);
+      expect(reconciledByEndpoints).toBe(edgeWithNewId);
+    });
+
+    it('returns null when selected edge is no longer present in new snapshot (import deleted or file deleted)', () => {
+      const prevEdge = makeEdge('edge-1', 'auth-svc', 'user-db');
+
+      // Import removed between files
+      expect(reconcileSelectedEdgeOnSnapshot(prevEdge, [makeEdge('edge-2', 'auth-svc', 'other-db')])).toBeNull();
+
+      // Endpoints missing / empty edges
+      expect(reconcileSelectedEdgeOnSnapshot(prevEdge, [])).toBeNull();
+      expect(reconcileSelectedEdgeOnSnapshot(null, [prevEdge])).toBeNull();
+    });
+
+    it('preserves selected area ID when files belonging to that area still exist in new snapshot', () => {
+      const snapshotNodes = [
+        makeNode('auth-svc', 'auth/AuthService.ts'),
+        makeNode('user-svc', 'auth/UserService.ts'),
+      ];
+
+      expect(reconcileSelectedAreaOnSnapshot('src/auth', snapshotNodes)).toBe('src/auth');
+    });
+
+    it('returns null when all files belonging to selected area are deleted or renamed', () => {
+      const snapshotNodes = [
+        makeNode('gateway', 'gateway/Gateway.ts'),
+      ];
+
+      // Area 'src/auth' has no files remaining in snapshot
+      expect(reconcileSelectedAreaOnSnapshot('src/auth', snapshotNodes)).toBeNull();
+      expect(reconcileSelectedAreaOnSnapshot(null, snapshotNodes)).toBeNull();
     });
   });
 

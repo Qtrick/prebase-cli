@@ -225,40 +225,39 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
         )}
 
         {/* Commit Hash and Copy */}
-        <div className="stat-card">
+        <div className="commit-sha-bar">
           <div className="stat-row-between">
             <span className="stat-label">Full Commit SHA</span>
             <button className="copy-btn" onClick={handleCopyHash} title="Copy SHA">
-              {copied ? <Check size={13} color="#2dd4bf" /> : <Copy size={13} />}
+              {copied ? <Check size={13} color="var(--accent-teal)" /> : <Copy size={13} />}
               <span>{copied ? 'Copied' : 'Copy'}</span>
             </button>
           </div>
           <span className="stat-value mono sha-text">{selectedCommit.hash}</span>
         </div>
 
+        {/* Message */}
+        <div className="commit-message-section">
+          <p className="commit-message-body">
+            {details ? details.message : selectedCommit.summary}
+          </p>
+        </div>
+
         {/* Author & Date */}
-        <div className="stat-card">
+        <div className="commit-meta-details">
           <div className="meta-line">
-            <User size={14} color="#94a3b8" />
+            <User size={13} color="#94a3b8" />
             <span>
               <strong>{selectedCommit.author_name}</strong>{' '}
               <span className="dim">&lt;{selectedCommit.author_email}&gt;</span>
             </span>
           </div>
           {details && (
-            <div className="meta-line" style={{ marginTop: '6px' }}>
-              <Calendar size={14} color="#94a3b8" />
+            <div className="meta-line">
+              <Calendar size={13} color="#94a3b8" />
               <span className="dim">{details.author_date}</span>
             </div>
           )}
-        </div>
-
-        {/* Message */}
-        <div className="stat-card">
-          <span className="stat-label">Commit Message</span>
-          <p className="commit-message-body">
-            {details ? details.message : selectedCommit.summary}
-          </p>
         </div>
 
         {loading ? (
@@ -275,25 +274,25 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
           <>
             {/* Comparison Basis for Merge Commits */}
             {details.comparison_basis && (
-              <div className="stat-card" style={{ borderColor: 'rgba(56, 189, 248, 0.4)' }}>
-                <span className="stat-label">Merge Comparison Basis</span>
-                <span className="stat-value" style={{ fontSize: '12px', color: '#38bdf8' }}>
+              <div className="merge-basis-bar">
+                <span className="stat-label">Merge Comparison Basis: </span>
+                <span className="stat-value" style={{ fontSize: '12px', color: 'var(--accent-sky)' }}>
                   {details.comparison_basis}
                 </span>
               </div>
             )}
 
             {/* Diff Stats */}
-            <div className="stats-grid">
-              <div className="stat-card">
+            <div className="commit-diff-summary-bar">
+              <div className="diff-stat-item">
                 <span className="stat-label">Files Changed</span>
                 <span className="stat-value">{details.stats.files_changed}</span>
               </div>
-              <div className="stat-card">
-                <span className="stat-label">Diff</span>
+              <div className="diff-stat-item">
+                <span className="stat-label">Lines</span>
                 <span className="stat-value mono">
-                  <span style={{ color: '#2dd4bf' }}>+{details.stats.insertions}</span>{' '}
-                  <span style={{ color: '#f43f5e' }}>-{details.stats.deletions}</span>
+                  <span style={{ color: 'var(--accent-teal)' }}>+{details.stats.insertions}</span>{' '}
+                  <span style={{ color: 'var(--accent-rose)' }}>-{details.stats.deletions}</span>
                 </span>
               </div>
             </div>

@@ -760,24 +760,12 @@ export const Inspector: React.FC<InspectorProps> = ({
           <p className="file-plain-summary-text">{relationshipSentence}</p>
         </div>
 
-        {/* Action Buttons - Elevated directly under summary banner */}
+        {/* Action Buttons - Clear Contextual Hierarchy */}
         <div className="inspector-action-buttons">
-          {selectedNode && onRevealNode && networkViewMode !== '2d' && (
-            <button
-              type="button"
-              className="reveal-btn"
-              onClick={() => onRevealNode(selectedNode.id)}
-              title="Locate and center this file in the 3D graph"
-            >
-              <LocateFixed size={14} />
-              <span>Reveal in 3D</span>
-            </button>
-          )}
-
           {selectedNode && networkViewMode === '3d' && onExplore2D && !isUnsupported && (
             <button
               type="button"
-              className="explore-2d-btn"
+              className="explore-2d-btn primary-action"
               onClick={() => onExplore2D(selectedNode)}
               title="Open focused 2D relationship neighborhood for this file"
             >
@@ -789,7 +777,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           {selectedNode && networkViewMode === '2d' && onRefocus2D && selectedNode.id !== focusNodeId && (
             <button
               type="button"
-              className="refocus-2d-btn"
+              className="refocus-2d-btn primary-action"
               onClick={() => onRefocus2D(selectedNode.id)}
               title="Recenter 2D relationship neighborhood on this file"
             >
@@ -801,7 +789,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           {selectedNode && networkViewMode === '2d' && onSwitchTo3D && (
             <button
               type="button"
-              className="switch-3d-btn"
+              className="switch-3d-btn primary-action"
               onClick={onSwitchTo3D}
               title="Return to 3D Overview while preserving selection"
             >
@@ -810,17 +798,31 @@ export const Inspector: React.FC<InspectorProps> = ({
             </button>
           )}
 
-          {selectedNode && onViewFileHistory && (
-            <button
-              type="button"
-              className="view-history-btn"
-              onClick={() => onViewFileHistory(selectedNode.relative_path)}
-              title="Inspect historical Git commits for this file"
-            >
-              <Clock size={14} />
-              <span>View File History</span>
-            </button>
-          )}
+          <div className="secondary-action-row">
+            {selectedNode && onRevealNode && networkViewMode !== '2d' && (
+              <button
+                type="button"
+                className="reveal-btn secondary-action"
+                onClick={() => onRevealNode(selectedNode.id)}
+                title="Locate and center this file in the 3D graph"
+              >
+                <LocateFixed size={13} />
+                <span>Reveal in 3D</span>
+              </button>
+            )}
+
+            {selectedNode && onViewFileHistory && (
+              <button
+                type="button"
+                className="view-history-btn secondary-action"
+                onClick={() => onViewFileHistory(selectedNode.relative_path)}
+                title="Inspect historical Git commits for this file"
+              >
+                <Clock size={13} />
+                <span>File History</span>
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="meta-tags" style={{ marginTop: '12px' }}>
