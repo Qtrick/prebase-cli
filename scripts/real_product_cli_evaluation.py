@@ -15,20 +15,94 @@ import shutil
 import tempfile
 import subprocess
 import urllib.request
+import json
 import re
 from playwright.sync_api import sync_playwright, expect
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
+FAILURE_ARTIFACT_DIR = os.environ.get(
+    "PREBASE_FAILURE_ARTIFACT_DIR", os.path.join(ROOT_DIR, "test-results", "failure-artifacts")
+)
+os.makedirs(FAILURE_ARTIFACT_DIR, exist_ok=True)
+
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
+
+def capture_failure_artifacts(prefix: str, page, log_file_path: str, exc: Exception):
+    log("FAIL-CAPTURE", f"Capturing sanitized failure artifacts for '{prefix}' to {FAILURE_ARTIFACT_DIR}...")
+    try:
+        if page:
+            try:
+                shot_path = os.path.join(FAILURE_ARTIFACT_DIR, f"{prefix}_failure.png")
+                page.screenshot(path=shot_path, full_page=True)
+                log("FAIL-CAPTURE", f"Screenshot saved -> {shot_path}")
+            except Exception as e:
+                log("FAIL-CAPTURE", f"Could not capture screenshot: {e}")
+
+            try:
+                dom_path = os.path.join(FAILURE_ARTIFACT_DIR, f"{prefix}_dom.html")
+                with open(dom_path, "w", encoding="utf-8") as f:
+                    f.write(mask_credentials(page.content()))
+                log("FAIL-CAPTURE", f"DOM state saved -> {dom_path}")
+            except Exception as e:
+                log("FAIL-CAPTURE", f"Could not capture DOM: {e}")
+
+        diag_path = os.path.join(FAILURE_ARTIFACT_DIR, f"{prefix}_diagnostics.json")
+        diagnostics = {
+            "timestamp": time.time(),
+            "prefix": prefix,
+            "error": mask_credentials(str(exc)),
+            "current_url": page.url if page else None,
+        }
+        if page:
+            try:
+                diagnostics["network_meta"] = page.evaluate(
+                    "() => fetch('/api/v1/network').then(r => r.json()).then(d => ({ revision: d.revision, node_count: d.nodes.length, edge_count: d.edges.length }))"
+                )
+            except Exception as e:
+                diagnostics["network_meta_err"] = str(e)
+            try:
+                diagnostics["status_meta"] = page.evaluate("() => fetch('/api/v1/status').then(r => r.json())")
+            except Exception as e:
+                diagnostics["status_meta_err"] = str(e)
+
+        try:
+            with open(diag_path, "w", encoding="utf-8") as f:
+                json.dump(diagnostics, f, indent=2)
+            log("FAIL-CAPTURE", f"Diagnostics saved -> {diag_path}")
+        except Exception as e:
+            log("FAIL-CAPTURE", f"Could not save diagnostics: {e}")
+
+        if log_file_path and os.path.exists(log_file_path):
+            try:
+                with open(log_file_path, "r", encoding="utf-8", errors="replace") as f:
+                    raw_log = f.read()
+                sanitized_log = mask_credentials(raw_log)
+                log_out_path = os.path.join(FAILURE_ARTIFACT_DIR, f"{prefix}_server_sanitized.log")
+                with open(log_out_path, "w", encoding="utf-8") as f:
+                    f.write(sanitized_log)
+                log("FAIL-CAPTURE", f"Sanitized logs saved -> {log_out_path}")
+            except Exception as e:
+                log("FAIL-CAPTURE", f"Could not save sanitized log: {e}")
+    except Exception as capture_err:
+        log("FAIL-CAPTURE", f"Failed while capturing failure artifacts: {capture_err}")
 
 def log(step, msg):
-    print(f"\x1b[36m[{step}]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[{step}]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def fail(msg):
-    print(f"\x1b[31m[FAIL]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[FAIL]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
     sys.exit(1)
 
 def parse_startup_info(log_path):
@@ -51,7 +125,15 @@ def parse_startup_info(log_path):
 
 def test_repository_a_small_deps(p):
     log("REPO-A", "Creating Small TypeScript Component & Dependency Fixture...")
-    repo_dir = tempfile.mkdtemp(prefix="prebase-eval-repoA-")
+    workspace = tempfile.mkdtemp(prefix="prebase-eval-workspaceA-")
+    repo_dir = os.path.join(workspace, "repo")
+    log_dir = os.path.join(workspace, "logs")
+    os.makedirs(repo_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, "server.log")
+    page = None
+    browser = None
+    proc = None
     try:
         # Create components, utils, isolated file, and unsupported file
         src = os.path.join(repo_dir, "src")
@@ -74,7 +156,6 @@ def test_repository_a_small_deps(p):
             f.write('Build completed successfully.\n')
 
         # Test CLI default map launch with dynamic port allocation (port 0)
-        log_file_path = os.path.join(repo_dir, "server.log")
         log_file = open(log_file_path, "w")
         cmd = [BIN, "--port", "0", "--no-open", "map", repo_dir]
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
@@ -166,15 +247,31 @@ def test_repository_a_small_deps(p):
             success("Returned from 2D to 3D Overview")
 
             browser.close()
+            browser = None
+        except Exception as exc:
+            capture_failure_artifacts("repoA", page, log_file_path, exc)
+            raise exc
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if browser:
+                browser.close()
+            if proc:
+                proc.terminate()
+                proc.wait(timeout=5)
+            log_file.close()
     finally:
-        shutil.rmtree(repo_dir, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
 
 def test_repository_b_rich_git(p):
     log("REPO-B", "Testing Multi-Branch Rich Git History (>50 commits)...")
-    repo_dir = tempfile.mkdtemp(prefix="prebase-eval-repoB-")
+    workspace = tempfile.mkdtemp(prefix="prebase-eval-workspaceB-")
+    repo_dir = os.path.join(workspace, "repo")
+    log_dir = os.path.join(workspace, "logs")
+    os.makedirs(repo_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, "server.log")
+    page = None
+    browser = None
+    proc = None
     try:
         git = lambda *args: subprocess.check_call(
             ["git"] + list(args), cwd=repo_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -206,7 +303,6 @@ def test_repository_b_rich_git(p):
             git("add", "LOG.md")
             git("commit", "-m", f"chore: entry {i}")
 
-        log_file_path = os.path.join(repo_dir, "server.log")
         log_file = open(log_file_path, "w")
         cmd = [BIN, "--port", "0", "--no-open", "history", repo_dir]
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
@@ -249,16 +345,28 @@ def test_repository_b_rich_git(p):
             success("Live Git commit detected via SSE without page reload")
 
             browser.close()
+            browser = None
+        except Exception as exc:
+            capture_failure_artifacts("repoB", page, log_file_path, exc)
+            raise exc
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if browser:
+                browser.close()
+            if proc:
+                proc.terminate()
+                proc.wait(timeout=5)
+            log_file.close()
     finally:
-        shutil.rmtree(repo_dir, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
 
 def test_repository_c_read_only_prebase(p):
     log("REPO-C", "Launching PreBase against its own codebase (read-only)...")
-    log_file_path = os.path.join(tempfile.gettempdir(), "prebase-self.log")
+    log_dir = tempfile.mkdtemp(prefix="prebase-eval-logsC-")
+    log_file_path = os.path.join(log_dir, "prebase-self.log")
     log_file = open(log_file_path, "w")
+    page = None
+    browser = None
+    proc = None
     cmd = [BIN, "--port", "0", "--no-open", "map", ROOT_DIR]
     proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
     try:
@@ -295,11 +403,18 @@ def test_repository_c_read_only_prebase(p):
         success("Responsive layouts verified (1024x768 to 1920x1080)")
 
         browser.close()
+        browser = None
+    except Exception as exc:
+        capture_failure_artifacts("repoC", page, log_file_path, exc)
+        raise exc
     finally:
-        proc.terminate()
-        proc.wait(timeout=5)
-        if os.path.exists(log_file_path):
-            os.remove(log_file_path)
+        if browser:
+            browser.close()
+        if proc:
+            proc.terminate()
+            proc.wait(timeout=5)
+        log_file.close()
+        shutil.rmtree(log_dir, ignore_errors=True)
 
 def test_failure_behaviors():
     log("FAILURES", "Testing error handling & failure behaviors...")

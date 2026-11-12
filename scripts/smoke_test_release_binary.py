@@ -100,6 +100,7 @@ def run_smoke_test(binary_path):
 
     # 3. Create synthetic test repo
     test_dir = tempfile.mkdtemp(prefix="prebase-smoke-")
+    log_dir = tempfile.mkdtemp(prefix="prebase-smoke-logs-")
     proc = None
     log_file = None
     try:
@@ -123,7 +124,7 @@ def run_smoke_test(binary_path):
         git("commit", "-m", "feat: initial commit for smoke test")
 
         port = find_free_port()
-        log_path = os.path.join(test_dir, "server.log")
+        log_path = os.path.join(log_dir, "server.log")
         log_file = open(log_path, "w")
 
         # 4. Spawn binary against fixture
@@ -270,6 +271,7 @@ def run_smoke_test(binary_path):
             log_file.close()
         import shutil
         shutil.rmtree(test_dir, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
 
 
 def main():

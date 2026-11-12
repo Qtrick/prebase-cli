@@ -359,15 +359,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     const width = containerRef.current.clientWidth || 800;
     const height = containerRef.current.clientHeight || 600;
 
-    // Check if node is already safely visible
-    const isVisible = isNodeVisibleInViewport(
-      projectedNode.screenX,
-      projectedNode.screenY,
-      projectedNode.radius,
-      width,
-      height,
-      insets
-    );
+    // Check if node is already safely visible on the front hemisphere
+    const isVisible =
+      projectedNode.projected.z >= -10 &&
+      isNodeVisibleInViewport(
+        projectedNode.screenX,
+        projectedNode.screenY,
+        projectedNode.radius,
+        width,
+        height,
+        insets
+      );
 
     if (onlyIfOutside && isVisible) {
       // Node is already comfortably visible: do nothing!

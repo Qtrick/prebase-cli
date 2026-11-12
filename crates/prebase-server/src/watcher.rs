@@ -71,9 +71,10 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
         // Single-flight analysis coordinator state
         let mut is_analyzing = false;
-        let mut pending_after_analysis = false;
         let (completion_tx, mut completion_rx) = mpsc::channel::<()>(1);
         let mut active_task: Option<tokio::task::JoinHandle<()>> = None;
+        let mut last_reanalysis_finished = tokio::time::Instant::now();
+        const MIN_REANALYSIS_COOLDOWN: Duration = Duration::from_millis(300);
 
         loop {
             if overflow_flag.swap(false, Ordering::SeqCst) {
@@ -93,6 +94,7 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                 _ = completion_rx.recv() => {
                     is_analyzing = false;
                     state.set_analyzing(false);
+                    last_reanalysis_finished = tokio::time::Instant::now();
                     if let Some(handle) = active_task.take() {
                         let _ = handle.await;
                     }
@@ -105,31 +107,10 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                         state.notify_git_updated();
                     }
 
-                    // If modifications arrived while analysis was running, trigger next single-flight analysis
-                    if pending_after_analysis || full_rescan_needed || !changed_sources.is_empty() {
-                        pending_after_analysis = false;
-                        if overflow_flag.swap(false, Ordering::SeqCst) {
-                            full_rescan_needed = true;
-                        }
-
-                        let files_to_report =
-                            drain_pending_changes(&mut full_rescan_needed, &mut changed_sources);
-
-                        info!(
-                            "Reanalyzing repository following coalesced filesystem changes in {} file(s)...",
-                            files_to_report.len()
-                        );
-
-                        is_analyzing = true;
-                        state.set_analyzing(true);
-                        let generation = state.get_next_generation();
-                        active_task = Some(spawn_reanalysis(
-                            state.clone(),
-                            files_to_report,
-                            generation,
-                            completion_tx.clone(),
-                        ));
-                    }
+                    // ponytail: Do not immediately spawn reanalysis with 0ms delay.
+                    // Leaving is_analyzing=false allows the 200ms debounce sleep branch
+                    // to coalesce any modifications that arrived during or immediately after analysis,
+                    // preventing runaway reanalysis feedback loops.
                 }
                 msg_opt = rx.recv() => {
                     if overflow_flag.swap(false, Ordering::SeqCst) {
@@ -153,16 +134,10 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
 
                                 if is_supported_source_file(&path) {
                                     changed_sources.insert(rel.to_string_lossy().replace('\\', "/"));
-                                    if is_analyzing || state.is_analyzing() {
-                                        pending_after_analysis = true;
-                                    }
                                 } else {
                                     // Any other non-ignored filesystem change (e.g. README.md, styles.css, directory changes)
                                     // requires a full rescan to maintain truthful discovered file counts, coverage, and metadata.
                                     full_rescan_needed = true;
-                                    if is_analyzing || state.is_analyzing() {
-                                        pending_after_analysis = true;
-                                    }
                                 }
                             }
                         }
@@ -175,6 +150,12 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                 _ = tokio::time::sleep(Duration::from_millis(200)), if !is_analyzing && !state.is_analyzing() && (!changed_sources.is_empty() || git_ref_changed || full_rescan_needed || overflow_flag.load(Ordering::SeqCst)) => {
                     if overflow_flag.swap(false, Ordering::SeqCst) {
                         full_rescan_needed = true;
+                    }
+
+                    // Enforce cooldown if previous reanalysis finished very recently
+                    let elapsed = last_reanalysis_finished.elapsed();
+                    if elapsed < MIN_REANALYSIS_COOLDOWN {
+                        tokio::time::sleep(MIN_REANALYSIS_COOLDOWN - elapsed).await;
                     }
 
                     // Debounce window elapsed with pending changes
@@ -371,6 +352,16 @@ fn should_ignore_path(rel_path: &Path) -> bool {
         if file_name == ".DS_Store" || file_name.ends_with('~') || file_name.ends_with(".tmp") {
             return true;
         }
+        // ponytail: Ignore PreBase's own default runtime/server log filenames to prevent
+        // self-observation loops when stdout/stderr is redirected into the watched repository root,
+        // while preserving general user and build logs (e.g. build.log, app.log) as discoverable.
+        if file_name == "server.log"
+            || file_name == "prebase.log"
+            || file_name == "prebase_server.log"
+            || (file_name.starts_with("prebase_") && file_name.ends_with(".log"))
+        {
+            return true;
+        }
     }
 
     false
@@ -443,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_watcher_policy_for_unsupported_non_ignored_files() {
-        // Non-source files that are NOT ignored (e.g. README.md, styles.css, notes.txt)
+        // Non-source files that are NOT ignored (e.g. README.md, styles.css, notes.txt, build.log)
         assert!(!should_ignore_path(Path::new("README.md")));
         assert!(!is_supported_source_file(Path::new("README.md")));
 
@@ -454,6 +445,15 @@ mod tests {
         assert!(!is_supported_source_file(Path::new(
             "docs/architecture.txt"
         )));
+
+        assert!(!should_ignore_path(Path::new("build.log")));
+        assert!(!is_supported_source_file(Path::new("build.log")));
+
+        // PreBase runtime logs are ignored in watcher to prevent self-observation loops
+        assert!(should_ignore_path(Path::new("server.log")));
+        assert!(should_ignore_path(Path::new("prebase.log")));
+        assert!(should_ignore_path(Path::new("prebase_server.log")));
+        assert!(should_ignore_path(Path::new("prebase_2d.log")));
 
         // Ignored files MUST remain ignored
         assert!(should_ignore_path(Path::new(".DS_Store")));

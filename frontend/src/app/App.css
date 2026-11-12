@@ -446,7 +446,7 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   max-height: 340px;
   overflow-y: auto;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
-  z-index: 30;
+  z-index: 200;
   animation: dropdownSlide 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
@@ -1085,6 +1085,7 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   gap: 8px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 100;
+  pointer-events: none; /* ponytail: informational toast must never intercept pointer clicks */
   animation: fadeIn 0.2s ease-out;
 }
 

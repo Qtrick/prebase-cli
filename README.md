@@ -78,10 +78,11 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
   - **Tier 1 (Automated CI & Full Browser E2E Matrix)**:
     - macOS Apple Silicon (`aarch64-apple-darwin`, macOS 12+)
     - Linux x86_64 (`x86_64-unknown-linux-gnu`, glibc 2.31+)
-  - **Tier 2 (Packaged Release Binaries / Best-Effort)**:
+  - **Tier 2 (Packaged Release Binaries / Built in Release Workflow)**:
     - macOS Intel (`x86_64-apple-darwin`)
+  - **Experimental / Source-buildable (Unverified in CI; no prebuilt release binaries)**:
+    - Windows x86_64 (`x86_64-pc-windows-msvc` — source-buildable; path canonicalization and backslash handling supported, but not routinely validated in automated CI)
     - Linux ARM64 (`aarch64-unknown-linux-gnu`)
-    - Windows x86_64 (`x86_64-pc-windows-msvc`)
 
 - **Testing & Headless Browser Verification Prerequisites**:
   - Python **3.10 – 3.13** (Python 3.14 is not currently supported due to upstream Playwright/greenlet wheel compatibility).

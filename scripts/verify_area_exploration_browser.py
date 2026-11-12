@@ -142,13 +142,14 @@ def setup_deterministic_multi_area_repo(repo_dir):
 
 def run_verification():
     temp_dir = tempfile.mkdtemp(prefix="prebase-area-test-")
+    log_dir = tempfile.mkdtemp(prefix="prebase-area-logs-")
     proc = None
     try:
         setup_deterministic_multi_area_repo(temp_dir)
 
         port = find_available_port(DEFAULT_PORT)
         log(f"Starting PreBase release server on port {port}...")
-        log_path = os.path.join(temp_dir, "prebase_server.log")
+        log_path = os.path.join(log_dir, "prebase_server.log")
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             [BIN, "--port", str(port), "--no-open", "map", temp_dir],
@@ -331,6 +332,7 @@ def run_verification():
             except Exception:
                 proc.kill()
         shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
         log("Test cleanup complete.")
 
 if __name__ == "__main__":

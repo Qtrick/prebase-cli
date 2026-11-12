@@ -107,6 +107,7 @@ def main():
 
     # 3. Setup test repo
     test_dir = tempfile.mkdtemp(prefix="prebase-stage2-e2e-")
+    log_dir = tempfile.mkdtemp(prefix="prebase-stage2-logs-")
     try:
         log(f"Setting up test repository in {test_dir}...")
         git = lambda *args: subprocess.check_call(["git"] + list(args), cwd=test_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -142,7 +143,7 @@ def main():
 
         # 4. Test 1: prebase map --view 2d --focus src/components/Card.tsx
         log(f"Launching PreBase with '--view 2d --focus src/components/Card.tsx' on port {PORT}...")
-        log_file_path = os.path.join(test_dir, "prebase_2d.log")
+        log_file_path = os.path.join(log_dir, "prebase_2d.log")
         log_file = open(log_file_path, "w")
 
         proc = subprocess.Popen(
@@ -297,6 +298,7 @@ def main():
 
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
 
     print("=" * 70)
     print("\x1b[1;32mALL STAGE 2 END-TO-END VERIFICATION CHECKS PASSED!\x1b[0m")

@@ -107,6 +107,7 @@ def main():
 
     # 3. Create synthetic multi-branch test repository
     test_dir = tempfile.mkdtemp(prefix="prebase-e2e-")
+    log_dir = tempfile.mkdtemp(prefix="prebase-e2e-logs-")
     try:
         log(f"Setting up test repository in {test_dir}...")
         git = lambda *args: subprocess.check_call(["git"] + list(args), cwd=test_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -162,7 +163,7 @@ def main():
 
         # 4. Spawn PreBase server
         log(f"Launching PreBase on port {PORT}...")
-        log_file_path = os.path.join(test_dir, "prebase.log")
+        log_file_path = os.path.join(log_dir, "prebase.log")
         log_file = open(log_file_path, "w")
         proc = subprocess.Popen(
             [BIN, "--port", str(PORT), "--no-open", test_dir],
@@ -354,6 +355,7 @@ def main():
 
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
 
     print("=" * 65)
     print("\x1b[1;32mALL END-TO-END VERIFICATION CHECKS PASSED!\x1b[0m")

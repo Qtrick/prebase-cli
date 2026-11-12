@@ -197,6 +197,7 @@ def main():
     PORT = find_available_port(19995)
 
     test_repo_dir = tempfile.mkdtemp(prefix="prebase-temporal-test-")
+    log_dir = tempfile.mkdtemp(prefix="prebase-temporal-logs-")
     proc = None
 
     try:
@@ -205,7 +206,7 @@ def main():
         # ----------------------------------------------------------------------
         # TEST SUITE 1: Direct launch via `history` CLI command (?view=temporal)
         # ----------------------------------------------------------------------
-        log_path = os.path.join(test_repo_dir, "server_temporal.log")
+        log_path = os.path.join(log_dir, "server_temporal.log")
         log_file = open(log_path, "w")
         cmd = [BIN, "--port", str(PORT), "--no-open", "history", test_repo_dir]
         log(f"Launching `prebase history`: {' '.join(cmd)}")
@@ -527,12 +528,13 @@ def main():
 
         # Create empty non-git dir
         non_git_dir = tempfile.mkdtemp(prefix="prebase-nongit-")
+        ng_log_dir = tempfile.mkdtemp(prefix="prebase-nongit-logs-")
         try:
             os.makedirs(os.path.join(non_git_dir, "src"), exist_ok=True)
             with open(os.path.join(non_git_dir, "src", "hello.ts"), "w") as f:
                 f.write("console.log('hello');\n")
 
-            ng_log_path = os.path.join(non_git_dir, "server_nongit.log")
+            ng_log_path = os.path.join(ng_log_dir, "server_nongit.log")
             ng_log_file = open(ng_log_path, "w")
             ng_cmd = [BIN, "--port", str(PORT), "--no-open", "history", non_git_dir]
             proc = subprocess.Popen(ng_cmd, stdout=ng_log_file, stderr=subprocess.STDOUT)
@@ -566,6 +568,7 @@ def main():
                 proc.wait(timeout=5)
                 proc = None
             shutil.rmtree(non_git_dir, ignore_errors=True)
+            shutil.rmtree(ng_log_dir, ignore_errors=True)
 
     finally:
         if proc:
@@ -576,6 +579,7 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
         shutil.rmtree(test_repo_dir, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
         log("Test cleanup complete.")
 
     print("=" * 80)

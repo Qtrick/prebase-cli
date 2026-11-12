@@ -118,6 +118,7 @@ export const App: React.FC = () => {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const focusResolvedRef = useRef(false);
   const liveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLiveNoticeTimeRef = useRef<number>(0);
   const commitsRequestTokenRef = useRef(0);
   const commitsAbortControllerRef = useRef<AbortController | null>(null);
 
@@ -296,6 +297,12 @@ export const App: React.FC = () => {
   }, []);
 
   const showLiveNotice = useCallback((message: string, duration = 3500) => {
+    const now = Date.now();
+    // ponytail: throttle rapid notification churn to prevent visual and screen-reader flooding
+    if (now - lastLiveNoticeTimeRef.current < 1500 && liveNoticeTimerRef.current) {
+      return;
+    }
+    lastLiveNoticeTimeRef.current = now;
     if (liveNoticeTimerRef.current) clearTimeout(liveNoticeTimerRef.current);
     setLiveNotice(message);
     liveNoticeTimerRef.current = setTimeout(() => {
@@ -599,7 +606,7 @@ export const App: React.FC = () => {
         setRevealRequest({
           nodeId: node.id,
           timestamp: performance.now(),
-          onlyIfOutside: true,
+          onlyIfOutside: false,
         });
       }
     },
@@ -859,7 +866,7 @@ export const App: React.FC = () => {
 
         {/* Live sync toast notification */}
         {liveNotice && (
-          <div className="live-toast">
+          <div className="live-toast" role="status" aria-live="polite">
             <Radio size={14} color="#2dd4bf" />
             <span>{liveNotice}</span>
           </div>
