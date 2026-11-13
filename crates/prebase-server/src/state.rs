@@ -140,7 +140,17 @@ impl AppState {
     /// Check if a relative path matches any registered or detected process-owned log destination.
     pub fn is_process_output_path(&self, rel_path: &Path) -> bool {
         let guard = self.process_output_paths.read().unwrap();
-        guard.contains(rel_path)
+        if guard.contains(rel_path) {
+            return true;
+        }
+        if let Ok(canon) = self.canonical_root.join(rel_path).canonicalize() {
+            if let Ok(canon_rel) = canon.strip_prefix(&self.canonical_root) {
+                if guard.contains(canon_rel) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Validates and consumes the single-use bootstrap token, returning the session token.

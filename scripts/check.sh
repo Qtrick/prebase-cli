@@ -6,7 +6,13 @@ cd "$ROOT_DIR"
 
 echo "==> Running full verification check..."
 
-# 1. Rust formatting & lints
+# 1. Shell script syntax
+echo "--> Checking Shell script syntax..."
+for script in scripts/*.sh; do
+    bash -n "$script"
+done
+
+# 2. Rust formatting & lints
 echo "--> Checking Rust code format..."
 cargo fmt --all -- --check
 
