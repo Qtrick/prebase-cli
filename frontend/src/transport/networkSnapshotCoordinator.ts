@@ -8,6 +8,8 @@ export interface NetworkSnapshotCoordinator {
   shouldProcessSseEvent: (revision: number) => boolean;
   recordObservedEventRevision: (revision: number) => void;
   getHighestObservedRevision: () => number;
+  hasPendingNewerRevision: () => boolean;
+  reset: () => void;
 }
 
 /**
@@ -15,14 +17,17 @@ export interface NetworkSnapshotCoordinator {
  * - Coalesces concurrent in-flight requests to /api/v1/network.
  * - Enforces strictly monotonic snapshot application (> check) to prevent
  *   stale or duplicate revisions from re-triggering expensive React updates.
+ * - Handles initial revision 0 (starts at -1 so rev 0 is accepted once).
  * - Filters out-of-order and redundant SSE event notifications.
+ * - Tracks pending newer revisions when rapid updates occur during in-flight fetches.
  */
 export function createNetworkSnapshotCoordinator(
   fetchFn: (signal?: AbortSignal) => Promise<GraphSnapshot>
 ): NetworkSnapshotCoordinator {
   let inFlight: Promise<GraphSnapshot> | null = null;
-  let latestAppliedRevision = 0;
-  let highestObservedRevision = 0;
+  // Initialize to -1 to cleanly support initial repository snapshot at revision 0
+  let latestAppliedRevision = -1;
+  let highestObservedRevision = -1;
 
   return {
     fetchSnapshot(signal?: AbortSignal): Promise<GraphSnapshot> {
@@ -69,6 +74,16 @@ export function createNetworkSnapshotCoordinator(
 
     getHighestObservedRevision(): number {
       return highestObservedRevision;
+    },
+
+    hasPendingNewerRevision(): boolean {
+      return highestObservedRevision > latestAppliedRevision;
+    },
+
+    reset() {
+      inFlight = null;
+      latestAppliedRevision = -1;
+      highestObservedRevision = -1;
     },
   };
 }

@@ -676,7 +676,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
         // 4. Draw Node Labels (Decoupled Priority Ordering + Screen-Space Spatial Collision Hash)
         const isLight = theme === 'light';
-        const fontSize = Math.max(11, Math.min(15, 12 * Math.sqrt(camera.zoom)));
+        const fontSize = Math.max(12, Math.min(16, Math.round(12.5 * Math.sqrt(camera.zoom))));
         const monoFont = `${fontSize}px "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
         ctx.font = `500 ${monoFont}`;
 

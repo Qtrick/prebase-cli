@@ -4,7 +4,7 @@
 
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Status: MVP Complete / Release Ready](https://img.shields.io/badge/status-MVP%20Complete%20%2F%20Release%20Ready-2dd4bf.svg)](#development-status)
+[![Status: MVP Complete](https://img.shields.io/badge/status-MVP%20Complete-2dd4bf.svg)](#development-status)
 [![CI](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml)
 
 ---
@@ -19,8 +19,8 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 - **Standalone Runtime (Zero Node/Electron/VM Dependencies)**: Does not require Node.js, Electron, or Code - OSS at runtime. The compiled `prebase` binary is fully standalone and embeds the frontend distribution. A system `git` CLI executable in `PATH` is utilized for Temporal history DAG extraction; in non-git directories or environments without Git, PreBase operates seamlessly in Network Graph mode.
 - **Strictly Local-First & 100% Offline**: Runs entirely on `127.0.0.1`. No code leaves your machine. No accounts, telemetry, external fonts, or cloud dependencies.
 - **Bi-Directional Visual Intelligence**: Seamlessly switch between the **Network Graph** (spatial dependency structure) and the **Temporal Graph** (Git ancestry DAG).
-- **Demand-Driven Rendering**: 0% idle CPU utilization when quiescent. HTML5 Canvas animation loops pause automatically when user gestures and transitions complete, resuming only upon user interaction or live filesystem synchronization.
-- **Live Incremental Monitoring**: Watches source files for changes, reanalyzes code incrementally, and updates browser views in real time via authenticated Server-Sent Events (SSE) while preserving your camera viewport.
+- **Demand-Driven Rendering**: Quiescent animation loops. HTML5 Canvas requestAnimationFrame rendering pauses automatically when gestures, transitions, and camera movement settle, re-rendering on demand when the user interacts or when live filesystem updates arrive.
+- **Live Filesystem Synchronization**: Watches source files for changes, reanalyzes modified files and updates graph state in real time via authenticated Server-Sent Events (SSE) while preserving your camera viewport.
 
 ---
 
@@ -156,7 +156,7 @@ Arguments:
 Options:
       --port <PORT>  Specific port to bind the local server to (defaults to random available port)
       --no-open      Do not automatically open the default web browser
-      --no-watch     Disable live filesystem watching and incremental graph synchronization
+      --no-watch     Disable live filesystem watching and graph synchronization
   -h, --help         Print help
   -V, --version      Print version
 
@@ -233,7 +233,7 @@ PreBase is engineered with strict local security boundaries:
   - Machine-readable NUL-delimited parsing immune to delimiter collision in commit messages.
   - Exact Host & Origin port validation and single-use bootstrap token exchange.
   - Indexed set enforcement and 500KB cap on source viewer.
-  - Demand-driven Canvas rendering (zero idle CPU utilization).
+  - Demand-driven Canvas rendering (pauses render loop when quiescent).
   - 100% offline system fonts and dark/light theme toggle.
   - GitHub Actions CI matrix and automated release workflow.
 

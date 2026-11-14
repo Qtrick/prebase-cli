@@ -269,7 +269,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       // Render author & relative date if space permits without clipping
       if (textLayout.metaX !== null && textLayout.displayMeta) {
         ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+        ctx.fillStyle = isLight ? '#475569' : '#94a3b8';
         ctx.fillText(textLayout.displayMeta, textLayout.metaX, item.y);
       }
     }

@@ -29,7 +29,7 @@ pub struct CliArgs {
     #[arg(long, global = true)]
     pub no_open: bool,
 
-    /// Disable live filesystem watching and incremental graph synchronization
+    /// Disable live filesystem watching and graph synchronization
     #[arg(long, global = true)]
     pub no_watch: bool,
 

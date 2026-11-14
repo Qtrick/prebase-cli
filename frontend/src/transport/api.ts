@@ -13,6 +13,7 @@ import {
   HistoryPage,
   ServerEvent,
 } from '../types/temporal';
+import { createNetworkSnapshotCoordinator } from './networkSnapshotCoordinator';
 
 export interface SessionInitResult {
   success: boolean;
@@ -105,7 +106,9 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json();
 }
 
-let inFlightNetworkPromise: Promise<GraphSnapshot> | null = null;
+export const defaultNetworkCoordinator = createNetworkSnapshotCoordinator((signal) =>
+  request<GraphSnapshot>('/api/v1/network', signal)
+);
 
 export const api = {
   getHealth: (signal?: AbortSignal) =>
@@ -115,18 +118,7 @@ export const api = {
   getRepository: (signal?: AbortSignal) =>
     request<RepositoryInfo>('/api/v1/repository', signal),
   getNetwork: (signal?: AbortSignal): Promise<GraphSnapshot> => {
-    if (!signal && inFlightNetworkPromise) {
-      return inFlightNetworkPromise;
-    }
-    const p = request<GraphSnapshot>('/api/v1/network', signal).finally(() => {
-      if (inFlightNetworkPromise === p) {
-        inFlightNetworkPromise = null;
-      }
-    });
-    if (!signal) {
-      inFlightNetworkPromise = p;
-    }
-    return p;
+    return defaultNetworkCoordinator.fetchSnapshot(signal);
   },
   searchFiles: (query: string, limit = 50, signal?: AbortSignal) =>
     request<FileNode[]>(`/api/v1/files?q=${encodeURIComponent(query)}&limit=${limit}`, signal),

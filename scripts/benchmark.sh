@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT_DIR/target/release/prebase"
+BIN="${PREBASE_BIN:-$ROOT_DIR/target/release/prebase}"
 
 if [ ! -f "$BIN" ]; then
     echo "==> Release binary not found. Building release binary first..."
@@ -20,27 +20,50 @@ sanitize_log() {
     local file="$1"
     if [ -f "$file" ]; then
         sed -E \
-            -e 's/bootstrap=[a-zA-Z0-9_-]+/bootstrap=[REDACTED]/g' \
-            -e 's/session_token":"[^"]+"/session_token":"[REDACTED]"/g' \
-            -e 's/prebase_session=[a-zA-Z0-9_-]+/prebase_session=[REDACTED]/g' \
-            -e 's/(x-prebase-session|X-Prebase-Session):[[:space:]]*[a-zA-Z0-9_-]+/\1: [REDACTED]/g' \
-            -e 's/(Authorization|authorization):[[:space:]]*Bearer[[:space:]]+[a-zA-Z0-9_-]+/\1: Bearer [REDACTED]/g' \
+            -e 's/bootstrap=[a-zA-Z0-9_%.~-]+/bootstrap=[REDACTED]/g' \
+            -e 's/"?session_token"?[[:space:]]*:[[:space:]]*"[^"]+"/"session_token": "[REDACTED]"/g' \
+            -e 's/prebase_session(_[0-9]+)?=[a-zA-Z0-9_%.~-]+/prebase_session\1=[REDACTED]/g' \
+            -e 's/([xX]-[pP]rebase-[sS]ession):[[:space:]]*[a-zA-Z0-9_%.~-]+/\1: [REDACTED]/g' \
+            -e 's/([aA]uthorization):[[:space:]]*([bB]earer)[[:space:]]+[a-zA-Z0-9_%.~-]+/\1: \2 [REDACTED]/g' \
             "$file"
+    fi
+}
+
+# Gracefully terminate PreBase process with bounded wait and fallback to SIGKILL
+terminate_prebase_process() {
+    local pid="${1:-}"
+    local grace_s="${2:-2.0}"
+
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -15 "$pid" 2>/dev/null || true
+        # Poll up to grace period in 0.05s increments (e.g. 40 * 0.05s = 2.0s)
+        local poll_count
+        poll_count=$(python3 -c "import math; print(max(1, int(float('$grace_s') / 0.05)))" 2>/dev/null || echo 40)
+        for _ in $(seq 1 "$poll_count"); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                break
+            fi
+            sleep 0.05
+        done
+
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        wait "$pid" 2>/dev/null || true
     fi
 }
 
 cleanup() {
     local original_status=$?
 
-    # Release any active PreBase child process
-    if [ -n "${PREBASE_PID:-}" ] && kill -0 "$PREBASE_PID" 2>/dev/null; then
-        kill -15 "$PREBASE_PID" 2>/dev/null || true
-        for _ in $(seq 1 40); do
-            kill -0 "$PREBASE_PID" 2>/dev/null || break
-            sleep 0.05
-        done
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+    # Release any active PreBase child process with bounded wait
+    if [ -n "${PREBASE_PID:-}" ]; then
+        terminate_prebase_process "$PREBASE_PID" 2.0
+        PREBASE_PID=""
     fi
 
     # Remove temporary scratch workspace
@@ -206,14 +229,14 @@ run_benchmark() {
 
     # 2. Launch PreBase server with dynamic ephemeral port (--port 0)
     local LAUNCH_START_MS
-    LAUNCH_START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    LAUNCH_START_MS=$(python3 -c 'import time; print(int(time.monotonic() * 1000))')
     "$BIN" --port 0 --no-open --no-watch "$REPO_DIR" > "$LOG_FILE" 2>&1 &
     PREBASE_PID=$!
 
     # 3. Poll log for bound port and bootstrap token
     local BOUND_PORT=""
     local BOOTSTRAP_TOKEN=""
-    for _ in $(seq 1 100); do
+    for _ in $(seq 1 "${MAX_PORT_POLL:-100}"); do
         if grep -q "bootstrap=" "$LOG_FILE" 2>/dev/null && grep -q "http://127.0.0.1:" "$LOG_FILE" 2>/dev/null; then
             BOUND_PORT=$(grep -o 'http://127.0.0.1:[0-9]*' "$LOG_FILE" | head -n 1 | cut -d: -f3)
             BOOTSTRAP_TOKEN=$(grep -o 'bootstrap=[^& ]*' "$LOG_FILE" | head -n 1 | cut -d= -f2)
@@ -227,8 +250,7 @@ run_benchmark() {
     if [ -z "$BOUND_PORT" ] || [ -z "$BOOTSTRAP_TOKEN" ]; then
         echo "    ERROR: PreBase server failed to start or print server URL within 5s."
         sanitize_log "$LOG_FILE"
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+        terminate_prebase_process "$PREBASE_PID" 1.0
         PREBASE_PID=""
         exit 1
     fi
@@ -246,14 +268,13 @@ run_benchmark() {
     if [ "$SERVER_READY" -ne 1 ]; then
         echo "    ERROR: PreBase health endpoint not responding on port $BOUND_PORT."
         sanitize_log "$LOG_FILE"
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+        terminate_prebase_process "$PREBASE_PID" 1.0
         PREBASE_PID=""
         exit 1
     fi
 
     local HTTP_READY_MS
-    HTTP_READY_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    HTTP_READY_MS=$(python3 -c 'import time; print(int(time.monotonic() * 1000))')
     local STARTUP_LATENCY_MS=$(( HTTP_READY_MS - LAUNCH_START_MS ))
 
     # 5. Exchange bootstrap token for session token (expose_token enabled for CLI benchmark)
@@ -267,8 +288,7 @@ run_benchmark() {
     if [ -z "$SESSION_TOKEN" ]; then
         echo "    ERROR: Failed to obtain session token."
         sanitize_log "$LOG_FILE"
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+        terminate_prebase_process "$PREBASE_PID" 1.0
         PREBASE_PID=""
         exit 1
     fi
@@ -290,8 +310,7 @@ run_benchmark() {
         elif [ "$CURR_STATUS" = "Failed" ]; then
             echo "    ERROR: Repository indexing failed according to backend status."
             sanitize_log "$LOG_FILE"
-            kill -9 "$PREBASE_PID" 2>/dev/null || true
-            wait "$PREBASE_PID" 2>/dev/null || true
+            terminate_prebase_process "$PREBASE_PID" 1.0
             PREBASE_PID=""
             exit 1
         fi
@@ -299,14 +318,13 @@ run_benchmark() {
     done
 
     local END_INDEX_MS
-    END_INDEX_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    END_INDEX_MS=$(python3 -c 'import time; print(int(time.monotonic() * 1000))')
     local TOTAL_WALLCLOCK_MS=$(( END_INDEX_MS - LAUNCH_START_MS ))
 
     if [ "$INDEX_READY" -ne 1 ]; then
         echo "    ERROR: Indexing did not reach Ready status within 45s timeout."
         sanitize_log "$LOG_FILE"
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+        terminate_prebase_process "$PREBASE_PID" 1.0
         PREBASE_PID=""
         exit 1
     fi
@@ -328,19 +346,17 @@ run_benchmark() {
         echo "      Relationships: expected ${EXPECTED_EDGES}, actual ${EDGE_COUNT}"
         echo "      Log:"
         sanitize_log "$LOG_FILE"
-        kill -9 "$PREBASE_PID" 2>/dev/null || true
-        wait "$PREBASE_PID" 2>/dev/null || true
+        terminate_prebase_process "$PREBASE_PID" 1.0
         PREBASE_PID=""
         exit 1
     fi
 
-    # 8. Clean graceful shutdown via SIGTERM and record shutdown duration
+    # 8. Clean graceful shutdown via SIGTERM with bounded timeout and record shutdown duration
     local SHUTDOWN_START_MS
-    SHUTDOWN_START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
-    kill -15 "$PREBASE_PID" 2>/dev/null || true
-    wait "$PREBASE_PID" 2>/dev/null || true
+    SHUTDOWN_START_MS=$(python3 -c 'import time; print(int(time.monotonic() * 1000))')
+    terminate_prebase_process "$PREBASE_PID" 3.0
     local SHUTDOWN_END_MS
-    SHUTDOWN_END_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    SHUTDOWN_END_MS=$(python3 -c 'import time; print(int(time.monotonic() * 1000))')
     local SHUTDOWN_DURATION_MS=$(( SHUTDOWN_END_MS - SHUTDOWN_START_MS ))
     PREBASE_PID=""
 

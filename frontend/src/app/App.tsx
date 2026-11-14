@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth, ViewportInsets } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
-import { api, initSession } from '../transport/api';
+import { api, initSession, defaultNetworkCoordinator } from '../transport/api';
 import { NetworkCanvas, RevealRequest } from '../graphs/network/NetworkCanvas';
 import { RelationshipCanvas, Viewport2D } from '../graphs/relationship/RelationshipCanvas';
 import {
@@ -200,8 +200,7 @@ export const App: React.FC = () => {
   const [isDelayedReconnecting, setIsDelayedReconnecting] = useState(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const latestAppliedRevisionRef = useRef<number>(0);
-  const highestObservedRevisionRef = useRef<number>(0);
+  const coordinator = defaultNetworkCoordinator;
 
   // View triggers (true bounding box fit view & reset view)
   const [fitViewCounter, setFitViewCounter] = useState(0);
@@ -255,9 +254,8 @@ export const App: React.FC = () => {
 
         if (st.indexing_status === 'Ready') {
           const snap = await api.getNetwork();
-          if (snap.revision >= latestAppliedRevisionRef.current) {
-            latestAppliedRevisionRef.current = snap.revision;
-            highestObservedRevisionRef.current = Math.max(highestObservedRevisionRef.current, snap.revision);
+          if (coordinator.shouldApplySnapshot(snap.revision)) {
+            coordinator.recordAppliedRevision(snap.revision);
             setSnapshot(snap);
             setLiveRevision(snap.revision);
 
@@ -423,8 +421,8 @@ export const App: React.FC = () => {
     if (!sessionInitialized) return;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
-      if (newSnap.revision > latestAppliedRevisionRef.current) {
-        latestAppliedRevisionRef.current = newSnap.revision;
+      if (coordinator.shouldApplySnapshot(newSnap.revision)) {
+        coordinator.recordAppliedRevision(newSnap.revision);
         setSnapshot(newSnap);
         setLiveRevision(newSnap.revision);
         setStatus('Ready');
@@ -450,15 +448,15 @@ export const App: React.FC = () => {
         });
         // Re-sync 2D focus history by pruning entries deleted on disk
         setFocusHistory((prev) => reconcileFocusHistoryOnSnapshot(prev, newSnap.nodes));
-      }
 
-      // If a newer revision was announced while this network fetch was in flight,
-      // trigger follow-up fetch so the UI never remains on a stale snapshot
-      if (highestObservedRevisionRef.current > latestAppliedRevisionRef.current) {
-        api
-          .getNetwork()
-          .then((newerSnap) => applySnapshot(newerSnap, ['*']))
-          .catch(() => { });
+        // If a newer revision was announced while this network fetch was in flight,
+        // trigger follow-up fetch so the UI never remains on a stale snapshot
+        if (coordinator.hasPendingNewerRevision()) {
+          api
+            .getNetwork()
+            .then((newerSnap) => applySnapshot(newerSnap, ['*']))
+            .catch(() => { });
+        }
       }
     };
 
@@ -467,10 +465,8 @@ export const App: React.FC = () => {
         setSseState('connected');
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
-          if (revision > highestObservedRevisionRef.current) {
-            highestObservedRevisionRef.current = revision;
-          }
-          if (revision > latestAppliedRevisionRef.current) {
+          if (coordinator.shouldProcessSseEvent(revision)) {
+            coordinator.recordObservedEventRevision(revision);
             api
               .getNetwork()
               .then((newSnap) => applySnapshot(newSnap, changed_files))
@@ -484,10 +480,8 @@ export const App: React.FC = () => {
         } else if (event.type === 'reconcile.required') {
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
-            if (st.revision > highestObservedRevisionRef.current) {
-              highestObservedRevisionRef.current = st.revision;
-            }
-            if (st.revision > latestAppliedRevisionRef.current) {
+            if (coordinator.shouldApplySnapshot(st.revision)) {
+              coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
                 .then((newSnap) => applySnapshot(newSnap, ['*']))
@@ -502,10 +496,8 @@ export const App: React.FC = () => {
           // Re-fetch status on reconnect to reconcile any missed updates
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
-            if (st.revision > highestObservedRevisionRef.current) {
-              highestObservedRevisionRef.current = st.revision;
-            }
-            if (st.revision > latestAppliedRevisionRef.current) {
+            if (coordinator.shouldApplySnapshot(st.revision)) {
+              coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
                 .then((newSnap) => applySnapshot(newSnap, ['*']))
