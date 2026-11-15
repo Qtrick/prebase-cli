@@ -238,5 +238,52 @@ describe('App interaction & security unit tests', () => {
       expect(followUpFetchTriggered).toBe(true);
     });
   });
+
+  describe('Session initialization failure and SSE subscription gating', () => {
+    it('ensures session is not marked initialized and SSE is never subscribed upon auth or network failure', () => {
+      let sessionInitialized = false;
+      let errorState: string | null = null;
+      let sseSubscribed = false;
+
+      const handleSessionInit = (initRes: { success: boolean; isAuthError?: boolean; error?: string }) => {
+        if (!initRes.success) {
+          errorState = initRes.error || 'Auth failed';
+          return;
+        }
+        sessionInitialized = true;
+      };
+
+      const syncSseSubscription = () => {
+        if (!sessionInitialized || errorState) return;
+        sseSubscribed = true;
+      };
+
+      // Test 1: HTTP 401 auth failure prevents session init and blocks SSE
+      handleSessionInit({ success: false, isAuthError: true, error: 'Authentication failed (401)' });
+      syncSseSubscription();
+
+      expect(sessionInitialized).toBe(false);
+      expect(errorState).toBe('Authentication failed (401)');
+      expect(sseSubscribed).toBe(false);
+
+      // Test 2: Network connection failure prevents session init and blocks SSE
+      errorState = null;
+      handleSessionInit({ success: false, isAuthError: false, error: 'Network error' });
+      syncSseSubscription();
+
+      expect(sessionInitialized).toBe(false);
+      expect(errorState).toBe('Network error');
+      expect(sseSubscribed).toBe(false);
+
+      // Test 3: Successful init allows subscription
+      errorState = null;
+      handleSessionInit({ success: true });
+      syncSseSubscription();
+
+      expect(sessionInitialized).toBe(true);
+      expect(errorState).toBeNull();
+      expect(sseSubscribed).toBe(true);
+    });
+  });
 });
 

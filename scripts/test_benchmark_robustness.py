@@ -65,8 +65,13 @@ def test_abnormal_exit_status_propagation():
     with open(BENCHMARK_SH, "r") as f:
         content = f.read()
 
-    # Create a stub script that fails midway
+    # Ensure ROOT_DIR resolves to real repo instead of /tmp
     stub_content = content.replace(
+        'ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"',
+        f'ROOT_DIR="{ROOT_DIR}"',
+    )
+    # Injected failure point with explicit sentinel
+    stub_content = stub_content.replace(
         'run_benchmark 100 "modular_cycle"',
         'echo "Simulating premature failure"\nexit 1',
     )
@@ -76,15 +81,49 @@ def test_abnormal_exit_status_propagation():
         stub_path = f.name
     os.chmod(stub_path, 0o755)
 
+    env = os.environ.copy()
+    # If release binary exists, use it; otherwise provide a stub binary so shell trap logic
+    # is verified without requiring a full Cargo release build in the unit test.
+    real_bin = os.path.join(ROOT_DIR, "target", "release", "prebase")
+    mock_stub_bin = None
+    if not os.path.exists(real_bin):
+        mock_stub_bin = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
+        mock_stub_bin.write("#!/bin/sh\nexit 0\n")
+        mock_stub_bin.close()
+        os.chmod(mock_stub_bin.name, 0o755)
+        env["PREBASE_BIN"] = mock_stub_bin.name
+
     try:
-        proc = subprocess.run(["/bin/bash", stub_path], capture_output=True, text=True)
+        proc = subprocess.run(["/bin/bash", stub_path], capture_output=True, text=True, env=env)
         if proc.returncode == 0:
             fail_msg("Premature exit was masked! Script returned exit code 0.")
             return False
-        pass_msg(f"Premature exit correctly produced non-zero exit code: {proc.returncode}")
+        if proc.returncode != 1:
+            fail_msg(f"Expected exact exit code 1 from injected failure, got {proc.returncode}.")
+            return False
+        if "Simulating premature failure" not in proc.stdout:
+            fail_msg(f"Injected failure point was not reached! Output: {proc.stdout}\nStderr: {proc.stderr}")
+            return False
+        if "ERROR: Benchmark terminated abnormally before completing all benchmark tiers" not in proc.stderr:
+            fail_msg(f"Expected trap handler diagnostic in stderr, got: {proc.stderr}")
+            return False
+
+        # Extract scratch directory and verify trap handler cleaned it up
+        m_dir = re.search(r"Benchmark scratch directory:\s*(\S+)", proc.stdout)
+        if not m_dir:
+            fail_msg(f"Could not locate scratch directory in benchmark output: {proc.stdout}")
+            return False
+        bench_dir = m_dir.group(1)
+        if os.path.exists(bench_dir):
+            fail_msg(f"Benchmark scratch directory was NOT cleaned up: {bench_dir}")
+            return False
+
+        pass_msg(f"Premature exit correctly reached injected sentinel, preserved exit code 1, produced trap diagnostic, and cleaned scratch directory.")
     finally:
         if os.path.exists(stub_path):
             os.remove(stub_path)
+        if mock_stub_bin and os.path.exists(mock_stub_bin.name):
+            os.remove(mock_stub_bin.name)
     return True
 
 
@@ -265,7 +304,8 @@ def test_terminate_prebase_process():
     term_func = func_match.group(1)
 
     # Subtest 1: Stub process that exits cleanly on SIGTERM (verify bounded completion and process reaped)
-    ready_file_clean = tempfile.mktemp()
+    with tempfile.NamedTemporaryFile(delete=False) as f_clean:
+        ready_file_clean = f_clean.name
     test_clean_script = f"""#!/usr/bin/env bash
 set -e
 {term_func}
@@ -276,7 +316,7 @@ time.sleep(60)
 " "{ready_file_clean}" &
 CHILD_PID=$!
 
-while [ ! -f "{ready_file_clean}" ]; do sleep 0.01; done
+while [ ! -s "{ready_file_clean}" ]; do sleep 0.01; done
 
 if ! kill -0 "$CHILD_PID" 2>/dev/null; then
     echo "ERROR: Child not running" >&2
@@ -314,7 +354,8 @@ echo "CLEAN_SUCCESS duration_ms=$DURATION_MS"
             os.remove(ready_file_clean)
 
     # Subtest 2: Stub process that traps and ignores SIGTERM (verify bounded timeout, fallback to SIGKILL, process reaped, no hang!)
-    ready_file_ignore = tempfile.mktemp()
+    with tempfile.NamedTemporaryFile(delete=False) as f_ignore:
+        ready_file_ignore = f_ignore.name
     test_ignore_script = f"""#!/usr/bin/env bash
 set -e
 {term_func}
@@ -327,7 +368,7 @@ while True:
 " "{ready_file_ignore}" &
 CHILD_PID=$!
 
-while [ ! -f "{ready_file_ignore}" ]; do sleep 0.01; done
+while [ ! -s "{ready_file_ignore}" ]; do sleep 0.01; done
 
 if ! kill -0 "$CHILD_PID" 2>/dev/null; then
     echo "ERROR: Child not running" >&2
@@ -400,14 +441,15 @@ echo "ALREADY_EXITED_SUCCESS"
 
 def test_server_startup_failure_cleanup():
     log("Verifying benchmark cleanup on server startup failure/port timeout...")
-    mock_pid_file = tempfile.mktemp()
-    mock_bin = tempfile.mktemp(suffix=".sh")
-    with open(mock_bin, "w") as f:
-        f.write(f"""#!/usr/bin/env bash
+    with tempfile.NamedTemporaryFile(delete=False) as f_pid:
+        mock_pid_file = f_pid.name
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f_bin:
+        f_bin.write(f"""#!/usr/bin/env bash
 echo "$$" > "{mock_pid_file}"
 # Simulate server that starts but hangs/fails to bind port or print URL
 sleep 30
 """)
+        mock_bin = f_bin.name
     os.chmod(mock_bin, 0o755)
 
     env = os.environ.copy()
@@ -440,7 +482,7 @@ sleep 30
             return False
 
         # 3. Verify child process was reaped and is no longer running
-        if not os.path.exists(mock_pid_file):
+        if not os.path.exists(mock_pid_file) or os.path.getsize(mock_pid_file) == 0:
             fail_msg("Mock server was never executed or failed to write PID file.")
             return False
         child_pid = int(open(mock_pid_file).read().strip())
@@ -477,15 +519,16 @@ sleep 30
 
 def _run_benchmark_signal_test(sig, expected_rc, sig_name):
     log(f"Verifying benchmark lifecycle cleanup when {sig_name} is sent to in-flight run...")
-    mock_pid_file = tempfile.mktemp()
-    mock_bin = tempfile.mktemp(suffix=".sh")
-    with open(mock_bin, "w") as f:
-        f.write(f"""#!/usr/bin/env bash
+    with tempfile.NamedTemporaryFile(delete=False) as f_pid:
+        mock_pid_file = f_pid.name
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f_bin:
+        f_bin.write(f"""#!/usr/bin/env bash
 echo "$$" > "{mock_pid_file}"
 while true; do
     sleep 0.1
 done
 """)
+        mock_bin = f_bin.name
     os.chmod(mock_bin, 0o755)
 
     env = os.environ.copy()
@@ -504,11 +547,11 @@ done
     try:
         # Wait for mock server child to start and record PID
         for _ in range(60):
-            if os.path.exists(mock_pid_file):
+            if os.path.exists(mock_pid_file) and os.path.getsize(mock_pid_file) > 0:
                 break
             time.sleep(0.05)
 
-        if not os.path.exists(mock_pid_file):
+        if not os.path.exists(mock_pid_file) or os.path.getsize(mock_pid_file) == 0:
             fail_msg("Mock server failed to write PID file in time.")
             return False
 

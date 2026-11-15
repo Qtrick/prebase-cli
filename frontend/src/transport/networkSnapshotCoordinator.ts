@@ -28,17 +28,29 @@ export function createNetworkSnapshotCoordinator(
   // Initialize to -1 to cleanly support initial repository snapshot at revision 0
   let latestAppliedRevision = -1;
   let highestObservedRevision = -1;
+  let failedRevision = -1;
 
   return {
     fetchSnapshot(signal?: AbortSignal): Promise<GraphSnapshot> {
       if (!signal && inFlight) {
         return inFlight;
       }
-      const promise = fetchFn(signal).finally(() => {
-        if (inFlight === promise) {
-          inFlight = null;
-        }
-      });
+      const promise = fetchFn(signal)
+        .then((snap) => {
+          failedRevision = -1;
+          return snap;
+        })
+        .catch((err) => {
+          if (!signal?.aborted) {
+            failedRevision = highestObservedRevision;
+          }
+          throw err;
+        })
+        .finally(() => {
+          if (inFlight === promise) {
+            inFlight = null;
+          }
+        });
       if (!signal) {
         inFlight = promise;
       }
@@ -56,6 +68,9 @@ export function createNetworkSnapshotCoordinator(
       if (revision > highestObservedRevision) {
         highestObservedRevision = revision;
       }
+      if (revision >= failedRevision) {
+        failedRevision = -1;
+      }
     },
 
     getLatestAppliedRevision(): number {
@@ -63,7 +78,15 @@ export function createNetworkSnapshotCoordinator(
     },
 
     shouldProcessSseEvent(revision: number): boolean {
-      return revision > Math.max(latestAppliedRevision, highestObservedRevision);
+      if (revision <= latestAppliedRevision) {
+        return false;
+      }
+      if (revision > highestObservedRevision) {
+        return true;
+      }
+      // If revision <= highestObservedRevision but > latestAppliedRevision:
+      // It was observed before but failed during fetch. Allow retry if previous fetch failed and no fetch is in-flight.
+      return revision === failedRevision && inFlight === null;
     },
 
     recordObservedEventRevision(revision: number) {
@@ -84,6 +107,7 @@ export function createNetworkSnapshotCoordinator(
       inFlight = null;
       latestAppliedRevision = -1;
       highestObservedRevision = -1;
+      failedRevision = -1;
     },
   };
 }

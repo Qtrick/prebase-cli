@@ -22,67 +22,87 @@ export interface SessionInitResult {
   isAuthError?: boolean;
 }
 
+let inFlightSessionInit: Promise<SessionInitResult> | null = null;
+
 export async function initSession(): Promise<SessionInitResult> {
-  const urlParams = new URLSearchParams(window.location.search);
-  const bootstrapToken = urlParams.get('bootstrap');
-  const tokenFromUrl = urlParams.get('token');
-
-  // Purge legacy query token from URL without storing in browser storage
-  if (tokenFromUrl) {
-    urlParams.delete('token');
-    const newSearch = urlParams.toString();
-    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-    window.history.replaceState({}, '', cleanUrl);
+  if (inFlightSessionInit) {
+    return inFlightSessionInit;
   }
 
-  if (!bootstrapToken) {
-    return { success: true, hadBootstrapToken: false };
-  }
+  const promise = (async () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const bootstrapToken = urlParams.get('bootstrap');
+    const tokenFromUrl = urlParams.get('token');
 
-  try {
-    const response = await fetch('/api/v1/auth/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ bootstrap_token: bootstrapToken }),
-    });
+    // Purge legacy query token from URL without storing in browser storage
+    if (tokenFromUrl) {
+      urlParams.delete('token');
+      const newSearch = urlParams.toString();
+      const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl);
+    }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      const isAuthError = response.status === 401 || response.status === 400;
+    if (!bootstrapToken) {
+      return { success: true, hadBootstrapToken: false };
+    }
 
-      // Single-use token was consumed or is invalid: clean from URL to avoid repeated failed exchanges
+    try {
+      const response = await fetch('/api/v1/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ bootstrap_token: bootstrapToken }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const isAuthError = response.status === 401 || response.status === 400;
+
+        // Single-use token was consumed or is invalid: clean from URL to avoid repeated failed exchanges.
+        // On 500/503 (transient server errors), DO NOT purge token from URL so user or reload can retry!
+        if (isAuthError) {
+          urlParams.delete('bootstrap');
+          const newSearch = urlParams.toString();
+          const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+          window.history.replaceState({}, '', cleanUrl);
+        }
+
+        return {
+          success: false,
+          hadBootstrapToken: true,
+          isAuthError,
+          error: `Authentication failed (${response.status}): ${errorText || 'Invalid or expired bootstrap token.'}`,
+        };
+      }
+
+      // Success: Token consumed, session cookie established
       urlParams.delete('bootstrap');
       const newSearch = urlParams.toString();
       const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
       window.history.replaceState({}, '', cleanUrl);
 
+      return { success: true, hadBootstrapToken: true };
+    } catch (networkErr: unknown) {
+      // Transient network failure (e.g. server still starting or disconnected).
+      // DO NOT strip bootstrap token from URL! Preserve the credential so reload can retry.
+      const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
       return {
         success: false,
         hadBootstrapToken: true,
-        isAuthError,
-        error: `Authentication failed (${response.status}): ${errorText || 'Invalid or expired bootstrap token.'}`,
+        isAuthError: false,
+        error: `Network failure connecting to local server: ${msg}`,
       };
     }
+  })();
 
-    // Success: Token consumed, session cookie established
-    urlParams.delete('bootstrap');
-    const newSearch = urlParams.toString();
-    const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-    window.history.replaceState({}, '', cleanUrl);
+  inFlightSessionInit = promise;
+  promise.finally(() => {
+    if (inFlightSessionInit === promise) {
+      inFlightSessionInit = null;
+    }
+  });
 
-    return { success: true, hadBootstrapToken: true };
-  } catch (networkErr: unknown) {
-    // Transient network failure (e.g. server still starting or disconnected).
-    // DO NOT strip bootstrap token from URL! Preserve the credential so reload can retry.
-    const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
-    return {
-      success: false,
-      hadBootstrapToken: true,
-      isAuthError: false,
-      error: `Network failure connecting to local server: ${msg}`,
-    };
-  }
+  return promise;
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {

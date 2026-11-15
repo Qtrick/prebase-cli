@@ -237,16 +237,19 @@ export const App: React.FC = () => {
   // 1. Initial session bootstrap & repository info
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
 
     const checkStatus = async () => {
       try {
         const repo = await api.getRepository();
+        if (cancelled) return;
         setRepoInfo(repo);
         if (repo.watcher_health) {
           setWatcherHealth(repo.watcher_health);
         }
 
         const st = await api.getStatus();
+        if (cancelled) return;
         setStatus(st.indexing_status);
         if (st.watcher_health) {
           setWatcherHealth(st.watcher_health);
@@ -254,6 +257,7 @@ export const App: React.FC = () => {
 
         if (st.indexing_status === 'Ready') {
           const snap = await api.getNetwork();
+          if (cancelled) return;
           if (coordinator.shouldApplySnapshot(snap.revision)) {
             coordinator.recordAppliedRevision(snap.revision);
             setSnapshot(snap);
@@ -274,11 +278,16 @@ export const App: React.FC = () => {
             }
           }
         } else if (st.indexing_status === 'Failed') {
-          setError('Repository analysis failed. Please check CLI terminal output.');
+          if (!cancelled) {
+            setError('Repository analysis failed. Please check CLI terminal output.');
+          }
         } else {
-          timer = setTimeout(checkStatus, 700);
+          if (!cancelled) {
+            timer = setTimeout(checkStatus, 700);
+          }
         }
       } catch (err: unknown) {
+        if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
         setError(`Failed to connect to local server: ${msg}`);
       }
@@ -287,7 +296,7 @@ export const App: React.FC = () => {
     // Initialize session from bootstrap token first, then start fetching
     initSession()
       .then((initRes) => {
-        setSessionInitialized(true);
+        if (cancelled) return;
         if (!initRes.success) {
           if (initRes.isAuthError) {
             setError(
@@ -302,16 +311,22 @@ export const App: React.FC = () => {
           }
           return;
         }
+        setSessionInitialized(true);
         checkStatus();
-        api.getGitStatus().then(setGitStatus).catch(() => { });
+        api.getGitStatus().then((gs) => {
+          if (!cancelled) setGitStatus(gs);
+        }).catch(() => { });
       })
       .catch((err) => {
-        setSessionInitialized(true);
+        if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
         setError(`Failed to initialize session: ${msg}`);
       });
 
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
 
   const showLiveNotice = useCallback((message: string, duration = 3500) => {
@@ -329,12 +344,16 @@ export const App: React.FC = () => {
     }, duration);
   }, []);
 
+  const reconciliationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     return () => {
       if (liveNoticeTimerRef.current) clearTimeout(liveNoticeTimerRef.current);
       if (commitsAbortControllerRef.current) commitsAbortControllerRef.current.abort();
+      if (reconciliationTimerRef.current) clearTimeout(reconciliationTimerRef.current);
+      coordinator.reset();
     };
-  }, []);
+  }, [coordinator]);
 
   // 2. Fetch Git commit history with anchor pagination
   const loadCommits = useCallback(async (filterPath?: string | null) => {
@@ -416,11 +435,38 @@ export const App: React.FC = () => {
   const loadCommitsRef = useRef(loadCommits);
   loadCommitsRef.current = loadCommits;
 
+  // Bounded snapshot reconciliation after failed fetch or network drop
+  const scheduleSnapshotReconciliation = useCallback(() => {
+    if (reconciliationTimerRef.current) return;
+    reconciliationTimerRef.current = setTimeout(() => {
+      reconciliationTimerRef.current = null;
+      api
+        .getStatus()
+        .then((st) => {
+          if (!applySnapshotRef.current) return;
+          if (st.watcher_health) setWatcherHealth(st.watcher_health);
+          if (coordinator.shouldApplySnapshot(st.revision)) {
+            coordinator.recordObservedEventRevision(st.revision);
+            api
+              .getNetwork()
+              .then((newSnap) => applySnapshotRef.current?.(newSnap, ['*']))
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+  }, [coordinator]);
+
+  // Stable ref for applySnapshot
+  const applySnapshotRef = useRef<((newSnap: GraphSnapshot, changedFiles: string[]) => void) | null>(null);
+
   // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
-    if (!sessionInitialized) return;
+    if (!sessionInitialized || error) return;
+    let isCancelled = false;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
+      if (isCancelled) return;
       if (coordinator.shouldApplySnapshot(newSnap.revision)) {
         coordinator.recordAppliedRevision(newSnap.revision);
         setSnapshot(newSnap);
@@ -448,20 +494,32 @@ export const App: React.FC = () => {
         });
         // Re-sync 2D focus history by pruning entries deleted on disk
         setFocusHistory((prev) => reconcileFocusHistoryOnSnapshot(prev, newSnap.nodes));
+      }
 
-        // If a newer revision was announced while this network fetch was in flight,
-        // trigger follow-up fetch so the UI never remains on a stale snapshot
-        if (coordinator.hasPendingNewerRevision()) {
-          api
-            .getNetwork()
-            .then((newerSnap) => applySnapshot(newerSnap, ['*']))
-            .catch(() => { });
-        }
+      // Trailing fetch check: executes even if the incoming snapshot was stale/rejected,
+      // ensuring newer announced revisions are never stranded!
+      if (!isCancelled && coordinator.hasPendingNewerRevision()) {
+        api
+          .getNetwork()
+          .then((newerSnap) => {
+            if (isCancelled) return;
+            if (coordinator.shouldApplySnapshot(newerSnap.revision)) {
+              applySnapshot(newerSnap, ['*']);
+            } else {
+              scheduleSnapshotReconciliation();
+            }
+          })
+          .catch(() => {
+            if (!isCancelled) scheduleSnapshotReconciliation();
+          });
       }
     };
 
+    applySnapshotRef.current = applySnapshot;
+
     const unsubscribe = api.subscribeToEvents(
       (event: ServerEvent) => {
+        if (isCancelled) return;
         setSseState('connected');
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
@@ -469,39 +527,56 @@ export const App: React.FC = () => {
             coordinator.recordObservedEventRevision(revision);
             api
               .getNetwork()
-              .then((newSnap) => applySnapshot(newSnap, changed_files))
-              .catch(() => { });
+              .then((newSnap) => {
+                if (!isCancelled) applySnapshot(newSnap, changed_files);
+              })
+              .catch(() => {
+                if (!isCancelled) scheduleSnapshotReconciliation();
+              });
           }
         } else if (event.type === 'git.updated') {
-          api.getGitStatus().then(setGitStatus).catch(() => { });
+          api.getGitStatus().then((gs) => {
+            if (!isCancelled) setGitStatus(gs);
+          }).catch(() => { });
           if (activeTabRef.current === 'temporal') {
             loadCommitsRef.current(temporalFilterPathRef.current);
           }
         } else if (event.type === 'reconcile.required') {
           api.getStatus().then((st) => {
+            if (isCancelled) return;
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
-                .then((newSnap) => applySnapshot(newSnap, ['*']))
-                .catch(() => { });
+                .then((newSnap) => {
+                  if (!isCancelled) applySnapshot(newSnap, ['*']);
+                })
+                .catch(() => {
+                  if (!isCancelled) scheduleSnapshotReconciliation();
+                });
             }
           }).catch(() => { });
         }
       },
       (status) => {
+        if (isCancelled) return;
         setSseState(status);
         if (status === 'connected') {
           // Re-fetch status on reconnect to reconcile any missed updates
           api.getStatus().then((st) => {
+            if (isCancelled) return;
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
-                .then((newSnap) => applySnapshot(newSnap, ['*']))
-                .catch(() => { });
+                .then((newSnap) => {
+                  if (!isCancelled) applySnapshot(newSnap, ['*']);
+                })
+                .catch(() => {
+                  if (!isCancelled) scheduleSnapshotReconciliation();
+                });
             }
           }).catch(() => { });
         }
@@ -509,9 +584,11 @@ export const App: React.FC = () => {
     );
 
     return () => {
+      isCancelled = true;
+      applySnapshotRef.current = null;
       unsubscribe();
     };
-  }, [sessionInitialized]); // Subscribes once session token is initialized
+  }, [sessionInitialized, error, coordinator, scheduleSnapshotReconciliation, showLiveNotice]);
 
   // 4. Global Keyboard Shortcuts
   useEffect(() => {

@@ -2,7 +2,7 @@
 
 > **Local-first codebase intelligence application featuring interactive Network and Temporal graphs, powered by a standalone Rust engine.**
 
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.99.0](https://img.shields.io/badge/rust-1.99.0-orange.svg)](https://www.rust-lang.org)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Status: MVP Complete](https://img.shields.io/badge/status-MVP%20Complete-2dd4bf.svg)](#development-status)
 [![CI](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Qtrick/prebase-cli/actions/workflows/ci.yml)
@@ -89,7 +89,7 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
   - Test dependencies: `pip install -r requirements-test.txt && playwright install chromium`
 
 - **Compiling From Source**:
-  - [Rust toolchain](https://rustup.rs/) (1.75 or later)
+  - [Rust toolchain](https://rustup.rs/) (1.99.0, pinned via `rust-toolchain.toml`)
   - [Node.js](https://nodejs.org/) (v18+) & `npm` (required only when building frontend assets into the binary)
 
 ### Build From Source
