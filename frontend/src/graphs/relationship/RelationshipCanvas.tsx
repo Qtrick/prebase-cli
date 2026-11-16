@@ -585,7 +585,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     }
 
     ctx.restore();
-  }, [dimensions, selectedNodeId, selectedEdgeId, keyboardNodeId, palette, isLight]);
+  }, [dimensions, selectedNodeId, selectedEdgeId, keyboardNodeId, palette, isLight, isVisible]);
 
   const requestRender = useCallback(() => {
     if (!isVisible || rafIdRef.current !== null) return;

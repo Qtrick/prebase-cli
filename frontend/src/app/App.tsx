@@ -431,16 +431,22 @@ export const App: React.FC = () => {
 
   const handleLoadMoreCommits = useCallback(async () => {
     if (!nextCursor || isLoadingMore) return;
+    if (commitsAbortControllerRef.current) {
+      commitsAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    commitsAbortControllerRef.current = controller;
     const currentToken = ++commitsRequestTokenRef.current;
     setIsLoadingMore(true);
     try {
-      const res = await api.getHistory(50, nextCursor);
+      const res = await api.getHistory(50, nextCursor, controller.signal);
       if (currentToken !== commitsRequestTokenRef.current) return;
       setCommits((prev) => [...prev, ...res.commits]);
       setNextCursor(res.next_cursor);
       setHasMoreCommits(res.has_more);
       setTotalCommits(res.total_commits);
     } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return;
       if (currentToken !== commitsRequestTokenRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('410') || msg.includes('StaleCursor')) {
@@ -451,8 +457,9 @@ export const App: React.FC = () => {
       }
       setTemporalError(`Failed to load older commits: ${msg}`);
     } finally {
-      // Defect F: Unconditionally reset isLoadingMore on completion/error
-      setIsLoadingMore(false);
+      if (currentToken === commitsRequestTokenRef.current) {
+        setIsLoadingMore(false);
+      }
     }
   }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath, showLiveNotice]);
 
@@ -518,9 +525,11 @@ export const App: React.FC = () => {
   // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
     if (!sessionInitialized || error) return;
+    let isCancelled = false;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
-      if (coordinator.shouldApplySnapshot(newSnap.revision)) {
+      const shouldApply = coordinator.shouldApplySnapshot(newSnap.revision);
+      if (shouldApply) {
         coordinator.recordAppliedRevision(newSnap.revision);
         setSnapshot(newSnap);
         setLiveRevision(newSnap.revision);
@@ -568,12 +577,18 @@ export const App: React.FC = () => {
       // Trailing fetch check: executes even if the incoming snapshot was stale/rejected,
       // ensuring newer announced revisions are never stranded!
       if (coordinator.hasPendingNewerRevision()) {
-        api
-          .getNetwork()
-          .then((newerSnap) => applySnapshot(newerSnap, ['*']))
-          .catch(() => {
-            scheduleSnapshotReconciliation();
-          });
+        if (!shouldApply) {
+          // If the snapshot we just received did not advance the revision, do not immediately re-fetch in a tight loop.
+          // Schedule bounded reconciliation with backoff.
+          scheduleSnapshotReconciliation();
+        } else {
+          api
+            .getNetwork()
+            .then((newerSnap) => applySnapshot(newerSnap, ['*']))
+            .catch(() => {
+              scheduleSnapshotReconciliation();
+            });
+        }
       }
     };
 
@@ -647,6 +662,7 @@ export const App: React.FC = () => {
     );
 
     return () => {
+      isCancelled = true;
       unsubscribe();
     };
   }, [sessionInitialized, error, coordinator, scheduleSnapshotReconciliation, showLiveNotice]);

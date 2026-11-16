@@ -27,6 +27,9 @@ echo "--> Running Frontend unit tests..."
 cd "$ROOT_DIR/frontend"
 npm test
 
+echo "--> Verifying Frontend TypeScript types..."
+npm run typecheck
+
 echo "--> Verifying Frontend TypeScript build..."
 npm run build
 cd "$ROOT_DIR"

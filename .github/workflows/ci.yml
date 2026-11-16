@@ -65,6 +65,7 @@ jobs:
       - name: Install Frontend Dependencies & Run Frontend Tests
         run: |
           npm --prefix frontend ci
+          npm --prefix frontend run typecheck
           npm --prefix frontend test
           npm --prefix frontend run build
 

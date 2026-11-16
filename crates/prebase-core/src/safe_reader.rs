@@ -108,22 +108,21 @@ pub fn safe_read_file_to_string(
     rel_path: &str,
     max_bytes: u64,
 ) -> Result<String, SafeReadError> {
-    let clean_path = rel_path.trim();
-    if !is_safe_relative_path(clean_path) {
+    if !is_safe_relative_path(rel_path) {
         return Err(SafeReadError::InvalidPath);
     }
 
     // 1. Initial exclusion check on requested relative path
-    if RepositoryScanner::is_excluded_relative_path(clean_path) {
-        warn!("Blocked access to excluded sensitive path: {clean_path}");
-        return Err(SafeReadError::Forbidden(clean_path.to_string()));
+    if RepositoryScanner::is_excluded_relative_path(rel_path) {
+        warn!("Blocked access to excluded sensitive path: {rel_path}");
+        return Err(SafeReadError::Forbidden(rel_path.to_string()));
     }
 
     let canonical_root = root
         .canonicalize()
         .map_err(|e| SafeReadError::NotFound(format!("Failed to resolve repository root: {e}")))?;
 
-    let target = canonical_root.join(clean_path);
+    let target = canonical_root.join(rel_path);
 
     // 2. Open handle with O_NONBLOCK on Unix to prevent indefinite hangs on FIFOs or named pipes
     #[cfg(unix)]
@@ -135,7 +134,7 @@ pub fn safe_read_file_to_string(
             .open(&target)
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    SafeReadError::NotFound(clean_path.to_string())
+                    SafeReadError::NotFound(rel_path.to_string())
                 } else {
                     SafeReadError::Io(e)
                 }
@@ -145,7 +144,7 @@ pub fn safe_read_file_to_string(
     #[cfg(not(unix))]
     let file = std::fs::File::open(&target).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            SafeReadError::NotFound(clean_path.to_string())
+            SafeReadError::NotFound(rel_path.to_string())
         } else {
             SafeReadError::Io(e)
         }
@@ -157,7 +156,7 @@ pub fn safe_read_file_to_string(
         .map_err(|e| SafeReadError::NotFound(format!("Failed to read metadata: {e}")))?;
 
     if !metadata.file_type().is_file() {
-        return Err(SafeReadError::NotARegularFile(clean_path.to_string()));
+        return Err(SafeReadError::NotARegularFile(rel_path.to_string()));
     }
 
     if metadata.len() > max_bytes {
@@ -187,10 +186,10 @@ pub fn safe_read_file_to_string(
 
     if !canon_opened.starts_with(&canonical_root) {
         warn!(
-            "Blocked escape: {clean_path} resolves outside repo root to {}",
+            "Blocked escape: {rel_path} resolves outside repo root to {}",
             canon_opened.display()
         );
-        return Err(SafeReadError::EscapesRoot(clean_path.to_string()));
+        return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
     }
 
     if let Ok(opened_rel) = canon_opened.strip_prefix(&canonical_root) {
@@ -251,6 +250,16 @@ mod tests {
 
         let content = safe_read_file_to_string(dir.path(), "hello.ts", 1024).unwrap();
         assert_eq!(content, "export const msg = 'hello';");
+    }
+
+    #[test]
+    fn test_safe_read_file_with_spaces() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(" spaced file .ts");
+        fs::write(&file_path, "content with spaces").unwrap();
+
+        let content = safe_read_file_to_string(dir.path(), " spaced file .ts", 1024).unwrap();
+        assert_eq!(content, "content with spaces");
     }
 
     #[test]
