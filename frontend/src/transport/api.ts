@@ -69,12 +69,14 @@ export async function initSession(): Promise<SessionInitResult> {
           }
         }
 
+        const isAuth = response.status === 401 || response.status === 403;
         return {
           success: false,
           hadBootstrapToken: false,
-          isAuthError: true,
-          error:
-            'Authentication required: please launch PreBase from your terminal and open the authenticated link.',
+          isAuthError: isAuth,
+          error: isAuth
+            ? 'Authentication required: please launch PreBase from your terminal and open the authenticated link.'
+            : `Local server error (${response.status}): PreBase encountered a server error.`,
         };
       } catch (networkErr: unknown) {
         const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
@@ -97,7 +99,7 @@ export async function initSession(): Promise<SessionInitResult> {
 
       if (!response.ok) {
         const errorText = await response.text();
-        const isAuthError = response.status === 401 || response.status === 400;
+        const isAuthError = response.status === 401 || response.status === 400 || response.status === 403;
 
         // Single-use token was consumed or is invalid: clean from URL to avoid repeated failed exchanges.
         // On 500/503 (transient server errors), DO NOT purge token from URL so user or reload can retry!
@@ -109,7 +111,9 @@ export async function initSession(): Promise<SessionInitResult> {
           success: false,
           hadBootstrapToken: true,
           isAuthError,
-          error: `Authentication failed (${response.status}): ${errorText || 'Invalid or expired bootstrap token.'}`,
+          error: isAuthError
+            ? `Authentication failed (${response.status}): ${errorText || 'Invalid or expired bootstrap token.'}`
+            : `Local server error (${response.status}): ${errorText || 'Server error encountered during authentication.'}`,
         };
       }
 

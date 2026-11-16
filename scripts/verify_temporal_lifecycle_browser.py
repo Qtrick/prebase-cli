@@ -407,6 +407,31 @@ def main():
                 page.screenshot(path=os.path.join(SCREENSHOT_DIR, "21_2d_relationship_deep.png"))
                 success("2D Relationship Explorer rendered focused on Card.tsx.")
 
+                # Automated behavioral assertions on 2D Relationship Explorer rendering
+                log("Verifying 2D Relationship Explorer canvas dimensions and debug state...")
+                rel_debug = page.evaluate("() => window.__prebaseRelationshipDebug || null")
+                assert rel_debug is not None, "window.__prebaseRelationshipDebug must be defined when 2D canvas is rendered"
+                log(f"2D Debug state: renderedNodeCount={rel_debug['renderedNodeCount']}, canvas={rel_debug['canvas']}")
+                assert rel_debug["renderedNodeCount"] >= 3, f"Expected >= 3 rendered nodes, got {rel_debug['renderedNodeCount']}"
+                assert rel_debug["canvas"]["width"] > 0 and rel_debug["canvas"]["height"] > 0, "Canvas backing dimensions must be > 0"
+
+                # Verify canvas has non-background rendered pixels
+                has_pixels = page.evaluate("""() => {
+                    const canvas = document.querySelector('.relationship-container canvas');
+                    if (!canvas) return false;
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) return false;
+                    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                    for (let i = 0; i < data.length; i += 16) {
+                        if (data[i + 3] > 0) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
+                assert has_pixels, "Canvas pixel buffer must contain non-background rendered content"
+                success("2D Relationship canvas rendering validated: debug state active, >= 3 nodes rendered, non-background pixel content verified.")
+
                 # Test 1 Hop / 2 Hops in 2D HUD
                 log("Testing 2D HUD depth controls (1 Hop / 2 Hops)...")
                 btn_2hops = page.locator("button.hud-segment:has-text('2 Hops')")

@@ -59,6 +59,8 @@ pub struct AppState {
     pub is_shutting_down: AtomicBool,
     pub is_analyzing: AtomicBool,
     pub process_output_paths: RwLock<HashSet<PathBuf>>,
+    pub git_refresh_active: Arc<AtomicBool>,
+    pub git_refresh_pending: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -101,6 +103,8 @@ impl AppState {
             is_shutting_down: AtomicBool::new(false),
             is_analyzing: AtomicBool::new(false),
             process_output_paths: RwLock::new(detect_process_output_paths(&canonical_root)),
+            git_refresh_active: Arc::new(AtomicBool::new(false)),
+            git_refresh_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -319,9 +323,24 @@ impl AppState {
     }
 
     pub fn notify_git_updated(&self) {
+        if self.is_shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Bound overlapping Git operations: coalesce burst events into a single pending pass
+        if self.git_refresh_active.swap(true, Ordering::SeqCst) {
+            self.git_refresh_pending.store(true, Ordering::SeqCst);
+            return;
+        }
+
         let git_engine = Arc::clone(&self.git_engine);
         let sender = self.event_sender.clone();
-        tokio::task::spawn_blocking(move || {
+        let active = Arc::clone(&self.git_refresh_active);
+        let pending = Arc::clone(&self.git_refresh_pending);
+
+        tokio::task::spawn_blocking(move || loop {
+            pending.store(false, Ordering::SeqCst);
+
             let status = git_engine.get_status().ok();
             let (head_commit, branch) = match status {
                 Some(st) => (st.head_commit, st.branch),
@@ -332,6 +351,14 @@ impl AppState {
                 head_commit,
                 branch,
             });
+
+            if !pending.swap(false, Ordering::SeqCst) {
+                active.store(false, Ordering::SeqCst);
+                if pending.load(Ordering::SeqCst) && !active.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                break;
+            }
         });
     }
 

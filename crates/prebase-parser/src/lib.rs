@@ -261,6 +261,29 @@ mod tests {
     }
 
     #[test]
+    fn test_tsconfig_jsonc_trailing_commas_and_comments() {
+        use crate::tsconfig::TsConfig;
+        let jsonc = r#"
+        {
+            // Root comment
+            "compilerOptions": {
+                "baseUrl": "./src", // Inline comment
+                /* Block comment */
+                "paths": {
+                    "@/*": ["*",], // Trailing comma in array
+                }, // Trailing comma in object
+            }, // Trailing comma in compilerOptions
+        }
+        "#;
+        let parsed = TsConfig::parse_jsonc(jsonc, "")
+            .expect("JSONC with comments and trailing commas must parse");
+        assert_eq!(parsed.base_url.as_deref(), Some("./src"));
+        assert_eq!(parsed.paths.len(), 1);
+        assert_eq!(parsed.paths[0].0, "@/*");
+        assert_eq!(parsed.paths[0].1, vec!["*".to_string()]);
+    }
+
+    #[test]
     fn test_analysis_status_lifecycle_and_unsupported_files() {
         use prebase_core::model::NodeAnalysisStatus;
         use std::fs;

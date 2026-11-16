@@ -289,7 +289,15 @@ pub async fn handle_get_source(
         ));
     }
 
-    match prebase_core::safe_read_file_to_string(&state.root_path, clean_path, 500 * 1024) {
+    let root = state.root_path.clone();
+    let path = clean_path.to_string();
+    let read_result = tokio::task::spawn_blocking(move || {
+        prebase_core::safe_read_file_to_string(&root, &path, 500 * 1024)
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Worker thread failed"))?;
+
+    match read_result {
         Ok(content) => Ok(Json(SourceContentResponse {
             path: file_path,
             content,
@@ -303,6 +311,9 @@ pub async fn handle_get_source(
         )),
         Err(prebase_core::SafeReadError::EscapesRoot(_)) => {
             Err((StatusCode::FORBIDDEN, "Path escapes repository root"))
+        }
+        Err(prebase_core::SafeReadError::ContainmentFailed(_)) => {
+            Err((StatusCode::FORBIDDEN, "Containment verification failed"))
         }
         Err(prebase_core::SafeReadError::NotARegularFile(_)) => {
             Err((StatusCode::BAD_REQUEST, "Target is not a regular file"))

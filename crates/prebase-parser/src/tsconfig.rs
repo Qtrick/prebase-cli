@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 use tracing::warn;
 
@@ -7,7 +6,7 @@ use tracing::warn;
 pub struct CompilerOptions {
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
-    pub paths: Option<HashMap<String, Vec<String>>>,
+    pub paths: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -16,13 +15,31 @@ pub struct RawTsConfig {
     pub compiler_options: Option<CompilerOptions>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TsConfig {
+    pub config_dir: String,
     pub base_url: Option<String>,
-    pub paths: HashMap<String, Vec<String>>,
+    pub paths: Vec<(String, Vec<String>)>,
 }
 
 impl TsConfig {
+    pub fn new(
+        base_url: Option<String>,
+        paths_map: std::collections::HashMap<String, Vec<String>>,
+    ) -> Self {
+        let mut paths: Vec<(String, Vec<String>)> = paths_map.into_iter().collect();
+        paths.sort_by(|a, b| {
+            let spec_a = pattern_specificity(&a.0);
+            let spec_b = pattern_specificity(&b.0);
+            spec_b.cmp(&spec_a)
+        });
+        Self {
+            config_dir: String::new(),
+            base_url,
+            paths,
+        }
+    }
+
     pub fn load_from_dir(dir: &Path) -> Option<Self> {
         let content =
             match prebase_core::safe_read_file_to_string(dir, "tsconfig.json", 1024 * 1024) {
@@ -35,15 +52,63 @@ impl TsConfig {
                 }
             };
 
-        // Strip simple JS/JSON comments if present
-        let clean = strip_json_comments(&content);
+        Self::parse_jsonc(&content, "")
+    }
+
+    pub fn load_from_file_in_repo(repo_root: &Path, rel_config_path: &str) -> Option<Self> {
+        let content =
+            match prebase_core::safe_read_file_to_string(repo_root, rel_config_path, 1024 * 1024) {
+                Ok(c) => c,
+                Err(e) => {
+                    if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
+                        warn!("Failed or rejected reading tsconfig at {rel_config_path}: {e}");
+                    }
+                    return None;
+                }
+            };
+
+        let parent_dir = Path::new(rel_config_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        Self::parse_jsonc(&content, &parent_dir)
+    }
+
+    pub fn parse_jsonc(content: &str, config_dir: &str) -> Option<Self> {
+        // Strip JS/JSON comments and trailing commas before braces/brackets
+        let clean = clean_jsonc(content);
 
         match serde_json::from_str::<RawTsConfig>(&clean) {
             Ok(cfg) => {
                 let opts = cfg.compiler_options.unwrap_or_default();
+                let mut paths = Vec::new();
+                if let Some(paths_map) = opts.paths {
+                    for (pattern, val) in paths_map {
+                        if let Some(arr) = val.as_array() {
+                            let targets: Vec<String> = arr
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect();
+                            paths.push((pattern, targets));
+                        }
+                    }
+                    // Sort descending by pattern specificity:
+                    // 1. Exact match (usize::MAX) first
+                    // 2. Longest prefix before '*' next
+                    // 3. Longest suffix after '*' next
+                    // 4. Stable sort preserves original declaration order when specificities are equal
+                    paths.sort_by(|a, b| {
+                        let spec_a = pattern_specificity(&a.0);
+                        let spec_b = pattern_specificity(&b.0);
+                        spec_b.cmp(&spec_a)
+                    });
+                }
                 Some(Self {
+                    config_dir: config_dir.to_string(),
                     base_url: opts.base_url,
-                    paths: opts.paths.unwrap_or_default(),
+                    paths,
                 })
             }
             Err(e) => {
@@ -54,8 +119,20 @@ impl TsConfig {
     }
 }
 
-fn strip_json_comments(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+pub fn pattern_specificity(pattern: &str) -> (usize, usize) {
+    if let Some(pos) = pattern.find('*') {
+        let prefix = &pattern[..pos];
+        let suffix = &pattern[pos + 1..];
+        (prefix.len(), suffix.len())
+    } else {
+        // Exact match without wildcard has highest precedence
+        (usize::MAX, usize::MAX)
+    }
+}
+
+pub fn clean_jsonc(input: &str) -> String {
+    // Pass 1: Strip line comments (//) and block comments (/* */)
+    let mut without_comments = String::with_capacity(input.len());
     let mut in_string = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
@@ -65,7 +142,7 @@ fn strip_json_comments(input: &str) -> String {
         if in_line_comment {
             if c == '\n' {
                 in_line_comment = false;
-                output.push(c);
+                without_comments.push(c);
             }
         } else if in_block_comment {
             if c == '*' && chars.peek() == Some(&'/') {
@@ -73,17 +150,17 @@ fn strip_json_comments(input: &str) -> String {
                 in_block_comment = false;
             }
         } else if in_string {
-            output.push(c);
+            without_comments.push(c);
             if c == '\\' {
                 if let Some(next_c) = chars.next() {
-                    output.push(next_c);
+                    without_comments.push(next_c);
                 }
             } else if c == '"' {
                 in_string = false;
             }
         } else if c == '"' {
             in_string = true;
-            output.push(c);
+            without_comments.push(c);
         } else if c == '/' && chars.peek() == Some(&'/') {
             chars.next();
             in_line_comment = true;
@@ -91,8 +168,43 @@ fn strip_json_comments(input: &str) -> String {
             chars.next();
             in_block_comment = true;
         } else {
+            without_comments.push(c);
+        }
+    }
+
+    // Pass 2: Strip trailing commas before closing braces } or ] outside strings
+    let mut output = String::with_capacity(without_comments.len());
+    let mut in_str = false;
+    let chars_vec: Vec<char> = without_comments.chars().collect();
+    let mut i = 0;
+    while i < chars_vec.len() {
+        let c = chars_vec[i];
+        if in_str {
+            output.push(c);
+            if c == '\\' && i + 1 < chars_vec.len() {
+                i += 1;
+                output.push(chars_vec[i]);
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+            output.push(c);
+        } else if c == ',' {
+            // Peek forward past whitespace to see if the next non-whitespace char is '}' or ']'
+            let mut j = i + 1;
+            while j < chars_vec.len() && chars_vec[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars_vec.len() && (chars_vec[j] == '}' || chars_vec[j] == ']') {
+                // Trailing comma: skip pushing the comma!
+            } else {
+                output.push(c);
+            }
+        } else {
             output.push(c);
         }
+        i += 1;
     }
 
     output

@@ -9,6 +9,7 @@ export interface NetworkSnapshotCoordinator {
   recordObservedEventRevision: (revision: number) => void;
   getHighestObservedRevision: () => number;
   hasPendingNewerRevision: () => boolean;
+  isConverged: () => boolean;
   reset: () => void;
 }
 
@@ -115,6 +116,10 @@ export function createNetworkSnapshotCoordinator(
 
     hasPendingNewerRevision(): boolean {
       return highestObservedRevision > latestAppliedRevision;
+    },
+
+    isConverged(): boolean {
+      return latestAppliedRevision >= highestObservedRevision;
     },
 
     reset() {

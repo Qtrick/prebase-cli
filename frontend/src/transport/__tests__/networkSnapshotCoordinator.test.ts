@@ -462,4 +462,36 @@ describe('NetworkSnapshotCoordinator Failure Recovery & Monotonicity', () => {
       expect(coordinator.shouldProcessSseEvent(3)).toBe(false);
     });
   });
+
+  describe('isConverged() semantics', () => {
+    it('accurately tracks convergence state across observed and applied revisions', () => {
+      const coordinator = createNetworkSnapshotCoordinator(async () => makeSnap(1));
+
+      // Initially at (-1, -1): converged
+      expect(coordinator.isConverged()).toBe(true);
+
+      // Revision 1 observed from SSE: not converged
+      coordinator.recordObservedEventRevision(1);
+      expect(coordinator.isConverged()).toBe(false);
+      expect(coordinator.hasPendingNewerRevision()).toBe(true);
+
+      // Revision 1 applied: converged
+      coordinator.recordAppliedRevision(1);
+      expect(coordinator.isConverged()).toBe(true);
+      expect(coordinator.hasPendingNewerRevision()).toBe(false);
+
+      // Revision 2 observed: not converged
+      coordinator.recordObservedEventRevision(2);
+      expect(coordinator.isConverged()).toBe(false);
+
+      // Revision 3 observed: not converged
+      coordinator.recordObservedEventRevision(3);
+      expect(coordinator.isConverged()).toBe(false);
+
+      // Revision 3 applied: converged directly
+      coordinator.recordAppliedRevision(3);
+      expect(coordinator.isConverged()).toBe(true);
+      expect(coordinator.hasPendingNewerRevision()).toBe(false);
+    });
+  });
 });

@@ -71,6 +71,7 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
     const abortController = new AbortController();
 
     setLoading(true);
+    setDetails(null);
     setError(null);
     setNotice(null);
 

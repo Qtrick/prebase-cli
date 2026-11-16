@@ -33,6 +33,24 @@ import './RelationshipCanvas.css';
 
 export type { Viewport2D } from './relationshipViewport';
 
+declare global {
+  interface Window {
+    __prebaseRelationshipDebug?: {
+      layout: {
+        focusNodeId: string | null;
+        nodesCount: number;
+        edgesCount: number;
+        bounds: LayoutBounds;
+      };
+      dimensions: { width: number; height: number };
+      viewport: Viewport2D;
+      canvas: { width: number; height: number };
+      renderedNodeCount: number;
+      renderedEdgeCount: number;
+    };
+  }
+}
+
 interface RelationshipCanvasProps {
   snapshot: GraphSnapshot | null;
   focusNodeId: string | null;
@@ -546,8 +564,8 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
 
       // Filename
       const filenameFont = isFocus
-        ? '600 13px system-ui, -apple-system, sans-serif'
-        : '500 12px system-ui, -apple-system, sans-serif';
+        ? '600 13.5px system-ui, -apple-system, sans-serif'
+        : '500 12.5px system-ui, -apple-system, sans-serif';
       ctx.font = filenameFont;
       ctx.fillStyle = isFocus
         ? palette.textFocus
@@ -565,7 +583,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.fillText(displayFilename, textX, nameY);
 
       // Relative Path
-      const pathFont = '400 11px monospace';
+      const pathFont = isFocus ? '400 11.5px monospace' : '400 11px monospace';
       ctx.font = pathFont;
       ctx.fillStyle = palette.textMuted;
       const pathY = top + (isFocus ? 40 : 35);
@@ -575,13 +593,29 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
 
       // Badges for Focus Node (dependencies and dependents counts in clear, plain language)
       if (isFocus) {
-        ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+        ctx.font = '600 10.5px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = isLight ? '#0284c7' : '#38bdf8';
         ctx.fillText(`Used by: ${node.node.direct_dependent_count}`, left + node.width - 12, top + 22);
         ctx.fillStyle = isLight ? '#0d9488' : '#2dd4bf';
         ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 12, top + 40);
       }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.__prebaseRelationshipDebug = {
+        layout: {
+          focusNodeId,
+          nodesCount: curLayout.nodes.length,
+          edgesCount: curLayout.edges.length,
+          bounds: curLayout.bounds,
+        },
+        dimensions: { width, height },
+        viewport: { ...viewportRef.current },
+        canvas: { width: canvas.width, height: canvas.height },
+        renderedNodeCount: curLayout.nodes.length,
+        renderedEdgeCount: curLayout.edges.length,
+      };
     }
 
     ctx.restore();
@@ -628,6 +662,9 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
 
   useEffect(() => {
     return () => {
+      if (typeof window !== 'undefined') {
+        delete window.__prebaseRelationshipDebug;
+      }
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;

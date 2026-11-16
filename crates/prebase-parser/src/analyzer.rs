@@ -140,8 +140,21 @@ impl RepositoryAnalyzer {
             });
         }
 
-        let tsconfig = TsConfig::load_from_dir(root);
-        let resolver = ImportResolver::new(known_files, tsconfig);
+        let mut configs = Vec::new();
+        if let Some(root_cfg) = TsConfig::load_from_dir(root) {
+            configs.push(root_cfg);
+        }
+        for file in &discovered_files {
+            if file.filename == "tsconfig.json"
+                && !file.relative_path.is_empty()
+                && file.relative_path != "tsconfig.json"
+            {
+                if let Some(pkg_cfg) = TsConfig::load_from_file_in_repo(root, &file.relative_path) {
+                    configs.push(pkg_cfg);
+                }
+            }
+        }
+        let resolver = ImportResolver::with_configs(known_files, configs);
         let mut parser = SourceParser::new();
 
         let analyzed_counter = AtomicUsize::new(0);

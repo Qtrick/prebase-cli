@@ -41,6 +41,8 @@ impl GitEngine {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .args(args)
             .env("LANG", "C")
             .env("LC_ALL", "C")
@@ -379,7 +381,7 @@ impl GitEngine {
         let mut args: Vec<String> = vec![
             "log".into(),
             "--topo-order".into(),
-            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x1e".into(),
+            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00".into(),
             "-n".into(),
             (fetch_limit + 1).to_string(),
         ];
@@ -393,53 +395,7 @@ impl GitEngine {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output_bytes = self.run_git_cmd(&arg_refs)?;
 
-        let mut raw_commits: Vec<CommitSummary> = Vec::new();
-        // Parse NUL-delimited records framed by record separator \x1e
-        for record_bytes in output_bytes.split(|&b| b == 0x1e) {
-            if record_bytes.is_empty() {
-                continue;
-            }
-
-            let fields: Vec<&[u8]> = record_bytes.split(|&b| b == 0).collect();
-            if fields.len() < 6 {
-                continue;
-            }
-
-            let hash = String::from_utf8_lossy(fields[0]).trim().to_string();
-            if hash.is_empty() {
-                continue;
-            }
-
-            let short_hash = if hash.len() >= 7 {
-                hash[..7].to_string()
-            } else {
-                hash.clone()
-            };
-
-            let parents_str = String::from_utf8_lossy(fields[1]);
-            let parent_hashes = parents_str
-                .split_whitespace()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-
-            let author_name = String::from_utf8_lossy(fields[2]).trim().to_string();
-            let author_email = String::from_utf8_lossy(fields[3]).trim().to_string();
-            let timestamp_str = String::from_utf8_lossy(fields[4]);
-            let author_timestamp = timestamp_str.trim().parse::<i64>().unwrap_or(0);
-            let summary = String::from_utf8_lossy(fields[5]).trim().to_string();
-
-            raw_commits.push(CommitSummary {
-                hash,
-                short_hash,
-                parent_hashes,
-                author_name,
-                author_email,
-                author_timestamp,
-                summary,
-                lane: 0,
-            });
-        }
+        let mut raw_commits = parse_commits_from_bytes(&output_bytes);
 
         let has_more = raw_commits.len() > fetch_limit;
         if has_more {
@@ -607,7 +563,7 @@ impl GitEngine {
             "log",
             "--follow",
             "--topo-order",
-            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x1e",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00",
             "-n",
             &limit_str,
             "--",
@@ -615,53 +571,7 @@ impl GitEngine {
         ];
 
         let output_bytes = self.run_git_cmd(&args)?;
-
-        let mut commits: Vec<CommitSummary> = Vec::new();
-        for record_bytes in output_bytes.split(|&b| b == 0x1e) {
-            if record_bytes.is_empty() {
-                continue;
-            }
-
-            let fields: Vec<&[u8]> = record_bytes.split(|&b| b == 0).collect();
-            if fields.len() < 6 {
-                continue;
-            }
-
-            let hash = String::from_utf8_lossy(fields[0]).trim().to_string();
-            if hash.is_empty() {
-                continue;
-            }
-
-            let short_hash = if hash.len() >= 7 {
-                hash[..7].to_string()
-            } else {
-                hash.clone()
-            };
-
-            let parents_str = String::from_utf8_lossy(fields[1]);
-            let parent_hashes = parents_str
-                .split_whitespace()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-
-            let author_name = String::from_utf8_lossy(fields[2]).trim().to_string();
-            let author_email = String::from_utf8_lossy(fields[3]).trim().to_string();
-            let timestamp_str = String::from_utf8_lossy(fields[4]);
-            let author_timestamp = timestamp_str.trim().parse::<i64>().unwrap_or(0);
-            let summary = String::from_utf8_lossy(fields[5]).trim().to_string();
-
-            commits.push(CommitSummary {
-                hash,
-                short_hash,
-                parent_hashes,
-                author_name,
-                author_email,
-                author_timestamp,
-                summary,
-                lane: 0,
-            });
-        }
+        let mut commits = parse_commits_from_bytes(&output_bytes);
 
         assign_topological_lanes(&mut commits);
 
@@ -793,4 +703,48 @@ fn parse_diff_tree_null_output(bytes: &[u8]) -> Vec<FileChange> {
     }
 
     files
+}
+
+pub fn parse_commits_from_bytes(output_bytes: &[u8]) -> Vec<CommitSummary> {
+    let mut raw_commits: Vec<CommitSummary> = Vec::new();
+    let fields: Vec<&[u8]> = output_bytes.split(|&b| b == 0).collect();
+    // Since each commit produces exactly 6 NUL-delimited fields (%H, %P, %an, %ae, %at, %s),
+    // chunking by 6 completely eliminates record-separator collisions on arbitrary subject bytes (e.g. 0x1e)!
+    for chunk in fields.as_chunks::<6>().0 {
+        let hash = String::from_utf8_lossy(chunk[0]).trim().to_string();
+        if hash.is_empty() {
+            continue;
+        }
+
+        let short_hash = if hash.len() >= 7 {
+            hash[..7].to_string()
+        } else {
+            hash.clone()
+        };
+
+        let parents_str = String::from_utf8_lossy(chunk[1]);
+        let parent_hashes = parents_str
+            .split_whitespace()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        let author_name = String::from_utf8_lossy(chunk[2]).trim().to_string();
+        let author_email = String::from_utf8_lossy(chunk[3]).trim().to_string();
+        let timestamp_str = String::from_utf8_lossy(chunk[4]);
+        let author_timestamp = timestamp_str.trim().parse::<i64>().unwrap_or(0);
+        let summary = String::from_utf8_lossy(chunk[5]).trim().to_string();
+
+        raw_commits.push(CommitSummary {
+            hash,
+            short_hash,
+            parent_hashes,
+            author_name,
+            author_email,
+            author_timestamp,
+            summary,
+            lane: 0,
+        });
+    }
+    raw_commits
 }

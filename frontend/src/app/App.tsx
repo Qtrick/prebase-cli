@@ -387,7 +387,7 @@ export const App: React.FC = () => {
   }, [coordinator]);
 
   // 2. Fetch Git commit history with anchor pagination
-  const loadCommits = useCallback(async (filterPath?: string | null) => {
+  const loadCommits = useCallback(async (filterPath?: string | null, isBackground = false) => {
     // Clear isLoadingMore so superseding loadCommits never leaves pagination disabled
     setIsLoadingMore(false);
     const currentToken = ++commitsRequestTokenRef.current;
@@ -397,7 +397,9 @@ export const App: React.FC = () => {
     const controller = new AbortController();
     commitsAbortControllerRef.current = controller;
 
-    setTemporalLoading(true);
+    if (!isBackground) {
+      setTemporalLoading(true);
+    }
     setTemporalError(null);
     try {
       if (filterPath) {
@@ -482,8 +484,12 @@ export const App: React.FC = () => {
   // Bounded snapshot reconciliation with exponential backoff after failed fetch or network drop
   const scheduleSnapshotReconciliation = useCallback(() => {
     if (reconciliationTimerRef.current) return;
+    if (coordinator.isConverged()) {
+      reconciliationAttemptsRef.current = 0;
+      return;
+    }
     const attempt = reconciliationAttemptsRef.current;
-    const delay = Math.min(8000, 1500 * Math.pow(1.5, Math.min(attempt, 4)));
+    const delay = Math.min(8000, 200 * Math.pow(1.5, Math.min(attempt, 6)));
 
     reconciliationTimerRef.current = setTimeout(() => {
       reconciliationTimerRef.current = null;
@@ -496,8 +502,15 @@ export const App: React.FC = () => {
             api
               .getNetwork()
               .then((newSnap) => {
-                reconciliationAttemptsRef.current = 0;
                 applySnapshotRef.current?.(newSnap, ['*']);
+                if (coordinator.isConverged()) {
+                  reconciliationAttemptsRef.current = 0;
+                } else {
+                  reconciliationAttemptsRef.current++;
+                  if (reconciliationAttemptsRef.current < 10) {
+                    scheduleSnapshotReconciliation();
+                  }
+                }
               })
               .catch(() => {
                 reconciliationAttemptsRef.current++;
@@ -506,8 +519,15 @@ export const App: React.FC = () => {
                 }
               });
           } else {
-            // Converged
-            reconciliationAttemptsRef.current = 0;
+            // Server revision already applied or not newer
+            if (coordinator.isConverged()) {
+              reconciliationAttemptsRef.current = 0;
+            } else {
+              reconciliationAttemptsRef.current++;
+              if (reconciliationAttemptsRef.current < 10) {
+                scheduleSnapshotReconciliation();
+              }
+            }
           }
         })
         .catch(() => {
@@ -611,14 +631,14 @@ export const App: React.FC = () => {
         } else if (event.type === 'git.updated') {
           api.getGitStatus().then(setGitStatus).catch(() => { });
           if (activeTabRef.current === 'temporal') {
-            loadCommitsRef.current(temporalFilterPathRef.current);
+            loadCommitsRef.current(temporalFilterPathRef.current, true);
           }
         } else if (event.type === 'reconcile.required') {
           api.getGitStatus().then((gs) => {
             if (!isCancelled) setGitStatus(gs);
           }).catch(() => { });
           if (activeTabRef.current === 'temporal') {
-            loadCommitsRef.current(temporalFilterPathRef.current);
+            loadCommitsRef.current(temporalFilterPathRef.current, true);
           }
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
@@ -642,7 +662,7 @@ export const App: React.FC = () => {
             if (!isCancelled) setGitStatus(gs);
           }).catch(() => { });
           if (activeTabRef.current === 'temporal') {
-            loadCommitsRef.current(temporalFilterPathRef.current);
+            loadCommitsRef.current(temporalFilterPathRef.current, true);
           }
           // Re-fetch status on reconnect to reconcile any missed network updates
           api.getStatus().then((st) => {
@@ -663,6 +683,11 @@ export const App: React.FC = () => {
 
     return () => {
       isCancelled = true;
+      applySnapshotRef.current = null;
+      if (reconciliationTimerRef.current) {
+        clearTimeout(reconciliationTimerRef.current);
+        reconciliationTimerRef.current = null;
+      }
       unsubscribe();
     };
   }, [sessionInitialized, error, coordinator, scheduleSnapshotReconciliation, showLiveNotice]);

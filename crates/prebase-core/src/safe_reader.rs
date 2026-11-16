@@ -30,6 +30,8 @@ pub enum SafeReadError {
     ExceedsLimit { actual: u64, max: u64 },
     #[error("File contains invalid UTF-8")]
     InvalidUtf8,
+    #[error("Containment verification failed: {0}")]
+    ContainmentFailed(String),
     #[error("Filesystem IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -166,33 +168,79 @@ pub fn safe_read_file_to_string(
         });
     }
 
-    // 4. Inspect physical path of open descriptor (or canonical target fallback) to eliminate escapes
+    // 4. Inspect physical path and cross-check descriptor metadata against disk (prevents TOCTOU swap)
     #[cfg(unix)]
-    let opened_path_opt = {
+    let physical_path = {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;
-        get_fd_path(file.as_raw_fd())
+
+        let fd = file.as_raw_fd();
+        let fd_path = get_fd_path(fd).ok_or_else(|| {
+            SafeReadError::ContainmentFailed(format!(
+                "Failed to resolve descriptor path for {rel_path}"
+            ))
+        })?;
+
+        // Fail closed if file was unlinked on Linux (kernel appends " (deleted)")
+        // or if hard link count is zero (unlinked on any Unix platform)
+        if fd_path.to_string_lossy().ends_with(" (deleted)") || metadata.nlink() == 0 {
+            return Err(SafeReadError::NotFound(format!(
+                "File {rel_path} has been unlinked"
+            )));
+        }
+
+        // Verify root directory itself is intact and has not been replaced
+        let root_meta = std::fs::metadata(&canonical_root)
+            .map_err(|e| SafeReadError::NotFound(format!("Repository root is invalid: {e}")))?;
+        if !root_meta.is_dir() {
+            return Err(SafeReadError::NotFound(
+                "Repository root is not a directory".into(),
+            ));
+        }
+
+        // Verify physical path starts with canonical root WITHOUT user-space re-canonicalization
+        if !fd_path.starts_with(&canonical_root) {
+            warn!(
+                "Blocked escape: {rel_path} physical path resolves outside repo root to {}",
+                fd_path.display()
+            );
+            return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
+        }
+
+        // Cross-check kernel descriptor (fstat) against filesystem entry (lstat)
+        let path_meta = std::fs::symlink_metadata(&fd_path).map_err(|e| {
+            SafeReadError::NotFound(format!(
+                "Failed to stat physical path {}: {e}",
+                fd_path.display()
+            ))
+        })?;
+
+        if path_meta.file_type().is_symlink() {
+            return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
+        }
+
+        if metadata.dev() != path_meta.dev() || metadata.ino() != path_meta.ino() {
+            warn!("Blocked TOCTOU race: descriptor inode does not match path inode for {rel_path}");
+            return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
+        }
+
+        fd_path
     };
+
     #[cfg(not(unix))]
-    let opened_path_opt: Option<PathBuf> = None;
-
-    let physical_path = match opened_path_opt {
-        Some(p) => p,
-        None => target.canonicalize().unwrap_or_else(|_| target.clone()),
-    };
-
-    let canon_opened = physical_path
+    let physical_path = target
         .canonicalize()
-        .unwrap_or_else(|_| physical_path.clone());
+        .map_err(|e| SafeReadError::NotFound(format!("Failed to resolve path: {e}")))?;
 
-    if !canon_opened.starts_with(&canonical_root) {
+    if !physical_path.starts_with(&canonical_root) {
         warn!(
             "Blocked escape: {rel_path} resolves outside repo root to {}",
-            canon_opened.display()
+            physical_path.display()
         );
         return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
     }
 
-    if let Ok(opened_rel) = canon_opened.strip_prefix(&canonical_root) {
+    if let Ok(opened_rel) = physical_path.strip_prefix(&canonical_root) {
         let opened_rel_str = opened_rel.to_string_lossy().replace('\\', "/");
         if RepositoryScanner::is_excluded_relative_path(&opened_rel_str) {
             warn!("Blocked symlink to sensitive file: {opened_rel_str}");
