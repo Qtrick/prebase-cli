@@ -17,10 +17,10 @@ echo "--> Checking Rust code format..."
 cargo fmt --all -- --check
 
 echo "--> Checking Clippy lints across workspace..."
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 
 echo "--> Running Rust test suite..."
-cargo test --workspace
+cargo test --workspace --locked
 
 # 2. Frontend tests and build
 echo "--> Running Frontend unit tests..."

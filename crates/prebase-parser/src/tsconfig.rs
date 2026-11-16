@@ -24,18 +24,16 @@ pub struct TsConfig {
 
 impl TsConfig {
     pub fn load_from_dir(dir: &Path) -> Option<Self> {
-        let path = dir.join("tsconfig.json");
-        if !path.exists() {
-            return None;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read tsconfig.json: {e}");
-                return None;
-            }
-        };
+        let content =
+            match prebase_core::safe_read_file_to_string(dir, "tsconfig.json", 1024 * 1024) {
+                Ok(c) => c,
+                Err(e) => {
+                    if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
+                        warn!("Failed or rejected reading tsconfig.json: {e}");
+                    }
+                    return None;
+                }
+            };
 
         // Strip simple JS/JSON comments if present
         let clean = strip_json_comments(&content);

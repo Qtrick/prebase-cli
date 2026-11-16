@@ -25,6 +25,8 @@ export function createNetworkSnapshotCoordinator(
   fetchFn: (signal?: AbortSignal) => Promise<GraphSnapshot>
 ): NetworkSnapshotCoordinator {
   let inFlight: Promise<GraphSnapshot> | null = null;
+  // Generation counter isolates async promise callbacks across resets / unmounts
+  let currentGeneration = 0;
   // Initialize to -1 to cleanly support initial repository snapshot at revision 0
   let latestAppliedRevision = -1;
   let highestObservedRevision = -1;
@@ -35,19 +37,31 @@ export function createNetworkSnapshotCoordinator(
       if (!signal && inFlight) {
         return inFlight;
       }
+      const reqGeneration = currentGeneration;
       const promise = fetchFn(signal)
         .then((snap) => {
-          failedRevision = -1;
+          // Defect A & B: Ignore obsolete generations on reset, and only clear failedRevision
+          // if the returned snapshot satisfies the highest observed required revision!
+          if (reqGeneration === currentGeneration) {
+            if (snap.revision >= highestObservedRevision) {
+              failedRevision = -1;
+            } else {
+              // Stale HTTP 200 response (e.g. rev 1 returned when rev 3 was observed).
+              // Do NOT clear pending required revision; keep retry eligibility open!
+              failedRevision = highestObservedRevision;
+            }
+          }
           return snap;
         })
         .catch((err) => {
-          if (!signal?.aborted) {
+          // Defect A: Never mutate a reset or newer generation from an old rejected request
+          if (reqGeneration === currentGeneration && !signal?.aborted) {
             failedRevision = highestObservedRevision;
           }
           throw err;
         })
         .finally(() => {
-          if (inFlight === promise) {
+          if (reqGeneration === currentGeneration && inFlight === promise) {
             inFlight = null;
           }
         });
@@ -85,8 +99,8 @@ export function createNetworkSnapshotCoordinator(
         return true;
       }
       // If revision <= highestObservedRevision but > latestAppliedRevision:
-      // It was observed before but failed during fetch. Allow retry if previous fetch failed and no fetch is in-flight.
-      return revision === failedRevision && inFlight === null;
+      // Allow retry if no fetch is currently in-flight, and revision matches the failed revision.
+      return inFlight === null && revision === failedRevision;
     },
 
     recordObservedEventRevision(revision: number) {
@@ -104,6 +118,7 @@ export function createNetworkSnapshotCoordinator(
     },
 
     reset() {
+      currentGeneration++;
       inFlight = null;
       latestAppliedRevision = -1;
       highestObservedRevision = -1;

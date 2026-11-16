@@ -24,6 +24,18 @@ export interface SessionInitResult {
 
 let inFlightSessionInit: Promise<SessionInitResult> | null = null;
 
+function scrubAuthParamFromUrl(paramName: string) {
+  if (typeof window === 'undefined') return;
+  const currentParams = new URLSearchParams(window.location.search);
+  if (currentParams.has(paramName)) {
+    currentParams.delete(paramName);
+    const newSearch = currentParams.toString();
+    const cleanUrl =
+      window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+    window.history.replaceState(window.history.state, '', cleanUrl);
+  }
+}
+
 export async function initSession(): Promise<SessionInitResult> {
   if (inFlightSessionInit) {
     return inFlightSessionInit;
@@ -36,14 +48,43 @@ export async function initSession(): Promise<SessionInitResult> {
 
     // Purge legacy query token from URL without storing in browser storage
     if (tokenFromUrl) {
-      urlParams.delete('token');
-      const newSearch = urlParams.toString();
-      const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-      window.history.replaceState({}, '', cleanUrl);
+      scrubAuthParamFromUrl('token');
     }
 
     if (!bootstrapToken) {
-      return { success: true, hadBootstrapToken: false };
+      // Direct visit without bootstrap token in URL:
+      // Truthfully verify if the browser possesses a valid ambient session cookie
+      try {
+        const response = await fetch('/api/v1/auth/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({}),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.authenticated) {
+            return { success: true, hadBootstrapToken: false };
+          }
+        }
+
+        return {
+          success: false,
+          hadBootstrapToken: false,
+          isAuthError: true,
+          error:
+            'Authentication required: please launch PreBase from your terminal and open the authenticated link.',
+        };
+      } catch (networkErr: unknown) {
+        const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+        return {
+          success: false,
+          hadBootstrapToken: false,
+          isAuthError: false,
+          error: `Network failure connecting to local server: ${msg}`,
+        };
+      }
     }
 
     try {
@@ -61,10 +102,7 @@ export async function initSession(): Promise<SessionInitResult> {
         // Single-use token was consumed or is invalid: clean from URL to avoid repeated failed exchanges.
         // On 500/503 (transient server errors), DO NOT purge token from URL so user or reload can retry!
         if (isAuthError) {
-          urlParams.delete('bootstrap');
-          const newSearch = urlParams.toString();
-          const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-          window.history.replaceState({}, '', cleanUrl);
+          scrubAuthParamFromUrl('bootstrap');
         }
 
         return {
@@ -76,10 +114,7 @@ export async function initSession(): Promise<SessionInitResult> {
       }
 
       // Success: Token consumed, session cookie established
-      urlParams.delete('bootstrap');
-      const newSearch = urlParams.toString();
-      const cleanUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-      window.history.replaceState({}, '', cleanUrl);
+      scrubAuthParamFromUrl('bootstrap');
 
       return { success: true, hadBootstrapToken: true };
     } catch (networkErr: unknown) {
@@ -176,6 +211,7 @@ export const api = {
   ): (() => void) => {
     // Authenticate cleanly via HttpOnly session cookie without token exposure in URL
     const eventSource = new EventSource('/api/v1/events', { withCredentials: true });
+    let isExplicitlyClosed = false;
 
     eventSource.onopen = () => {
       if (onStatusChange) onStatusChange('connected');
@@ -192,10 +228,18 @@ export const api = {
     };
 
     eventSource.onerror = () => {
-      if (onStatusChange) onStatusChange('reconnecting');
+      if (isExplicitlyClosed) return;
+      if (eventSource.readyState === EventSource.CLOSED) {
+        // Subscription terminally closed (e.g. server process terminated or rejected auth)
+        if (onStatusChange) onStatusChange('error');
+      } else {
+        // EventSource.CONNECTING: browser native reconnection is attempting recovery
+        if (onStatusChange) onStatusChange('reconnecting');
+      }
     };
 
     return () => {
+      isExplicitlyClosed = true;
       eventSource.close();
     };
   },

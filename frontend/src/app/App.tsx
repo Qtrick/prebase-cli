@@ -69,24 +69,50 @@ export function parseInitialUrlParams(search: string): InitialUrlParams {
 }
 
 /**
- * Resolves the initial focus node from the requested focus path against snapshot nodes.
- * Preserves exact whitespace (leading, trailing, and internal) so filenames or paths
- * with whitespace are not stripped or corrupted.
+ * Resolves the initial focus node from the requested focus path against snapshot nodes
+ * using strict deterministic precedence:
+ * 1. Exact canonical relative path or canonical file ID match.
+ * 2. Case-insensitive relative path match (only if unambiguous).
+ * 3. Exact filename match (only if unambiguous).
+ * 4. Case-insensitive filename match (only if unambiguous).
+ * Preserves exact whitespace and Unicode so paths with whitespace are not corrupted.
  */
 export function resolveInitialFocusNode(
   targetPath: string | null | undefined,
   nodes: readonly FileNode[]
 ): FileNode | null {
   if (!targetPath) return null;
-  return (
-    nodes.find(
-      (n) =>
-        n.relative_path === targetPath ||
-        n.id === targetPath ||
-        n.filename === targetPath ||
-        n.relative_path.toLowerCase() === targetPath.toLowerCase()
-    ) || null
+
+  // 1. Exact canonical relative path or exact file ID match
+  const exact = nodes.find(
+    (n) => n.relative_path === targetPath || n.id === targetPath
   );
+  if (exact) return exact;
+
+  // 2. Case-insensitive relative path match (only if unambiguous)
+  const targetLower = targetPath.toLowerCase();
+  const caseInsensitiveMatches = nodes.filter(
+    (n) => n.relative_path.toLowerCase() === targetLower
+  );
+  if (caseInsensitiveMatches.length === 1) {
+    return caseInsensitiveMatches[0];
+  }
+
+  // 3. Exact filename match (only if unambiguous)
+  const filenameMatches = nodes.filter((n) => n.filename === targetPath);
+  if (filenameMatches.length === 1) {
+    return filenameMatches[0];
+  }
+
+  // 4. Case-insensitive filename match (only if unambiguous)
+  const filenameLowerMatches = nodes.filter(
+    (n) => n.filename.toLowerCase() === targetLower
+  );
+  if (filenameLowerMatches.length === 1) {
+    return filenameLowerMatches[0];
+  }
+
+  return null;
 }
 
 export interface KeyboardShortcutTargetLike {
@@ -168,6 +194,8 @@ export const App: React.FC = () => {
   // Network state
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const [status, setStatus] = useState<string>('Scanning');
   const [error, setError] = useState<string | null>(null);
 
@@ -190,6 +218,7 @@ export const App: React.FC = () => {
   const [hasMoreCommits, setHasMoreCommits] = useState(false);
   const [totalCommits, setTotalCommits] = useState<number | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [temporalError, setTemporalError] = useState<string | null>(null);
 
   // Live SSE sync & watcher state
   const [sessionInitialized, setSessionInitialized] = useState(false);
@@ -258,7 +287,9 @@ export const App: React.FC = () => {
         if (st.indexing_status === 'Ready') {
           const snap = await api.getNetwork();
           if (cancelled) return;
-          if (coordinator.shouldApplySnapshot(snap.revision)) {
+          if (applySnapshotRef.current) {
+            applySnapshotRef.current(snap, ['*']);
+          } else if (coordinator.shouldApplySnapshot(snap.revision)) {
             coordinator.recordAppliedRevision(snap.revision);
             setSnapshot(snap);
             setLiveRevision(snap.revision);
@@ -357,6 +388,8 @@ export const App: React.FC = () => {
 
   // 2. Fetch Git commit history with anchor pagination
   const loadCommits = useCallback(async (filterPath?: string | null) => {
+    // Clear isLoadingMore so superseding loadCommits never leaves pagination disabled
+    setIsLoadingMore(false);
     const currentToken = ++commitsRequestTokenRef.current;
     if (commitsAbortControllerRef.current) {
       commitsAbortControllerRef.current.abort();
@@ -365,6 +398,7 @@ export const App: React.FC = () => {
     commitsAbortControllerRef.current = controller;
 
     setTemporalLoading(true);
+    setTemporalError(null);
     try {
       if (filterPath) {
         const res = await api.getFileHistory(filterPath, 100, controller.signal);
@@ -384,13 +418,13 @@ export const App: React.FC = () => {
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') return;
       if (currentToken !== commitsRequestTokenRef.current) return;
-      setCommits([]);
-      setNextCursor(null);
-      setHasMoreCommits(false);
-      setTotalCommits(null);
+      const msg = err instanceof Error ? err.message : String(err);
+      // Defect G: Preserve existing commits during temporary error; do not wipe out history
+      setTemporalError(msg);
     } finally {
       if (currentToken === commitsRequestTokenRef.current) {
         setTemporalLoading(false);
+        setIsLoadingMore(false);
       }
     }
   }, []);
@@ -411,12 +445,14 @@ export const App: React.FC = () => {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('410') || msg.includes('StaleCursor')) {
         showLiveNotice('Commit history updated on disk. Reloading history from HEAD...');
-        loadCommits(temporalFilterPath);
-      }
-    } finally {
-      if (currentToken === commitsRequestTokenRef.current) {
         setIsLoadingMore(false);
+        loadCommits(temporalFilterPath);
+        return;
       }
+      setTemporalError(`Failed to load older commits: ${msg}`);
+    } finally {
+      // Defect F: Unconditionally reset isLoadingMore on completion/error
+      setIsLoadingMore(false);
     }
   }, [nextCursor, isLoadingMore, loadCommits, temporalFilterPath, showLiveNotice]);
 
@@ -434,27 +470,46 @@ export const App: React.FC = () => {
   temporalFilterPathRef.current = temporalFilterPath;
   const loadCommitsRef = useRef(loadCommits);
   loadCommitsRef.current = loadCommits;
+  const reconciliationAttemptsRef = useRef(0);
 
-  // Bounded snapshot reconciliation after failed fetch or network drop
+  // Bounded snapshot reconciliation with exponential backoff after failed fetch or network drop
   const scheduleSnapshotReconciliation = useCallback(() => {
     if (reconciliationTimerRef.current) return;
+    const attempt = reconciliationAttemptsRef.current;
+    const delay = Math.min(8000, 1500 * Math.pow(1.5, Math.min(attempt, 4)));
+
     reconciliationTimerRef.current = setTimeout(() => {
       reconciliationTimerRef.current = null;
       api
         .getStatus()
         .then((st) => {
-          if (!applySnapshotRef.current) return;
           if (st.watcher_health) setWatcherHealth(st.watcher_health);
           if (coordinator.shouldApplySnapshot(st.revision)) {
             coordinator.recordObservedEventRevision(st.revision);
             api
               .getNetwork()
-              .then((newSnap) => applySnapshotRef.current?.(newSnap, ['*']))
-              .catch(() => {});
+              .then((newSnap) => {
+                reconciliationAttemptsRef.current = 0;
+                applySnapshotRef.current?.(newSnap, ['*']);
+              })
+              .catch(() => {
+                reconciliationAttemptsRef.current++;
+                if (reconciliationAttemptsRef.current < 10) {
+                  scheduleSnapshotReconciliation();
+                }
+              });
+          } else {
+            // Converged
+            reconciliationAttemptsRef.current = 0;
           }
         })
-        .catch(() => {});
-    }, 1500);
+        .catch(() => {
+          reconciliationAttemptsRef.current++;
+          if (reconciliationAttemptsRef.current < 10) {
+            scheduleSnapshotReconciliation();
+          }
+        });
+    }, delay);
   }, [coordinator]);
 
   // Stable ref for applySnapshot
@@ -463,22 +518,36 @@ export const App: React.FC = () => {
   // 3. Authenticated Server-Sent Events (SSE) for Live Updates & Reconnection Reconciliation
   useEffect(() => {
     if (!sessionInitialized || error) return;
-    let isCancelled = false;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
-      if (isCancelled) return;
       if (coordinator.shouldApplySnapshot(newSnap.revision)) {
         coordinator.recordAppliedRevision(newSnap.revision);
         setSnapshot(newSnap);
         setLiveRevision(newSnap.revision);
         setStatus('Ready');
 
-        // Flash subtle live-update toast
-        const fileNotice =
-          changedFiles.length > 0 && changedFiles[0] !== '*'
-            ? `${changedFiles.length} file(s) updated`
-            : 'Graph reanalyzed';
-        showLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
+        // Flash subtle live-update toast only for background updates, not initial load
+        if (snapshotRef.current !== null) {
+          const fileNotice =
+            changedFiles.length > 0 && changedFiles[0] !== '*'
+              ? `${changedFiles.length} file(s) updated`
+              : 'Graph reanalyzed';
+          showLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
+        }
+
+        // Defect D: Resolve initial focus target from CLI or URL parameters once first snapshot is applied
+        if (initialParams.initialFocusPath && !focusResolvedRef.current) {
+          focusResolvedRef.current = true;
+          const targetPath = initialParams.initialFocusPath;
+          const matched = resolveInitialFocusNode(targetPath, newSnap.nodes);
+          if (matched) {
+            setSelectedNode(matched);
+            setFocusNodeId(matched.id);
+            setMissingFocusPath(null);
+          } else {
+            setMissingFocusPath(targetPath);
+          }
+        }
 
         // Re-sync selected node if still exists in the new snapshot
         setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
@@ -498,19 +567,12 @@ export const App: React.FC = () => {
 
       // Trailing fetch check: executes even if the incoming snapshot was stale/rejected,
       // ensuring newer announced revisions are never stranded!
-      if (!isCancelled && coordinator.hasPendingNewerRevision()) {
+      if (coordinator.hasPendingNewerRevision()) {
         api
           .getNetwork()
-          .then((newerSnap) => {
-            if (isCancelled) return;
-            if (coordinator.shouldApplySnapshot(newerSnap.revision)) {
-              applySnapshot(newerSnap, ['*']);
-            } else {
-              scheduleSnapshotReconciliation();
-            }
-          })
+          .then((newerSnap) => applySnapshot(newerSnap, ['*']))
           .catch(() => {
-            if (!isCancelled) scheduleSnapshotReconciliation();
+            scheduleSnapshotReconciliation();
           });
       }
     };
@@ -519,7 +581,6 @@ export const App: React.FC = () => {
 
     const unsubscribe = api.subscribeToEvents(
       (event: ServerEvent) => {
-        if (isCancelled) return;
         setSseState('connected');
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
@@ -527,55 +588,57 @@ export const App: React.FC = () => {
             coordinator.recordObservedEventRevision(revision);
             api
               .getNetwork()
-              .then((newSnap) => {
-                if (!isCancelled) applySnapshot(newSnap, changed_files);
-              })
+              .then((newSnap) => applySnapshot(newSnap, changed_files))
               .catch(() => {
-                if (!isCancelled) scheduleSnapshotReconciliation();
+                scheduleSnapshotReconciliation();
               });
           }
         } else if (event.type === 'git.updated') {
+          api.getGitStatus().then(setGitStatus).catch(() => { });
+          if (activeTabRef.current === 'temporal') {
+            loadCommitsRef.current(temporalFilterPathRef.current);
+          }
+        } else if (event.type === 'reconcile.required') {
           api.getGitStatus().then((gs) => {
             if (!isCancelled) setGitStatus(gs);
           }).catch(() => { });
           if (activeTabRef.current === 'temporal') {
             loadCommitsRef.current(temporalFilterPathRef.current);
           }
-        } else if (event.type === 'reconcile.required') {
           api.getStatus().then((st) => {
-            if (isCancelled) return;
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
-                .then((newSnap) => {
-                  if (!isCancelled) applySnapshot(newSnap, ['*']);
-                })
+                .then((newSnap) => applySnapshot(newSnap, ['*']))
                 .catch(() => {
-                  if (!isCancelled) scheduleSnapshotReconciliation();
+                  scheduleSnapshotReconciliation();
                 });
             }
           }).catch(() => { });
         }
       },
       (status) => {
-        if (isCancelled) return;
         setSseState(status);
         if (status === 'connected') {
-          // Re-fetch status on reconnect to reconcile any missed updates
+          // Re-fetch git status & history on reconnect to reconcile missed Git updates (Defect H)
+          api.getGitStatus().then((gs) => {
+            if (!isCancelled) setGitStatus(gs);
+          }).catch(() => { });
+          if (activeTabRef.current === 'temporal') {
+            loadCommitsRef.current(temporalFilterPathRef.current);
+          }
+          // Re-fetch status on reconnect to reconcile any missed network updates
           api.getStatus().then((st) => {
-            if (isCancelled) return;
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
-                .then((newSnap) => {
-                  if (!isCancelled) applySnapshot(newSnap, ['*']);
-                })
+                .then((newSnap) => applySnapshot(newSnap, ['*']))
                 .catch(() => {
-                  if (!isCancelled) scheduleSnapshotReconciliation();
+                  scheduleSnapshotReconciliation();
                 });
             }
           }).catch(() => { });
@@ -584,8 +647,6 @@ export const App: React.FC = () => {
     );
 
     return () => {
-      isCancelled = true;
-      applySnapshotRef.current = null;
       unsubscribe();
     };
   }, [sessionInitialized, error, coordinator, scheduleSnapshotReconciliation, showLiveNotice]);
@@ -770,6 +831,8 @@ export const App: React.FC = () => {
     setActiveTab('network');
     setSelectedCommit(null);
     setSelectedNode(node);
+    setFocusNodeId(node.id);
+    setMissingFocusPath(null);
     setSelectedEdge(null);
     setRevealRequest({
       nodeId: node.id,
@@ -1106,21 +1169,42 @@ export const App: React.FC = () => {
               </div>
             ) : commits.length === 0 ? (
               <div className="empty-overlay">
-                <Clock size={36} color="#64748b" />
-                <h3>No Git commit history available</h3>
-                <p>
-                  {temporalFilterPath
-                    ? `No commits found touching "${temporalFilterPath}".`
-                    : 'The target directory is not a Git repository or has 0 commits.'}
-                </p>
-                {temporalFilterPath && (
-                  <button className="primary-btn" onClick={() => setTemporalFilterPath(null)}>
-                    Clear File Filter
-                  </button>
+                {temporalError && gitStatus?.is_git_repo !== false && !temporalError.toLowerCase().includes('not a git repository') ? (
+                  <>
+                    <AlertCircle size={36} color="#f59e0b" />
+                    <h3>Failed to load Git history</h3>
+                    <p>{temporalError}</p>
+                    <button className="primary-btn" onClick={() => loadCommits(temporalFilterPath)}>
+                      Retry Loading History
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Clock size={36} color="#64748b" />
+                    <h3>No Git commit history available</h3>
+                    <p>
+                      {temporalFilterPath
+                        ? `No commits found touching "${temporalFilterPath}".`
+                        : 'The target directory is not a Git repository or has 0 commits.'}
+                    </p>
+                    {temporalFilterPath && (
+                      <button className="primary-btn" onClick={() => setTemporalFilterPath(null)}>
+                        Clear File Filter
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             ) : (
               <>
+                {temporalError && (
+                  <div className="temporal-error-banner" role="alert">
+                    <span>{temporalError}</span>
+                    <button className="inline-retry-btn" onClick={() => loadCommits(temporalFilterPath)}>
+                      Retry
+                    </button>
+                  </div>
+                )}
                 <TemporalCanvas
                   commits={commits}
                   selectedCommitHash={selectedCommit?.hash || null}
@@ -1131,13 +1215,14 @@ export const App: React.FC = () => {
                   theme={theme}
                 />
 
-                {/* Floating Load More Commits Button */}
+                {/* Reserved Bottom Pagination Bar */}
                 {hasMoreCommits && (
-                  <div className="pagination-float-bar">
+                  <div className="temporal-pagination-bar" role="region" aria-label="Commit pagination">
                     <button
                       className="pagination-btn"
                       disabled={isLoadingMore}
                       onClick={handleLoadMoreCommits}
+                      aria-label="Load older commits"
                     >
                       {isLoadingMore ? (
                         <>

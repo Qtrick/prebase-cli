@@ -16,7 +16,7 @@ npm run build
 # 2. Build Rust release binary
 echo "--> Compiling Rust workspace in release mode..."
 cd ..
-cargo build --release --bin prebase
+cargo build --release --locked --bin prebase
 
 echo "==> Build successful! Executable is located at: target/release/prebase"
 

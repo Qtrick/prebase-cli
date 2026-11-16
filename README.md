@@ -37,8 +37,8 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 - **Intuitive Camera Navigation**: Shift-drag or middle-click pans; wheel or trackpad delivers smooth, continuous cursor-anchored zoom.
 - **Decoupled Selection & Inspection**: Selecting a node or clicking search results updates selection, highlights incident relationships, and inspects metadata with 0ms camera jump.
 - **Visibility-Aware Reveal**: Explicit "Reveal in 3D" action in the Inspector smoothly centers offscreen nodes while strictly preserving camera orientation.
-- **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, and `.tsx`.
-- **Module Resolution**: Resolves relative paths, extensionless imports, directory indexes (`index.ts`), and `tsconfig.json` path mappings / baseUrl aliases.
+- **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts`.
+- **Module Resolution**: Resolves relative paths, extensionless imports, directory indexes (`index.ts`, `index.tsx`, `index.js`, `index.jsx`, `index.mts`, `index.cts`, `index.mjs`, `index.cjs`), and `tsconfig.json` path mappings / baseUrl aliases.
 - **Organic 3D Visual Layout**: Bounded, deterministic 3D force-directed layout highlighting entry points, hubs, and isolated components.
 - **Details Inspector**: Inspect direct dependencies, dependents, line-and-column import evidence, source code previews, and switch to 2D relationship explorer.
 - **Accessible & Motion-Aware**: Full keyboard navigation (Arrow keys rotate/pan in 3D and navigate cards in 2D, `+`/`-`/`0` zoom, `f` fit, `r` reset, `Escape` clear) and respecting `prefers-reduced-motion`.
@@ -58,10 +58,11 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 
 ### 4. Live Filesystem Watching
 - **Rust `notify` Watcher**: Automatically detects file additions, modifications, and deletions.
-- **Noise Rejection**: Excludes `.git/objects`, `node_modules`, `dist`, `target`, and temporary files, while listening to `.git/HEAD` and `.git/refs/` for branch switches and commits.
+- **Noise Rejection**: Excludes `.git/objects`, `node_modules`, `dist`, `target`, and temporary files, while listening to `.git/HEAD`, `.git/refs/`, `.git/packed-refs`, and `.git/index` for branch switches, staging, and commits.
+- **Dedicated Worker Offloading**: Offloads Git status queries (`git status`) to dedicated blocking worker threads (`tokio::task::spawn_blocking`), preventing synchronous subprocess execution from blocking the asynchronous event loop.
 - **Buffer Overflow Protection**: Falls back safely to full reanalysis when filesystem event queues overflow.
 - **Atomic State Publication**: Swaps graph snapshots and indexes under a single lock with strictly monotonic revisions, eliminating state tearing and race conditions.
-- **Server-Sent Events (SSE)**: Streams updates to the browser without page reloads, with automatic reconnection reconciliation.
+- **Server-Sent Events (SSE)**: Streams updates to the browser without page reloads, with automatic reconnection reconciliation and generation tracking.
 
 ---
 
@@ -205,8 +206,10 @@ PreBase is engineered with strict local security boundaries:
 - **Exact Host Port Validation**: Header must match `127.0.0.1:<port>` or `localhost:<port>`. DNS rebinding attacks from arbitrary hosts are blocked with `400 Bad Request`.
 - **Exact Origin Validation**: Cross-origin requests from external origins are rejected with `403 Forbidden`.
 - **Single-Use Bootstrap Authentication**: Browser launch generates a cryptographically random single-use bootstrap token exchanged via `POST /api/v1/auth/session` for a secure session cookie, immediately stripped from the URL bar (`history.replaceState`).
+- **Non-blocking Safe File Reader (`O_NONBLOCK`)**: Open system calls for source file inspection, TypeScript configuration (`tsconfig.json`), and AST analysis explicitly specify non-blocking mode on Unix platforms (`O_NONBLOCK`), preventing indefinite process hangs or denial-of-service if a path targets a FIFO/named pipe, socket, or device node.
+- **TOCTOU Symlink Race Elimination & Regular File Verification**: After opening, descriptors verify `metadata.file_type().is_file()` directly on the active file handle. On Unix platforms, the physical kernel path is resolved from the open descriptor (`F_GETPATH` on macOS, `/proc/self/fd` on Linux) to confirm that the opened file strictly resides within the target repository bounds, mitigating Time-Of-Check to Time-Of-Use (TOCTOU) symlink substitution attacks.
 - **Path Traversal & Scope Restrictions**: File access is canonicalized against repository root, rejects `..`, and restricts access to files that exist in the indexed dependency graph snapshot.
-- **Bounded Resource Limits & Overflow Protection**: Git stdout is concurrently drained and immediately terminated if output exceeds 10MB; stderr is continuously drained up to 64KB, eliminating OS pipe buffer deadlocks. Source file reads are capped at 500KB.
+- **Bounded Resource Limits & Overflow Protection**: Git stdout is concurrently drained and immediately terminated if output exceeds 10MB; stderr is continuously drained up to 64KB, eliminating OS pipe buffer deadlocks. Source file AST analysis reads are capped at 2MB, `tsconfig.json` reads at 1MB, and HTTP source viewer reads at 500KB.
 - **Clean Lifecycle Termination**: Responds to Unix `SIGTERM` and `SIGINT`, cleanly terminating filesystem watcher threads and immediately releasing the loopback TCP port without hanging or leaving orphaned child processes.
 - **Strict Offline CSP**: Content-Security-Policy blocks all remote fonts, CDNs, external scripts, and external connections (`default-src 'self' 'unsafe-inline' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none';`).
 
@@ -241,7 +244,7 @@ PreBase is engineered with strict local security boundaries:
 
 ## Known Limitations
 
-- **Language Scope**: The initial MVP focuses specifically on JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`). Support for Python, Go, and Rust is scheduled for post-MVP.
+- **Language Scope**: The initial MVP focuses specifically on JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts`). Support for Python, Go, and Rust is scheduled for post-MVP.
 - **Subprocess Timeout**: Massive repositories with hundreds of thousands of commits may encounter the 10-second subprocess limit on initial root discovery if unindexed.
 - **Submodules**: Git submodules are treated as directory boundaries rather than recursively unpacked repositories.
 

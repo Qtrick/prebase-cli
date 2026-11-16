@@ -16,6 +16,7 @@ describe('Transport Session Authentication & Isolation (initSession)', () => {
         hash: '',
       },
       history: {
+        state: {},
         replaceState: replaceStateMock,
       },
     };
@@ -26,16 +27,48 @@ describe('Transport Session Authentication & Isolation (initSession)', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns success: true when no bootstrap token exists in URL', async () => {
+  it('returns success: true when valid ambient cookie restores session without bootstrap token', async () => {
     (globalThis.window as { location: { search: string } }).location.search = '';
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ authenticated: true }),
+    }) as unknown as typeof fetch;
+
     const res = await initSession();
     expect(res.success).toBe(true);
     expect(res.hadBootstrapToken).toBe(false);
+    expect(replaceStateMock).not.toHaveBeenCalled();
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/v1/auth/session', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }));
+  });
+
+  it('reports isAuthError: true when no bootstrap token exists and ambient session is invalid or missing', async () => {
+    (globalThis.window as { location: { search: string } }).location.search = '';
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => 'Authentication required',
+    }) as unknown as typeof fetch;
+
+    const res = await initSession();
+    expect(res.success).toBe(false);
+    expect(res.hadBootstrapToken).toBe(false);
+    expect(res.isAuthError).toBe(true);
+    expect(res.error).toContain('Authentication required');
     expect(replaceStateMock).not.toHaveBeenCalled();
   });
 
   it('purges legacy token query parameter from URL without storing', async () => {
     (globalThis.window as { location: { search: string } }).location.search = '?token=legacy_token_123';
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ authenticated: true }),
+    }) as unknown as typeof fetch;
+
     const res = await initSession();
     expect(res.success).toBe(true);
     expect(res.hadBootstrapToken).toBe(false);

@@ -251,6 +251,15 @@ sanitize_log "{log_path}"
 
 def test_graph_assertion_mismatch_failure():
     log("Verifying graph assertion mismatch aborts with non-zero exit code...")
+    real_bin = os.path.join(ROOT_DIR, "target", "release", "prebase")
+    if not os.path.exists(real_bin):
+        fail_msg(
+            f"Release binary prerequisite missing at {real_bin}. "
+            "Please compile the release binary ('cargo build --release --locked --bin prebase') "
+            "before running benchmark robustness tests."
+        )
+        return False
+
     # Inject an impossible assertion expectation
     with open(BENCHMARK_SH, "r") as f:
         content = f.read()

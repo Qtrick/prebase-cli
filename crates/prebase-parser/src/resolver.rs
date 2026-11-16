@@ -138,7 +138,7 @@ impl ImportResolver {
             format!("{trimmed}/")
         };
 
-        for ext in &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cjs", ".mjs"] {
+        for ext in &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"] {
             let index_candidate = format!("{index_prefix}index{ext}");
             if self.known_files.contains(&index_candidate) {
                 return Some(index_candidate);

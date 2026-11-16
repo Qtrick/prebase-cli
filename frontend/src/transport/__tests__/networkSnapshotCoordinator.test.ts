@@ -336,4 +336,130 @@ describe('NetworkSnapshotCoordinator Failure Recovery & Monotonicity', () => {
       expect(coordinator.shouldApplySnapshot(2)).toBe(false);
     });
   });
+
+  describe('Defect A: Obsolete requests do not mutate reset coordinator state', () => {
+    it('prevents an in-flight request from an old generation from corrupting a reset coordinator', async () => {
+      let rejectOldFetch!: (err: Error) => void;
+      const oldPromise = new Promise<GraphSnapshot>((_, reject) => {
+        rejectOldFetch = reject;
+      });
+
+      let fetchCall = 0;
+      const mockFetch = vi.fn().mockImplementation(() => {
+        fetchCall++;
+        if (fetchCall === 1) return oldPromise;
+        return Promise.resolve(makeSnap(2));
+      });
+
+      const coordinator = createNetworkSnapshotCoordinator(mockFetch);
+
+      // Generation 1: observes rev 8, fetch begins
+      coordinator.recordObservedEventRevision(8);
+      const inflight1 = coordinator.fetchSnapshot();
+      inflight1.catch(() => {}); // catch unhandled rejection
+
+      // Reset coordinator (e.g. unmount or re-initialization)
+      coordinator.reset();
+      expect(coordinator.getLatestAppliedRevision()).toBe(-1);
+      expect(coordinator.getHighestObservedRevision()).toBe(-1);
+
+      // Generation 2: starts fresh, observes rev 2
+      coordinator.recordObservedEventRevision(2);
+      expect(coordinator.getHighestObservedRevision()).toBe(2);
+
+      // Old generation 1 fetch now rejects with an error
+      rejectOldFetch(new Error('Network 503 from old generation'));
+      await expect(inflight1).rejects.toThrow('Network 503 from old generation');
+
+      // The old failure must NOT have assigned failedRevision = 2 in the new generation!
+      // In particular, duplicate revision 2 event should NOT be granted false retry if revision 2 wasn't fetched yet.
+      // And when generation 2 fetches revision 2:
+      const snap2 = await coordinator.fetchSnapshot();
+      expect(snap2.revision).toBe(2);
+      coordinator.recordAppliedRevision(2);
+      expect(coordinator.getLatestAppliedRevision()).toBe(2);
+      expect(coordinator.hasPendingNewerRevision()).toBe(false);
+    });
+
+    it('prevents late success of an old generation request from clearing newer failure tracking', async () => {
+      let resolveOldFetch!: (snap: GraphSnapshot) => void;
+      const oldPromise = new Promise<GraphSnapshot>((resolve) => {
+        resolveOldFetch = resolve;
+      });
+
+      let fetchCall = 0;
+      const mockFetch = vi.fn().mockImplementation(() => {
+        fetchCall++;
+        if (fetchCall === 1) return oldPromise;
+        return Promise.reject(new Error('Gen 2 fetch failed'));
+      });
+
+      const coordinator = createNetworkSnapshotCoordinator(mockFetch);
+      const inflight1 = coordinator.fetchSnapshot();
+
+      // Reset
+      coordinator.reset();
+
+      // Generation 2 observes revision 3 and fails
+      coordinator.recordObservedEventRevision(3);
+      await expect(coordinator.fetchSnapshot()).rejects.toThrow('Gen 2 fetch failed');
+      expect(coordinator.shouldProcessSseEvent(3)).toBe(true); // retry allowed
+
+      // Old generation 1 resolves successfully
+      resolveOldFetch(makeSnap(1));
+      await inflight1;
+
+      // Old success must NOT clear Generation 2's failedRevision!
+      expect(coordinator.shouldProcessSseEvent(3)).toBe(true);
+    });
+  });
+
+  describe('Defect B: Stale successful responses do not suppress retry eligibility', () => {
+    it('preserves retry eligibility when a fetch returns an older revision than observed', async () => {
+      let fetchCall = 0;
+      const mockFetch = vi.fn().mockImplementation(async () => {
+        fetchCall++;
+        if (fetchCall === 1) {
+          // Server returned stale rev 1 even though rev 3 was announced
+          return makeSnap(1);
+        }
+        return makeSnap(3);
+      });
+
+      const coordinator = createNetworkSnapshotCoordinator(mockFetch);
+
+      // Latest applied is 1
+      coordinator.recordAppliedRevision(1);
+      expect(coordinator.getLatestAppliedRevision()).toBe(1);
+
+      // Revision 3 is announced
+      expect(coordinator.shouldProcessSseEvent(3)).toBe(true);
+      coordinator.recordObservedEventRevision(3);
+      expect(coordinator.getHighestObservedRevision()).toBe(3);
+
+      // Fetch executes, but HTTP 200 returns rev 1 (stale snapshot)
+      const snap1 = await coordinator.fetchSnapshot();
+      expect(snap1.revision).toBe(1);
+
+      // Stale rev 1 is NOT applied (not > latestAppliedRevision)
+      expect(coordinator.shouldApplySnapshot(snap1.revision)).toBe(false);
+
+      // Crucial assertion: hasPendingNewerRevision() remains true!
+      expect(coordinator.hasPendingNewerRevision()).toBe(true);
+
+      // Crucial Defect B assertion: shouldProcessSseEvent(3) MUST return true!
+      // In the broken implementation, failedRevision was cleared to -1 by snap1,
+      // so shouldProcessSseEvent(3) returned false and stranded revision 3 forever.
+      expect(coordinator.shouldProcessSseEvent(3)).toBe(true);
+
+      // Next fetch returns revision 3
+      const snap3 = await coordinator.fetchSnapshot();
+      expect(snap3.revision).toBe(3);
+      expect(coordinator.shouldApplySnapshot(3)).toBe(true);
+      coordinator.recordAppliedRevision(3);
+      expect(coordinator.getLatestAppliedRevision()).toBe(3);
+      expect(coordinator.hasPendingNewerRevision()).toBe(false);
+      expect(coordinator.shouldProcessSseEvent(3)).toBe(false);
+    });
+  });
 });

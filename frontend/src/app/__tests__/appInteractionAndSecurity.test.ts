@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseInitialUrlParams,
   resolveInitialFocusNode,
@@ -6,7 +6,9 @@ import {
   hasModifierCombination,
 } from '../App';
 import { getNodeRelationshipSentence } from '../../inspector/Inspector';
-import { FileNode } from '../../types/graph';
+import { FileNode, GraphSnapshot } from '../../types/graph';
+import { createNetworkSnapshotCoordinator } from '../../transport/networkSnapshotCoordinator';
+import { initSession } from '../../transport/api';
 
 const makeNode = (id: string, relative_path: string, filename?: string): FileNode => ({
   id,
@@ -208,39 +210,89 @@ describe('App interaction & security unit tests', () => {
   });
 
   describe('Trailing revision SSE coalescing & race protection', () => {
-    it('detects when an in-flight network response resolved an older revision than announced', () => {
-      let latestAppliedRevision = 1;
-      let highestObservedRevision = 1;
+    it('detects when an in-flight network response resolved an older revision than announced', async () => {
+      let resolveFetch!: (snap: GraphSnapshot) => void;
+      const fetchPromise = new Promise<GraphSnapshot>((res) => {
+        resolveFetch = res;
+      });
+      const mockFetch = vi.fn().mockReturnValue(fetchPromise);
+      const coordinator = createNetworkSnapshotCoordinator(mockFetch);
 
-      // Event arrives for revision 2
-      const eventRev2 = 2;
-      if (eventRev2 > highestObservedRevision) highestObservedRevision = eventRev2;
+      // Trigger initial in-flight fetch
+      const inFlightFetch = coordinator.fetchSnapshot();
 
-      // In-flight fetch was initiated...
-      // While in flight, rapid event arrives for revision 3
-      const eventRev3 = 3;
-      if (eventRev3 > highestObservedRevision) highestObservedRevision = eventRev3;
+      // Revision 2 SSE observed
+      coordinator.recordObservedEventRevision(2);
 
-      // First fetch returns revision 2
-      const responseSnap = { revision: 2 };
-      let followUpFetchTriggered = false;
+      // Revision 3 SSE observed while fetch is in-flight
+      coordinator.recordObservedEventRevision(3);
 
-      if (responseSnap.revision > latestAppliedRevision) {
-        latestAppliedRevision = responseSnap.revision;
-      }
-      if (highestObservedRevision > latestAppliedRevision) {
-        followUpFetchTriggered = true;
-      }
+      // In-flight network response resolves revision 2
+      const snapRev2: GraphSnapshot = {
+        schema_version: '1.0.0',
+        repository_id: 'test-repo',
+        revision: 2,
+        nodes: [],
+        edges: [],
+        coverage: {
+          total_discovered: 0,
+          total_analyzed: 0,
+          total_excluded: 0,
+          total_issues: 0,
+          is_complete: true,
+        },
+        issues: [],
+      };
+      resolveFetch(snapRev2);
+      const resolvedSnap = await inFlightFetch;
 
-      // Proves that follow-up fetch is triggered for revision 3, preventing stale UI state
-      expect(latestAppliedRevision).toBe(2);
-      expect(highestObservedRevision).toBe(3);
-      expect(followUpFetchTriggered).toBe(true);
+      expect(coordinator.shouldApplySnapshot(resolvedSnap.revision)).toBe(true);
+      coordinator.recordAppliedRevision(resolvedSnap.revision);
+
+      // Verify that when an in-flight network response resolves revision 2, but revision 3 was observed
+      // via SSE during flight, hasPendingNewerRevision() returns true and getHighestObservedRevision() is 3
+      // while getLatestAppliedRevision() is 2
+      expect(coordinator.hasPendingNewerRevision()).toBe(true);
+      expect(coordinator.getHighestObservedRevision()).toBe(3);
+      expect(coordinator.getLatestAppliedRevision()).toBe(2);
+
+      // When revision 3 is subsequently applied via recordAppliedRevision(3), verify hasPendingNewerRevision() becomes false
+      coordinator.recordAppliedRevision(3);
+      expect(coordinator.getLatestAppliedRevision()).toBe(3);
+      expect(coordinator.hasPendingNewerRevision()).toBe(false);
     });
   });
 
   describe('Session initialization failure and SSE subscription gating', () => {
-    it('ensures session is not marked initialized and SSE is never subscribed upon auth or network failure', () => {
+    let prevWindow: unknown;
+    let prevFetch: unknown;
+    let replaceStateMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      prevWindow = (globalThis as unknown as { window?: unknown }).window;
+      prevFetch = globalThis.fetch;
+      replaceStateMock = vi.fn();
+
+      (globalThis as unknown as { window: unknown }).window = {
+        location: {
+          pathname: '/',
+          search: '',
+          hash: '',
+        },
+        history: {
+          state: {},
+          replaceState: replaceStateMock,
+        },
+      };
+    });
+
+    afterEach(() => {
+      (globalThis as unknown as { window: unknown }).window = prevWindow;
+      globalThis.fetch = prevFetch as typeof fetch;
+      vi.restoreAllMocks();
+    });
+
+    it('ensures session is not marked initialized and SSE is never subscribed upon auth or network failure', async () => {
       let sessionInitialized = false;
       let errorState: string | null = null;
       let sseSubscribed = false;
@@ -258,31 +310,93 @@ describe('App interaction & security unit tests', () => {
         sseSubscribed = true;
       };
 
-      // Test 1: HTTP 401 auth failure prevents session init and blocks SSE
-      handleSessionInit({ success: false, isAuthError: true, error: 'Authentication failed (401)' });
+      // Test 1: HTTP 401 response returns { success: false, isAuthError: true }
+      (globalThis.window as { location: { search: string } }).location.search = '?bootstrap=bad_token';
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => 'Invalid or expired bootstrap token.',
+      }) as unknown as typeof fetch;
+
+      const auth401Res = await initSession();
+      expect(auth401Res.success).toBe(false);
+      expect(auth401Res.isAuthError).toBe(true);
+
+      handleSessionInit(auth401Res);
       syncSseSubscription();
 
       expect(sessionInitialized).toBe(false);
-      expect(errorState).toBe('Authentication failed (401)');
+      expect(errorState).toContain('401');
       expect(sseSubscribed).toBe(false);
 
-      // Test 2: Network connection failure prevents session init and blocks SSE
+      // Test 2: Network failure returns { success: false, isAuthError: false }
+      (globalThis.window as { location: { search: string } }).location.search = '?bootstrap=valid_token';
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Connection refused')) as unknown as typeof fetch;
+
+      const networkFailRes = await initSession();
+      expect(networkFailRes.success).toBe(false);
+      expect(networkFailRes.isAuthError).toBe(false);
+
       errorState = null;
-      handleSessionInit({ success: false, isAuthError: false, error: 'Network error' });
+      handleSessionInit(networkFailRes);
       syncSseSubscription();
 
       expect(sessionInitialized).toBe(false);
-      expect(errorState).toBe('Network error');
+      expect(errorState).toContain('Network failure');
       expect(sseSubscribed).toBe(false);
 
-      // Test 3: Successful init allows subscription
+      // Test 3: Successful ambient session (200 { authenticated: true }) returns { success: true }
+      (globalThis.window as { location: { search: string } }).location.search = '';
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ authenticated: true }),
+      }) as unknown as typeof fetch;
+
+      const successRes = await initSession();
+      expect(successRes.success).toBe(true);
+
       errorState = null;
-      handleSessionInit({ success: true });
+      handleSessionInit(successRes);
       syncSseSubscription();
 
       expect(sessionInitialized).toBe(true);
       expect(errorState).toBeNull();
       expect(sseSubscribed).toBe(true);
+    });
+
+    it('returns { success: false, isAuthError: true } on HTTP 401 response', async () => {
+      (globalThis.window as { location: { search: string } }).location.search = '?bootstrap=expired_token';
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => 'Invalid or expired bootstrap token.',
+      }) as unknown as typeof fetch;
+
+      const res = await initSession();
+      expect(res.success).toBe(false);
+      expect(res.isAuthError).toBe(true);
+    });
+
+    it('returns { success: false, isAuthError: false } on network failure', async () => {
+      (globalThis.window as { location: { search: string } }).location.search = '?bootstrap=valid_token';
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error')) as unknown as typeof fetch;
+
+      const res = await initSession();
+      expect(res.success).toBe(false);
+      expect(res.isAuthError).toBe(false);
+    });
+
+    it('returns { success: true } on successful ambient session (200 { authenticated: true })', async () => {
+      (globalThis.window as { location: { search: string } }).location.search = '';
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ authenticated: true }),
+      }) as unknown as typeof fetch;
+
+      const res = await initSession();
+      expect(res.success).toBe(true);
     });
   });
 });

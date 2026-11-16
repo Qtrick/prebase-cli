@@ -141,7 +141,11 @@ export const Inspector: React.FC<InspectorProps> = ({
       const currentToken = ++requestTokenRef.current;
       const abortController = new AbortController();
 
+      // Immediately clear prior file's inspection and source preview to eliminate stale rendering races
+      setInspection(null);
+      setSourcePreview(null);
       setLoading(true);
+
       api
         .inspectFile(selectedNode.id, abortController.signal)
         .then((res) => {
@@ -172,8 +176,10 @@ export const Inspector: React.FC<InspectorProps> = ({
         abortController.abort();
       };
     } else {
+      requestTokenRef.current++;
       setInspection(null);
       setSourcePreview(null);
+      setLoading(false);
     }
   }, [selectedNode]);
 

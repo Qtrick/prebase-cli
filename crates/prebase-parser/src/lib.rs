@@ -139,6 +139,31 @@ mod tests {
         let res3 = resolver.resolve("src/utils/math.ts", "../legacy");
         assert_eq!(res3, ResolvedTarget::Internal("src/legacy.js".into()));
 
+        // 4. Modern extension variants (.cts, .mts, .mjs, .cjs) directory index imports
+        let mut modern_known = HashSet::new();
+        modern_known.insert("src/cjs_mod/index.cts".to_string());
+        modern_known.insert("src/esm_mod/index.mts".to_string());
+        modern_known.insert("src/mjs_mod/index.mjs".to_string());
+        modern_known.insert("src/cjs2_mod/index.cjs".to_string());
+        let modern_resolver = ImportResolver::new(modern_known, None);
+
+        assert_eq!(
+            modern_resolver.resolve("src/index.ts", "./cjs_mod"),
+            ResolvedTarget::Internal("src/cjs_mod/index.cts".into())
+        );
+        assert_eq!(
+            modern_resolver.resolve("src/index.ts", "./esm_mod"),
+            ResolvedTarget::Internal("src/esm_mod/index.mts".into())
+        );
+        assert_eq!(
+            modern_resolver.resolve("src/index.ts", "./mjs_mod"),
+            ResolvedTarget::Internal("src/mjs_mod/index.mjs".into())
+        );
+        assert_eq!(
+            modern_resolver.resolve("src/index.ts", "./cjs2_mod"),
+            ResolvedTarget::Internal("src/cjs2_mod/index.cjs".into())
+        );
+
         // 4. External package
         let res4 = resolver.resolve("src/index.ts", "react");
         assert_eq!(res4, ResolvedTarget::External("react".into()));

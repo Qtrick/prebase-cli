@@ -100,12 +100,9 @@ pub fn start_repo_watcher(state: Arc<AppState>) -> Result<RepoWatcherHandle, not
                     }
                     debug!("Background repository reanalysis finished");
 
-                    // Drain git ref changes if any arrived while analyzing
-                    if git_ref_changed {
-                        git_ref_changed = false;
-                        debug!("Git ref change detected during reanalysis; notifying subscribers");
-                        state.notify_git_updated();
-                    }
+                    // Notify subscribers of git dirty-state / ref changes
+                    git_ref_changed = false;
+                    state.notify_git_updated();
 
                     // ponytail: Do not immediately spawn reanalysis with 0ms delay.
                     // Leaving is_analyzing=false allows the 200ms debounce sleep branch

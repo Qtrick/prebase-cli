@@ -58,7 +58,8 @@ pub struct FileHistoryQuery {
 
 #[derive(Deserialize)]
 pub struct AuthSessionRequest {
-    pub bootstrap_token: String,
+    #[serde(default)]
+    pub bootstrap_token: Option<String>,
     #[serde(default)]
     pub expose_token: bool,
 }
@@ -92,8 +93,16 @@ pub async fn handle_auth_session(
         }
     }
 
-    // 2. Validate and consume single-use bootstrap token
-    match state.exchange_bootstrap_token(&payload.bootstrap_token) {
+    // 2. Validate and consume single-use bootstrap token if provided
+    let raw_token = payload.bootstrap_token.as_deref().unwrap_or("").trim();
+    if raw_token.is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required: missing or expired session",
+        ));
+    }
+
+    match state.exchange_bootstrap_token(raw_token) {
         Some(token) => {
             let mut headers = HeaderMap::new();
             // Partitioned port-specific session cookie (RFC 6265 prevents cross-instance clobbering)
@@ -231,45 +240,7 @@ pub async fn handle_inspect_edge(
     }
 }
 
-/// Validates that a path is a safe relative path within the repository root.
-/// Specifically:
-/// - Rejects empty paths.
-/// - Rejects absolute paths (starting with `/` or Windows drive prefixes).
-/// - Rejects path traversal (`..` components).
-/// - Normalizes separators (`\` to `/`).
-/// - Permits legitimate filenames containing adjacent periods, e.g. `src/component..ts` or `src/version..legacy.ts`.
-pub fn is_safe_relative_path(path_str: &str) -> bool {
-    let trimmed_start = path_str.trim_start();
-    if path_str.trim().is_empty()
-        || trimmed_start.starts_with('/')
-        || trimmed_start.starts_with('\\')
-        || path_str.contains('\0')
-    {
-        return false;
-    }
-    // Check for Windows drive prefix uniformly across all operating systems (e.g. "C:", "d:/", etc.)
-    if trimmed_start.len() >= 2
-        && trimmed_start.as_bytes()[0].is_ascii_alphabetic()
-        && trimmed_start.as_bytes()[1] == b':'
-    {
-        return false;
-    }
-    // Normalize backslashes to forward slashes for cross-platform component parsing
-    let normalized = path_str.replace('\\', "/");
-    let path = std::path::Path::new(&normalized);
-    if path.is_absolute() {
-        return false;
-    }
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => return false,
-        }
-    }
-    true
-}
+pub use prebase_core::is_safe_relative_path;
 
 #[derive(Serialize)]
 pub struct SourceContentResponse {
@@ -282,7 +253,6 @@ pub async fn handle_get_source(
     Path(file_path): Path<String>,
 ) -> Result<Json<SourceContentResponse>, (StatusCode, &'static str)> {
     let clean_path = file_path.as_str();
-    // Filesystem security check: component-aware validation prevents path traversal!
     if !is_safe_relative_path(clean_path) {
         return Err((StatusCode::BAD_REQUEST, "Invalid path"));
     }
@@ -319,65 +289,36 @@ pub async fn handle_get_source(
         ));
     }
 
-    let target = state.root_path.join(clean_path);
-    let canonical = match target.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return Err((StatusCode::NOT_FOUND, "File not found")),
-    };
-
-    // Verify canonical path starts with canonical root path
-    let canonical_root = &state.canonical_root;
-
-    if !canonical.starts_with(canonical_root) {
-        warn!("Path traversal attempt blocked: {file_path}");
-        return Err((StatusCode::FORBIDDEN, "Path escapes repository root"));
-    }
-
-    // Verify resolved canonical target is not an excluded sensitive file (prevents internal symlink leaks)
-    let canonical_rel = match canonical.strip_prefix(canonical_root) {
-        Ok(p) => p.to_string_lossy().replace('\\', "/"),
-        Err(_) => return Err((StatusCode::FORBIDDEN, "Path escapes repository root")),
-    };
-    if RepositoryScanner::is_excluded_relative_path(&canonical_rel) {
-        warn!("Blocked access to excluded sensitive file via symlink: {canonical_rel}");
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Access to file is excluded for security",
-        ));
-    }
-
-    // Race-resistant handle validation and reading (eliminates TOCTOU metadata-to-read race)
-    use std::io::Read;
-    let file = match std::fs::File::open(&canonical) {
-        Ok(f) => f,
-        Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to open source file")),
-    };
-
-    let metadata = match file.metadata() {
-        Ok(m) => m,
-        Err(_) => return Err((StatusCode::NOT_FOUND, "Failed to read file metadata")),
-    };
-    if !metadata.is_file() {
-        return Err((StatusCode::BAD_REQUEST, "Target is not a regular file"));
-    }
-    if metadata.len() > 500 * 1024 {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Source file exceeds 500KB limit",
-        ));
-    }
-
-    let mut content = String::with_capacity(metadata.len() as usize);
-    match file.take(500 * 1024 + 1).read_to_string(&mut content) {
-        Ok(bytes_read) if bytes_read > 500 * 1024 => Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Source file exceeds 500KB limit",
-        )),
-        Ok(_) => Ok(Json(SourceContentResponse {
+    match prebase_core::safe_read_file_to_string(&state.root_path, clean_path, 500 * 1024) {
+        Ok(content) => Ok(Json(SourceContentResponse {
             path: file_path,
             content,
         })),
-        Err(_) => Err((
+        Err(prebase_core::SafeReadError::InvalidPath) => {
+            Err((StatusCode::BAD_REQUEST, "Invalid path"))
+        }
+        Err(prebase_core::SafeReadError::Forbidden(_)) => Err((
+            StatusCode::FORBIDDEN,
+            "Access to file is excluded for security",
+        )),
+        Err(prebase_core::SafeReadError::EscapesRoot(_)) => {
+            Err((StatusCode::FORBIDDEN, "Path escapes repository root"))
+        }
+        Err(prebase_core::SafeReadError::NotARegularFile(_)) => {
+            Err((StatusCode::BAD_REQUEST, "Target is not a regular file"))
+        }
+        Err(prebase_core::SafeReadError::ExceedsLimit { .. }) => Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Source file exceeds 500KB limit",
+        )),
+        Err(prebase_core::SafeReadError::InvalidUtf8) => Err((
+            StatusCode::BAD_REQUEST,
+            "File is binary or contains invalid UTF-8",
+        )),
+        Err(prebase_core::SafeReadError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, "File not found"))
+        }
+        Err(prebase_core::SafeReadError::Io(_)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to read source file",
         )),

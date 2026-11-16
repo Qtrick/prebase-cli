@@ -53,8 +53,13 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
 
   const requestTokenRef = useRef(0);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = null;
+    }
     if (!selectedCommit) {
       setDetails(null);
       setError(null);
@@ -88,6 +93,10 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
 
     return () => {
       abortController.abort();
+      if (noticeTimerRef.current) {
+        clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = null;
+      }
     };
   }, [selectedCommit]);
 
@@ -107,8 +116,14 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
     if (match) {
       onNavigateToNetwork(match);
     } else {
+      if (noticeTimerRef.current) {
+        clearTimeout(noticeTimerRef.current);
+      }
       setNotice(`"${file.path}" is a historical file not present in the current working tree.`);
-      setTimeout(() => setNotice(null), 4000);
+      noticeTimerRef.current = setTimeout(() => {
+        setNotice(null);
+        noticeTimerRef.current = null;
+      }, 4000);
     }
   };
 

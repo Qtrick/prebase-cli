@@ -21,6 +21,10 @@ PACKAGE_PATH="${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
 echo "--> Archiving ${PACKAGE_NAME}..."
 tar -czf "$PACKAGE_PATH" -C "$TARGET_DIR" prebase
 
+# Verify archive integrity and non-emptiness
+tar -tzf "$PACKAGE_PATH" | grep -qx 'prebase'
+test -s "$PACKAGE_PATH"
+
 echo "--> Computing SHA256 checksum..."
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$DIST_DIR" && sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256")

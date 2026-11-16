@@ -1,11 +1,13 @@
 pub mod graph;
 pub mod index;
 pub mod model;
+pub mod safe_reader;
 pub mod scanner;
 
 pub use graph::CanonicalGraph;
 pub use index::{FileInspection, GraphIndex};
 pub use model::*;
+pub use safe_reader::{is_safe_relative_path, safe_read_file_to_string, SafeReadError};
 pub use scanner::{DiscoveredFile, RepositoryScanner, ScanError, ScanOutput, ScannerConfig};
 
 #[cfg(test)]

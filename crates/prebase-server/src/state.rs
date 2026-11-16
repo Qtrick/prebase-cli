@@ -319,15 +319,19 @@ impl AppState {
     }
 
     pub fn notify_git_updated(&self) {
-        let status = self.git_engine.get_status().ok();
-        let (head_commit, branch) = match status {
-            Some(st) => (st.head_commit, st.branch),
-            None => (None, None),
-        };
+        let git_engine = Arc::clone(&self.git_engine);
+        let sender = self.event_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let status = git_engine.get_status().ok();
+            let (head_commit, branch) = match status {
+                Some(st) => (st.head_commit, st.branch),
+                None => (None, None),
+            };
 
-        let _ = self.event_sender.send(ServerEvent::GitUpdated {
-            head_commit,
-            branch,
+            let _ = sender.send(ServerEvent::GitUpdated {
+                head_commit,
+                branch,
+            });
         });
     }
 

@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate Shell Script Syntax
         run: |
@@ -41,7 +41,7 @@ jobs:
           done
 
       - name: Setup Node.js
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
@@ -50,7 +50,6 @@ jobs:
         # `cargo clippy` resolve to exactly the same compiler locally and in CI.
         uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7 # 1.99.0
         with:
-          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Record toolchain versions
@@ -70,7 +69,7 @@ jobs:
           npm --prefix frontend run build
 
       - name: Cache Cargo Dependencies
-        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/bin/
@@ -92,7 +91,7 @@ jobs:
         run: cargo test --workspace --locked --verbose
 
       - name: Setup Python
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
 
@@ -140,7 +139,7 @@ jobs:
       # Upload browser failure artifacts (sanitized failure screenshots and diagnostics)
       - name: Upload browser failure artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-failure-artifacts-${{ matrix.os }}
           path: test-results/failure-artifacts/

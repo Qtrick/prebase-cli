@@ -372,23 +372,38 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     const curHoveredEdge = hoveredEdgeIdRef.current;
     const curKeyNode = keyboardNodeId;
 
-    // 1. Draw Column Headers
+    // 1. Draw Column Headers with distinct grounding badge
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     for (const header of curLayout.headers) {
-      ctx.font = '600 13px system-ui, -apple-system, sans-serif';
+      const headerW = Math.max(160, header.width * 0.72);
+      const headerH = header.omittedCount > 0 ? 52 : 36;
+      const headerLeft = header.x - headerW / 2;
+      const headerTop = header.y - 12;
+
+      ctx.save();
+      ctx.fillStyle = isLight ? 'rgba(241, 245, 249, 0.85)' : 'rgba(15, 23, 42, 0.75)';
+      ctx.strokeStyle = isLight ? 'rgba(203, 213, 225, 0.8)' : 'rgba(51, 65, 85, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(headerLeft, headerTop, headerW, headerH, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.font = '600 12px system-ui, -apple-system, sans-serif';
       ctx.fillStyle = palette.headerTitle;
       ctx.fillText(header.title.toUpperCase(), header.x, header.y);
 
-      ctx.font = '400 11px system-ui, -apple-system, sans-serif';
+      ctx.font = '500 11px system-ui, -apple-system, sans-serif';
       ctx.fillStyle = palette.headerSubtitle;
-      ctx.fillText(header.subtitle, header.x, header.y + 16);
+      ctx.fillText(header.subtitle, header.x, header.y + 15);
 
       if (header.omittedCount > 0) {
         ctx.font = '500 10px monospace';
         ctx.fillStyle = palette.headerOmitted;
-        ctx.fillText(`+${header.omittedCount} omitted`, header.x, header.y + 32);
+        ctx.fillText(`+${header.omittedCount} omitted`, header.x, header.y + 29);
       }
     }
 

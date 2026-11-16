@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -166,7 +165,11 @@ impl RepositoryAnalyzer {
                 continue;
             }
 
-            let content = match fs::read_to_string(&file.absolute_path) {
+            let content = match prebase_core::safe_read_file_to_string(
+                root,
+                &file.relative_path,
+                2 * 1024 * 1024,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Could not read file {}: {e}", file.relative_path);
