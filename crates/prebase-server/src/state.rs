@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +10,10 @@ use prebase_git::GitEngine;
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::info;
+
+pub const GIT_REFRESH_IDLE: u8 = 0;
+pub const GIT_REFRESH_RUNNING: u8 = 1;
+pub const GIT_REFRESH_RUNNING_PENDING: u8 = 2;
 
 #[derive(Clone)]
 pub struct PublishedNetworkState {
@@ -56,11 +60,10 @@ pub struct AppState {
     pub watcher_health: RwLock<WatcherHealth>,
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
-    pub is_shutting_down: AtomicBool,
+    pub is_shutting_down: Arc<AtomicBool>,
     pub is_analyzing: AtomicBool,
     pub process_output_paths: RwLock<HashSet<PathBuf>>,
-    pub git_refresh_active: Arc<AtomicBool>,
-    pub git_refresh_pending: Arc<AtomicBool>,
+    pub git_refresh_state: Arc<AtomicU8>,
 }
 
 impl AppState {
@@ -100,11 +103,10 @@ impl AppState {
             watcher_health: RwLock::new(initial_health),
             git_engine,
             event_sender,
-            is_shutting_down: AtomicBool::new(false),
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
             is_analyzing: AtomicBool::new(false),
             process_output_paths: RwLock::new(detect_process_output_paths(&canonical_root)),
-            git_refresh_active: Arc::new(AtomicBool::new(false)),
-            git_refresh_pending: Arc::new(AtomicBool::new(false)),
+            git_refresh_state: Arc::new(AtomicU8::new(GIT_REFRESH_IDLE)),
         }
     }
 
@@ -323,41 +325,120 @@ impl AppState {
     }
 
     pub fn notify_git_updated(&self) {
-        if self.is_shutting_down.load(Ordering::SeqCst) {
+        if self.is_shutting_down() {
             return;
         }
 
-        // Bound overlapping Git operations: coalesce burst events into a single pending pass
-        if self.git_refresh_active.swap(true, Ordering::SeqCst) {
-            self.git_refresh_pending.store(true, Ordering::SeqCst);
-            return;
+        // Bound overlapping Git operations: coalesce burst events into a single pending pass.
+        // 3-state atomic machine: IDLE = 0, RUNNING = 1, RUNNING_PENDING = 2.
+        let mut current = self.git_refresh_state.load(Ordering::SeqCst);
+        loop {
+            if self.is_shutting_down() {
+                return;
+            }
+            match current {
+                GIT_REFRESH_IDLE => {
+                    match self.git_refresh_state.compare_exchange_weak(
+                        GIT_REFRESH_IDLE,
+                        GIT_REFRESH_RUNNING,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break, // Successfully transitioned from IDLE to RUNNING; spawn worker
+                        Err(actual) => current = actual,
+                    }
+                }
+                GIT_REFRESH_RUNNING => {
+                    match self.git_refresh_state.compare_exchange_weak(
+                        GIT_REFRESH_RUNNING,
+                        GIT_REFRESH_RUNNING_PENDING,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => return, // Successfully transitioned to RUNNING_PENDING; active worker will rerun
+                        Err(actual) => current = actual,
+                    }
+                }
+                GIT_REFRESH_RUNNING_PENDING => {
+                    // Already marked pending, coalesce
+                    return;
+                }
+                _ => return,
+            }
         }
 
         let git_engine = Arc::clone(&self.git_engine);
         let sender = self.event_sender.clone();
-        let active = Arc::clone(&self.git_refresh_active);
-        let pending = Arc::clone(&self.git_refresh_pending);
+        let refresh_state = Arc::clone(&self.git_refresh_state);
+        let is_shutting_down = Arc::clone(&self.is_shutting_down);
 
-        tokio::task::spawn_blocking(move || loop {
-            pending.store(false, Ordering::SeqCst);
-
-            let status = git_engine.get_status().ok();
-            let (head_commit, branch) = match status {
-                Some(st) => (st.head_commit, st.branch),
-                None => (None, None),
-            };
-
-            let _ = sender.send(ServerEvent::GitUpdated {
-                head_commit,
-                branch,
-            });
-
-            if !pending.swap(false, Ordering::SeqCst) {
-                active.store(false, Ordering::SeqCst);
-                if pending.load(Ordering::SeqCst) && !active.swap(true, Ordering::SeqCst) {
-                    continue;
+        tokio::task::spawn_blocking(move || {
+            loop {
+                if is_shutting_down.load(Ordering::SeqCst) {
+                    refresh_state.store(GIT_REFRESH_IDLE, Ordering::SeqCst);
+                    break;
                 }
-                break;
+
+                let status = git_engine.get_status().ok();
+                let (head_commit, branch) = match status {
+                    Some(st) => (st.head_commit, st.branch),
+                    None => (None, None),
+                };
+
+                if is_shutting_down.load(Ordering::SeqCst) {
+                    refresh_state.store(GIT_REFRESH_IDLE, Ordering::SeqCst);
+                    break;
+                }
+
+                let _ = sender.send(ServerEvent::GitUpdated {
+                    head_commit,
+                    branch,
+                });
+
+                // Atomic state transition: check if another refresh was requested while running.
+                let should_continue = loop {
+                    if is_shutting_down.load(Ordering::SeqCst) {
+                        refresh_state.store(GIT_REFRESH_IDLE, Ordering::SeqCst);
+                        return;
+                    }
+                    let curr = refresh_state.load(Ordering::SeqCst);
+                    match curr {
+                        GIT_REFRESH_RUNNING => {
+                            if refresh_state
+                                .compare_exchange_weak(
+                                    GIT_REFRESH_RUNNING,
+                                    GIT_REFRESH_IDLE,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                break false;
+                            }
+                        }
+                        GIT_REFRESH_RUNNING_PENDING => {
+                            if refresh_state
+                                .compare_exchange_weak(
+                                    GIT_REFRESH_RUNNING_PENDING,
+                                    GIT_REFRESH_RUNNING,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                break true;
+                            }
+                        }
+                        _ => {
+                            refresh_state.store(GIT_REFRESH_IDLE, Ordering::SeqCst);
+                            break false;
+                        }
+                    }
+                };
+
+                if !should_continue {
+                    break;
+                }
             }
         });
     }

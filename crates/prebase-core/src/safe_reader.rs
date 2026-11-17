@@ -103,6 +103,40 @@ fn get_fd_path(_fd: std::os::unix::io::RawFd) -> Option<PathBuf> {
     None
 }
 
+#[cfg(unix)]
+pub fn validate_descriptor_identity(
+    file: &std::fs::File,
+    path: &Path,
+) -> Result<(), SafeReadError> {
+    use std::os::unix::fs::MetadataExt;
+    let file_meta = file.metadata().map_err(SafeReadError::Io)?;
+    let path_meta = std::fs::symlink_metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            SafeReadError::NotFound(path.to_string_lossy().to_string())
+        } else {
+            SafeReadError::Io(e)
+        }
+    })?;
+
+    if path_meta.file_type().is_symlink() {
+        return Err(SafeReadError::EscapesRoot(
+            path.to_string_lossy().to_string(),
+        ));
+    }
+
+    if file_meta.dev() != path_meta.dev() || file_meta.ino() != path_meta.ino() {
+        return Err(SafeReadError::ContainmentFailed(format!(
+            "Descriptor identity mismatch: descriptor (dev={}, ino={}) != disk (dev={}, ino={})",
+            file_meta.dev(),
+            file_meta.ino(),
+            path_meta.dev(),
+            path_meta.ino()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Safely opens and reads a repository-scoped file with strict TOCTOU race mitigation,
 /// bounded resource usage, non-blocking rejection of FIFOs/special files, and sensitive path enforcement.
 pub fn safe_read_file_to_string(
@@ -123,6 +157,19 @@ pub fn safe_read_file_to_string(
     let canonical_root = root
         .canonicalize()
         .map_err(|e| SafeReadError::NotFound(format!("Failed to resolve repository root: {e}")))?;
+
+    #[cfg(unix)]
+    let root_initial_meta = {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(&canonical_root)
+            .map_err(|e| SafeReadError::NotFound(format!("Repository root is invalid: {e}")))?;
+        if !m.is_dir() {
+            return Err(SafeReadError::NotFound(
+                "Repository root is not a directory".into(),
+            ));
+        }
+        (m.dev(), m.ino())
+    };
 
     let target = canonical_root.join(rel_path);
 
@@ -189,12 +236,17 @@ pub fn safe_read_file_to_string(
             )));
         }
 
-        // Verify root directory itself is intact and has not been replaced
+        // Verify root directory itself is intact and has not been replaced (device & inode pinning)
         let root_meta = std::fs::metadata(&canonical_root)
             .map_err(|e| SafeReadError::NotFound(format!("Repository root is invalid: {e}")))?;
         if !root_meta.is_dir() {
             return Err(SafeReadError::NotFound(
                 "Repository root is not a directory".into(),
+            ));
+        }
+        if root_meta.dev() != root_initial_meta.0 || root_meta.ino() != root_initial_meta.1 {
+            return Err(SafeReadError::ContainmentFailed(
+                "Repository root inode identity changed during read operation".into(),
             ));
         }
 
@@ -208,21 +260,7 @@ pub fn safe_read_file_to_string(
         }
 
         // Cross-check kernel descriptor (fstat) against filesystem entry (lstat)
-        let path_meta = std::fs::symlink_metadata(&fd_path).map_err(|e| {
-            SafeReadError::NotFound(format!(
-                "Failed to stat physical path {}: {e}",
-                fd_path.display()
-            ))
-        })?;
-
-        if path_meta.file_type().is_symlink() {
-            return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
-        }
-
-        if metadata.dev() != path_meta.dev() || metadata.ino() != path_meta.ino() {
-            warn!("Blocked TOCTOU race: descriptor inode does not match path inode for {rel_path}");
-            return Err(SafeReadError::EscapesRoot(rel_path.to_string()));
-        }
+        validate_descriptor_identity(&file, &fd_path)?;
 
         fd_path
     };

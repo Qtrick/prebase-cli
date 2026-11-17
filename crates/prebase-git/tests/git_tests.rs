@@ -174,3 +174,96 @@ fn test_defect_g2_record_separator_collision() {
         subject_with_sep, file_history.commits[0].summary
     );
 }
+
+/// Verification: Multi-Commit History Framing, Merges, Root Commits, and Pagination Continuity
+#[test]
+fn test_multi_commit_history_framing() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "Framing Tester"]);
+    run_git(repo_path, &["config", "user.email", "framing@prebase.dev"]);
+
+    // 1. Root commit (0 parents)
+    let f1 = repo_path.join("root.txt");
+    fs::write(&f1, "root commit content\n").unwrap();
+    run_git(repo_path, &["add", "root.txt"]);
+    run_git(repo_path, &["commit", "-m", "root commit"]);
+
+    // 2. Commit with special characters and emoji
+    let f2 = repo_path.join("file2.txt");
+    fs::write(&f2, "file 2\n").unwrap();
+    run_git(repo_path, &["add", "file2.txt"]);
+    run_git(
+        repo_path,
+        &["commit", "-m", "feat: \x1e control chars & 🚀 emoji"],
+    );
+
+    // 3. Commit with empty subject (using allow-empty-message)
+    let f3 = repo_path.join("file3.txt");
+    fs::write(&f3, "file 3\n").unwrap();
+    run_git(repo_path, &["add", "file3.txt"]);
+    run_git(repo_path, &["commit", "--allow-empty-message", "-m", ""]);
+
+    // 4. Create feature branch and add commit
+    run_git(repo_path, &["checkout", "-b", "feature"]);
+    let f_feat = repo_path.join("feature.txt");
+    fs::write(&f_feat, "feature work\n").unwrap();
+    run_git(repo_path, &["add", "feature.txt"]);
+    run_git(repo_path, &["commit", "-m", "feature commit"]);
+
+    // 5. Back on main, add another commit
+    run_git(repo_path, &["checkout", "main"]);
+    let f_main = repo_path.join("main.txt");
+    fs::write(&f_main, "main work\n").unwrap();
+    run_git(repo_path, &["add", "main.txt"]);
+    run_git(repo_path, &["commit", "-m", "main concurrent commit"]);
+
+    // 6. Merge feature into main (creates merge commit with 2 parents)
+    run_git(
+        repo_path,
+        &[
+            "merge",
+            "--no-ff",
+            "feature",
+            "-m",
+            "merge branch feature into main",
+        ],
+    );
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+
+    // Test get_history pagination
+    let page1 = engine.get_history(3, None).expect("page 1 failed");
+    assert_eq!(page1.commits.len(), 3);
+    assert!(page1.has_more);
+    assert!(page1.next_cursor.is_some());
+
+    // Verify merge commit has 2 parents
+    let merge_commit = &page1.commits[0];
+    assert_eq!(merge_commit.summary, "merge branch feature into main");
+    assert_eq!(
+        merge_commit.parent_hashes.len(),
+        2,
+        "Merge commit must have 2 parents"
+    );
+
+    // Fetch page 2 using cursor
+    let page2 = engine
+        .get_history(3, page1.next_cursor.as_deref())
+        .expect("page 2 failed");
+    assert_eq!(page2.commits.len(), 3);
+
+    // Verify root commit (last in chronological history) has 0 parents
+    let root_commit = page2.commits.last().unwrap();
+    assert_eq!(root_commit.summary, "root commit");
+    assert_eq!(
+        root_commit.parent_hashes.len(),
+        0,
+        "Root commit must have 0 parents"
+    );
+
+    // Total count check
+    assert_eq!(page1.total_commits, Some(6));
+}

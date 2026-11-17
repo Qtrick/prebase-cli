@@ -415,22 +415,50 @@ def main():
                 assert rel_debug["renderedNodeCount"] >= 3, f"Expected >= 3 rendered nodes, got {rel_debug['renderedNodeCount']}"
                 assert rel_debug["canvas"]["width"] > 0 and rel_debug["canvas"]["height"] > 0, "Canvas backing dimensions must be > 0"
 
-                # Verify canvas has non-background rendered pixels
-                has_pixels = page.evaluate("""() => {
+                # Comprehensive verification of 2D node coordinate geometry and focused node visibility
+                log("Verifying 2D node coordinate geometry and focused node visibility...")
+                nodes = rel_debug.get("nodes", [])
+                assert len(nodes) >= 3, f"Expected >= 3 layout nodes in debug state, got {len(nodes)}"
+
+                # Find focus node
+                focus_nodes = [n for n in nodes if n.get("role") == "focus"]
+                assert len(focus_nodes) == 1, f"Expected exactly 1 focus node in 2D layout, found {len(focus_nodes)}"
+                focus_node = focus_nodes[0]
+                assert "Card.tsx" in focus_node["id"], f"Focus node ID must match Card.tsx, got {focus_node['id']}"
+
+                # Verify focus node screen position is centered and visible within viewport
+                dim_w = rel_debug["dimensions"]["width"]
+                dim_h = rel_debug["dimensions"]["height"]
+                assert 0 < focus_node["screenX"] < dim_w, f"Focus node screenX ({focus_node['screenX']}) must be within canvas width ({dim_w})"
+                assert 0 < focus_node["screenY"] < dim_h, f"Focus node screenY ({focus_node['screenY']}) must be within canvas height ({dim_h})"
+
+                # Verify dependencies are positioned strictly to the left (x < focus.x)
+                deps = [n for n in nodes if n.get("role") in ("direct_dep", "second_dep")]
+                for d in deps:
+                    assert d["x"] < focus_node["x"], f"Dependency node {d['id']} x ({d['x']}) must be < focus node x ({focus_node['x']})"
+
+                # Verify dependents are positioned strictly to the right (x > focus.x)
+                dependents = [n for n in nodes if n.get("role") in ("direct_dependent", "second_dependent")]
+                for dep in dependents:
+                    assert dep["x"] > focus_node["x"], f"Dependent node {dep['id']} x ({dep['x']}) must be > focus node x ({focus_node['x']})"
+
+                # Physical canvas pixel sampling at focus node center confirms rendered card content
+                pixel_info = page.evaluate("""(focusCoords) => {
                     const canvas = document.querySelector('.relationship-container canvas');
-                    if (!canvas) return false;
+                    if (!canvas) return null;
                     const ctx = canvas.getContext('2d');
-                    if (!ctx) return false;
-                    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-                    for (let i = 0; i < data.length; i += 16) {
-                        if (data[i + 3] > 0) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-                assert has_pixels, "Canvas pixel buffer must contain non-background rendered content"
-                success("2D Relationship canvas rendering validated: debug state active, >= 3 nodes rendered, non-background pixel content verified.")
+                    if (!ctx) return null;
+                    const dpr = window.devicePixelRatio || 1;
+                    const px = Math.round(focusCoords.screenX * dpr);
+                    const py = Math.round(focusCoords.screenY * dpr);
+                    if (px < 0 || px >= canvas.width || py < 0 || py >= canvas.height) return null;
+                    const p = ctx.getImageData(px, py, 1, 1).data;
+                    return { r: p[0], g: p[1], b: p[2], a: p[3] };
+                }""", {"screenX": focus_node["screenX"], "screenY": focus_node["screenY"]})
+
+                assert pixel_info is not None, "Failed to sample pixel at focus node coordinates"
+                assert pixel_info["a"] >= 150, f"Pixel at focus node center must have opaque card fill (alpha >= 150), got {pixel_info}"
+                success(f"2D Relationship canvas rendering validated: {len(nodes)} nodes positioned with valid directional geometry, focus node ({focus_node['id']}) centered at ({focus_node['screenX']:.1f}, {focus_node['screenY']:.1f}), card pixel verified (rgba={pixel_info['r']},{pixel_info['g']},{pixel_info['b']},{pixel_info['a']}).")
 
                 # Test 1 Hop / 2 Hops in 2D HUD
                 log("Testing 2D HUD depth controls (1 Hop / 2 Hops)...")

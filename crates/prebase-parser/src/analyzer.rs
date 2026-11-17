@@ -154,7 +154,63 @@ impl RepositoryAnalyzer {
                 }
             }
         }
-        let resolver = ImportResolver::with_configs(known_files, configs);
+
+        // Discover workspace package.json manifests and index package names to entry files
+        let mut workspace_packages = std::collections::HashMap::new();
+        for file in &discovered_files {
+            if file.filename == "package.json" {
+                if let Ok(content) =
+                    prebase_core::safe_read_file_to_string(root, &file.relative_path, 256 * 1024)
+                {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(pkg_name) = v.get("name").and_then(|n| n.as_str()) {
+                            let pkg_dir = Path::new(&file.relative_path)
+                                .parent()
+                                .unwrap_or_else(|| Path::new(""));
+
+                            let mut entry_candidate: Option<String> = None;
+                            if let Some(main_val) = v.get("main").and_then(|m| m.as_str()) {
+                                let target = pkg_dir.join(main_val.trim_start_matches("./"));
+                                if let Some(norm) = ImportResolver::normalize_path(&target) {
+                                    entry_candidate = Some(norm);
+                                }
+                            } else if let Some(types_val) = v.get("types").and_then(|t| t.as_str())
+                            {
+                                let target = pkg_dir.join(types_val.trim_start_matches("./"));
+                                if let Some(norm) = ImportResolver::normalize_path(&target) {
+                                    entry_candidate = Some(norm);
+                                }
+                            }
+
+                            if entry_candidate.is_none() {
+                                for candidate in &[
+                                    "src/index.ts",
+                                    "src/index.tsx",
+                                    "src/index.js",
+                                    "index.ts",
+                                    "index.js",
+                                ] {
+                                    let target = pkg_dir.join(candidate);
+                                    if let Some(norm) = ImportResolver::normalize_path(&target) {
+                                        if known_files.contains(&norm) {
+                                            entry_candidate = Some(norm);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(entry) = entry_candidate {
+                                workspace_packages.insert(pkg_name.to_string(), entry);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let resolver =
+            ImportResolver::with_configs_and_packages(known_files, configs, workspace_packages);
         let mut parser = SourceParser::new();
 
         let analyzed_counter = AtomicUsize::new(0);
@@ -200,23 +256,34 @@ impl RepositoryAnalyzer {
                 }
             };
 
-            let parsed_imports = match parser.parse_file(&file.extension, &content) {
-                Ok(imps) => imps,
-                Err(e) => {
-                    warn!("Parser error in {}: {e}", file.relative_path);
-                    if let Some(node) = graph.get_node_mut(&file.relative_path) {
-                        node.analysis_status = NodeAnalysisStatus::Failed;
+            let (parsed_imports, has_syntax_errors) =
+                match parser.parse_file_with_diagnostics(&file.extension, &content) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        warn!("Parser error in {}: {e}", file.relative_path);
+                        if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                            node.analysis_status = NodeAnalysisStatus::Failed;
+                        }
+                        issues.push(AnalysisIssue {
+                            file_path: file.relative_path.clone(),
+                            issue_kind: "ParseError".to_string(),
+                            message: e,
+                            line: None,
+                            column: None,
+                        });
+                        continue;
                     }
-                    issues.push(AnalysisIssue {
-                        file_path: file.relative_path.clone(),
-                        issue_kind: "ParseError".to_string(),
-                        message: e,
-                        line: None,
-                        column: None,
-                    });
-                    continue;
-                }
-            };
+                };
+
+            if has_syntax_errors {
+                issues.push(AnalysisIssue {
+                    file_path: file.relative_path.clone(),
+                    issue_kind: "SyntaxWarning".to_string(),
+                    message: "Source file contains syntax errors or unparseable tokens; partial AST analyzed".to_string(),
+                    line: None,
+                    column: None,
+                });
+            }
 
             if let Some(node) = graph.get_node_mut(&file.relative_path) {
                 node.analysis_status = NodeAnalysisStatus::Analyzed;

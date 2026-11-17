@@ -6,7 +6,7 @@ pub mod tsconfig;
 pub use analyzer::{AnalysisResult, RepositoryAnalyzer};
 pub use ast::{ParsedImport, SourceParser};
 pub use resolver::{ImportResolver, ResolvedTarget};
-pub use tsconfig::TsConfig;
+pub use tsconfig::{clean_jsonc, TsConfig};
 
 #[cfg(test)]
 mod tests {

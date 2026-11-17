@@ -504,8 +504,12 @@ def main():
             page.screenshot(path=os.path.join(SCREENSHOT_DIR, "07_2d_relationships.png"))
             success("Saved 2D relationships screenshot -> docs/screenshots/07_2d_relationships.png")
 
-            # Confirm 2D canvas is active
+            # Confirm 2D canvas is active and layout geometry is rendered
             assert page.is_visible(".relationship-canvas"), "2D Relationship canvas must be visible"
+            rel_debug = page.evaluate("() => window.__prebaseRelationshipDebug || null")
+            if rel_debug and rel_debug.get("nodes"):
+                assert len(rel_debug["nodes"]) > 0, "2D relationship layout must contain rendered nodes"
+                log(f"2D Relationships layout active: {len(rel_debug['nodes'])} nodes rendered in debug state")
 
             # Click '3D Overview' mode button to return
             page.locator("button.mode-btn:has-text('3D Overview')").click()

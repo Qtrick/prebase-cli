@@ -249,7 +249,16 @@ def main():
                         assert "2D Relationships" in dom_output, "DOM missing '2D Relationships' button"
                         assert "relationship-container" in dom_output, "DOM missing .relationship-container"
                         assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
-                        success("Verified 2D Relationship Explorer DOM structure and mode switcher.")
+
+                        # Coordinate geometry and focus node verification
+                        rel_debug = page.evaluate("() => window.__prebaseRelationshipDebug || null")
+                        assert rel_debug is not None, "window.__prebaseRelationshipDebug must be active when 2D canvas renders"
+                        assert rel_debug.get("renderedNodeCount", 0) > 0, "2D relationship layout must have rendered nodes"
+                        nodes = rel_debug.get("nodes", [])
+                        focus_nodes = [n for n in nodes if n.get("role") == "focus"]
+                        assert len(focus_nodes) == 1, "Must contain exactly 1 focus node in 2D layout"
+                        assert "Card.tsx" in focus_nodes[0]["id"], f"Focus node must be Card.tsx, got {focus_nodes[0]['id']}"
+                        success("Verified 2D Relationship Explorer DOM structure, mode switcher, and node coordinate layout geometry.")
 
                         # Test 2: Missing focus file shows purposeful "File Not Found" state
                         log("Testing purposeful missing-file state in Headless Chrome...")

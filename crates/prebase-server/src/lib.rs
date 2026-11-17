@@ -1124,4 +1124,84 @@ mod tests {
         let resp_trav = app.clone().oneshot(req_trav).await.unwrap();
         assert_eq!(resp_trav.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn test_notify_git_updated_state_machine_and_shutdown() {
+        use crate::state::GIT_REFRESH_IDLE;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().canonicalize().unwrap();
+
+        let state = Arc::new(AppState::new(
+            repo_root.clone(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        // 1. Initial state is IDLE
+        assert_eq!(
+            state.git_refresh_state.load(Ordering::SeqCst),
+            GIT_REFRESH_IDLE
+        );
+
+        let mut event_rx = state.event_sender.subscribe();
+
+        // 2. Trigger git updated
+        state.notify_git_updated();
+
+        // Wait for GitUpdated event
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("should receive GitUpdated event")
+            .expect("channel recv ok");
+        assert!(matches!(evt, ServerEvent::GitUpdated { .. }));
+
+        // Eventually returns to IDLE
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            state.git_refresh_state.load(Ordering::SeqCst),
+            GIT_REFRESH_IDLE
+        );
+
+        // 3. Burst calls coalesce
+        state.notify_git_updated();
+        state.notify_git_updated();
+        state.notify_git_updated();
+
+        let evt_burst = tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("should receive at least one event from burst")
+            .expect("channel recv ok");
+        assert!(matches!(evt_burst, ServerEvent::GitUpdated { .. }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            state.git_refresh_state.load(Ordering::SeqCst),
+            GIT_REFRESH_IDLE
+        );
+
+        // Drain any remaining events from the burst passes
+        while event_rx.try_recv().is_ok() {}
+
+        // 4. Shutdown stops further refreshes
+        state.set_shutting_down();
+        state.notify_git_updated();
+        assert_eq!(
+            state.git_refresh_state.load(Ordering::SeqCst),
+            GIT_REFRESH_IDLE
+        );
+
+        // No new events should arrive
+        let shutdown_recv =
+            tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv()).await;
+        assert!(
+            shutdown_recv.is_err(),
+            "no events should be emitted during shutdown"
+        );
+    }
 }

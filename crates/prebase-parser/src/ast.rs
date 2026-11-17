@@ -51,6 +51,15 @@ impl SourceParser {
         extension: &str,
         source_code: &str,
     ) -> Result<Vec<ParsedImport>, String> {
+        self.parse_file_with_diagnostics(extension, source_code)
+            .map(|(imps, _)| imps)
+    }
+
+    pub fn parse_file_with_diagnostics(
+        &mut self,
+        extension: &str,
+        source_code: &str,
+    ) -> Result<(Vec<ParsedImport>, bool), String> {
         let tree = match extension {
             ".tsx" | ".jsx" => self
                 .tsx_parser
@@ -66,9 +75,10 @@ impl SourceParser {
                 .ok_or_else(|| "Tree-sitter failed to parse JS".to_string())?,
         };
 
+        let has_syntax_errors = tree.root_node().has_error();
         let mut imports = Vec::new();
         self.traverse_node(tree.root_node(), source_code.as_bytes(), &mut imports);
-        Ok(imports)
+        Ok((imports, has_syntax_errors))
     }
 
     fn traverse_node(&self, node: Node, source: &[u8], imports: &mut Vec<ParsedImport>) {

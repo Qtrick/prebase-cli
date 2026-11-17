@@ -11,6 +11,7 @@ pub struct CompilerOptions {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawTsConfig {
+    pub extends: Option<String>,
     #[serde(rename = "compilerOptions")]
     pub compiler_options: Option<CompilerOptions>,
 }
@@ -56,24 +57,133 @@ impl TsConfig {
     }
 
     pub fn load_from_file_in_repo(repo_root: &Path, rel_config_path: &str) -> Option<Self> {
-        let content =
-            match prebase_core::safe_read_file_to_string(repo_root, rel_config_path, 1024 * 1024) {
-                Ok(c) => c,
-                Err(e) => {
-                    if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
-                        warn!("Failed or rejected reading tsconfig at {rel_config_path}: {e}");
-                    }
-                    return None;
-                }
-            };
+        let mut visited = std::collections::HashSet::new();
+        Self::load_with_inheritance(repo_root, rel_config_path, &mut visited, 0)
+    }
 
-        let parent_dir = Path::new(rel_config_path)
+    fn load_with_inheritance(
+        repo_root: &Path,
+        rel_config_path: &str,
+        visited: &mut std::collections::HashSet<String>,
+        depth: usize,
+    ) -> Option<Self> {
+        if depth > 8 {
+            warn!("tsconfig extends recursion depth limit reached at {rel_config_path}");
+            return None;
+        }
+
+        let normalized_path =
+            crate::resolver::ImportResolver::normalize_path(Path::new(rel_config_path))?;
+        if !visited.insert(normalized_path.clone()) {
+            warn!("tsconfig extends circular dependency detected at {normalized_path}");
+            return None;
+        }
+
+        let content = match prebase_core::safe_read_file_to_string(
+            repo_root,
+            &normalized_path,
+            1024 * 1024,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
+                    warn!("Failed or rejected reading tsconfig at {normalized_path}: {e}");
+                }
+                return None;
+            }
+        };
+
+        let parent_dir = Path::new(&normalized_path)
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_string_lossy()
             .replace('\\', "/");
 
-        Self::parse_jsonc(&content, &parent_dir)
+        let clean = clean_jsonc(&content);
+        let raw: RawTsConfig = match serde_json::from_str(&clean) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to parse tsconfig at {normalized_path}: {e}");
+                return None;
+            }
+        };
+
+        let mut base_config = if let Some(extends_ref) = &raw.extends {
+            if extends_ref.starts_with('.') {
+                let p = Path::new(&parent_dir).join(extends_ref);
+                let candidate = crate::resolver::ImportResolver::normalize_path(&p);
+                if let Some(target) = candidate {
+                    let resolved = if prebase_core::is_safe_relative_path(&target)
+                        && repo_root.join(&target).is_file()
+                    {
+                        Some(target)
+                    } else {
+                        let with_json = format!("{target}.json");
+                        if prebase_core::is_safe_relative_path(&with_json)
+                            && repo_root.join(&with_json).is_file()
+                        {
+                            Some(with_json)
+                        } else {
+                            None
+                        }
+                    };
+                    resolved.and_then(|t| {
+                        Self::load_with_inheritance(repo_root, &t, visited, depth + 1)
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(extends_ref) = &raw.extends {
+            if extends_ref.starts_with('.') && base_config.is_none() {
+                warn!("Failed to resolve local tsconfig extends reference '{extends_ref}' at {normalized_path}");
+                return None;
+            }
+        }
+
+        let opts = raw.compiler_options.unwrap_or_default();
+        let mut child_paths = Vec::new();
+        if let Some(paths_map) = opts.paths {
+            for (pattern, val) in paths_map {
+                if let Some(arr) = val.as_array() {
+                    let targets: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    child_paths.push((pattern, targets));
+                }
+            }
+        }
+
+        let final_paths = if !child_paths.is_empty() {
+            let mut paths = child_paths;
+            paths.sort_by(|a, b| {
+                let spec_a = pattern_specificity(&a.0);
+                let spec_b = pattern_specificity(&b.0);
+                spec_b.cmp(&spec_a)
+            });
+            paths
+        } else if let Some(ref mut base) = base_config {
+            std::mem::take(&mut base.paths)
+        } else {
+            Vec::new()
+        };
+
+        let final_base_url = opts
+            .base_url
+            .or_else(|| base_config.and_then(|b| b.base_url));
+
+        Some(Self {
+            config_dir: parent_dir,
+            base_url: final_base_url,
+            paths: final_paths,
+        })
     }
 
     pub fn parse_jsonc(content: &str, config_dir: &str) -> Option<Self> {
@@ -131,6 +241,8 @@ pub fn pattern_specificity(pattern: &str) -> (usize, usize) {
 }
 
 pub fn clean_jsonc(input: &str) -> String {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+
     // Pass 1: Strip line comments (//) and block comments (/* */)
     let mut without_comments = String::with_capacity(input.len());
     let mut in_string = false;
@@ -148,6 +260,7 @@ pub fn clean_jsonc(input: &str) -> String {
             if c == '*' && chars.peek() == Some(&'/') {
                 chars.next();
                 in_block_comment = false;
+                without_comments.push(' ');
             }
         } else if in_string {
             without_comments.push(c);

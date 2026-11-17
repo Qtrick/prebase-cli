@@ -47,6 +47,16 @@ declare global {
       canvas: { width: number; height: number };
       renderedNodeCount: number;
       renderedEdgeCount: number;
+      nodes: Array<{
+        id: string;
+        role: string;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        screenX: number;
+        screenY: number;
+      }>;
     };
   }
 }
@@ -521,10 +531,10 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.fillStyle = isFocus
         ? palette.cardBgFocus
         : isSelected
-        ? palette.cardBgSelected
-        : isHovered
-        ? palette.cardBgHover
-        : palette.cardBgNormal;
+          ? palette.cardBgSelected
+          : isHovered
+            ? palette.cardBgHover
+            : palette.cardBgNormal;
       ctx.fill();
 
       // Card Border
@@ -532,10 +542,10 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.strokeStyle = isFocus
         ? palette.cardBorderFocus
         : isSelected
-        ? palette.cardBorderSelected
-        : isHovered
-        ? palette.cardBorderHover
-        : palette.cardBorderNormal;
+          ? palette.cardBorderSelected
+          : isHovered
+            ? palette.cardBorderHover
+            : palette.cardBorderNormal;
       ctx.stroke();
 
       // Keyboard navigation focus ring
@@ -570,8 +580,8 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.fillStyle = isFocus
         ? palette.textFocus
         : isSelected
-        ? palette.textSelected
-        : palette.textNormal;
+          ? palette.textSelected
+          : palette.textNormal;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
 
@@ -615,6 +625,20 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         canvas: { width: canvas.width, height: canvas.height },
         renderedNodeCount: curLayout.nodes.length,
         renderedEdgeCount: curLayout.edges.length,
+        nodes: curLayout.nodes.map((n) => {
+          const screenX = viewportRef.current.panX + n.x * viewportRef.current.zoom;
+          const screenY = viewportRef.current.panY + n.y * viewportRef.current.zoom;
+          return {
+            id: n.node.id,
+            role: n.role,
+            x: n.x,
+            y: n.y,
+            width: n.width,
+            height: n.height,
+            screenX,
+            screenY,
+          };
+        }),
       };
     }
 
@@ -1188,12 +1212,11 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
           {graphData.omission.isCapped && (
             <div
               className="hud-omission-badge"
-              title={`Showing ${layout.nodes.length} files (${
-                graphData.omission.omittedDirectDependents +
+              title={`Showing ${layout.nodes.length} files (${graphData.omission.omittedDirectDependents +
                 graphData.omission.omittedDirectDependencies +
                 graphData.omission.omittedSecondHopDependents +
                 graphData.omission.omittedSecondHopDependencies
-              } omitted). Showing ${layout.edges.length} edges (${graphData.omission.omittedEdges} omitted).`}
+                } omitted). Showing ${layout.edges.length} edges (${graphData.omission.omittedEdges} omitted).`}
             >
               <AlertCircle size={13} color="#f59e0b" />
               <span>

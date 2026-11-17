@@ -2,9 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT_DIR/target/release/prebase"
+BIN="${PREBASE_BIN:-$ROOT_DIR/target/release/prebase}"
 
 if [ ! -f "$BIN" ]; then
+    if [ -n "${PREBASE_BIN:-}" ]; then
+        echo "==> ERROR: Specified PREBASE_BIN not found: $BIN" >&2
+        exit 1
+    fi
     echo "==> Release binary not found. Building release binary first..."
     cargo build --release --bin prebase
 fi
@@ -20,11 +24,12 @@ sanitize_log() {
     local file="$1"
     if [ -f "$file" ]; then
         sed -E \
-            -e 's/bootstrap=[a-zA-Z0-9_%-]+/bootstrap=[REDACTED]/g' \
+            -e 's/bootstrap=[a-zA-Z0-9_.~%+-]+/bootstrap=[REDACTED]/g' \
+            -e 's/auth_token=[a-zA-Z0-9_.~%+-]+/auth_token=[REDACTED]/g' \
             -e 's/"?session_token"?[[:space:]]*:[[:space:]]*"[^"]+"/"session_token": "[REDACTED]"/g' \
-            -e 's/prebase_session(_[0-9]+)?=[a-zA-Z0-9_-]+/prebase_session\1=[REDACTED]/g' \
-            -e 's/([xX]-[pP]rebase-[sS]ession):[[:space:]]*[a-zA-Z0-9_-]+/\1: [REDACTED]/g' \
-            -e 's/([aA]uthorization):[[:space:]]*([bB]earer)[[:space:]]+[a-zA-Z0-9_-]+/\1: \2 [REDACTED]/g' \
+            -e 's/prebase_session(_[0-9]+)?=[a-zA-Z0-9_.~%+-]+/prebase_session\1=[REDACTED]/g' \
+            -e 's/([xX]-[pP]rebase-[sS]ession):[[:space:]]*[a-zA-Z0-9_.~%+-]+/\1: [REDACTED]/g' \
+            -e 's/([aA]uthorization):[[:space:]]*([bB]earer)[[:space:]]+[a-zA-Z0-9_.~%+-]+/\1: \2 [REDACTED]/g' \
             "$file"
     fi
 }
@@ -236,7 +241,11 @@ run_benchmark() {
     # 3. Poll log for bound port and bootstrap token
     local BOUND_PORT=""
     local BOOTSTRAP_TOKEN=""
-    for _ in $(seq 1 100); do
+    local MAX_POLL="${MAX_PORT_POLL:-100}"
+    if ! [[ "$MAX_POLL" =~ ^[0-9]+$ ]] || [ "$MAX_POLL" -lt 1 ]; then
+        MAX_POLL=100
+    fi
+    for _ in $(seq 1 "$MAX_POLL"); do
         if grep -q "bootstrap=" "$LOG_FILE" 2>/dev/null && grep -q "http://127.0.0.1:" "$LOG_FILE" 2>/dev/null; then
             BOUND_PORT=$(grep -o 'http://127.0.0.1:[0-9]*' "$LOG_FILE" | head -n 1 | cut -d: -f3)
             BOOTSTRAP_TOKEN=$(grep -o 'bootstrap=[^& ]*' "$LOG_FILE" | head -n 1 | cut -d= -f2)

@@ -7,6 +7,8 @@ pub mod scanner;
 pub use graph::CanonicalGraph;
 pub use index::{FileInspection, GraphIndex};
 pub use model::*;
+#[cfg(unix)]
+pub use safe_reader::validate_descriptor_identity;
 pub use safe_reader::{is_safe_relative_path, safe_read_file_to_string, SafeReadError};
 pub use scanner::{DiscoveredFile, RepositoryScanner, ScanError, ScanOutput, ScannerConfig};
 

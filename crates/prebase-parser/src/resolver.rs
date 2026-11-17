@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use prebase_core::model::ResolutionStatus;
@@ -27,11 +27,8 @@ impl ResolvedTarget {
 pub struct ImportResolver {
     known_files: HashSet<String>,
     configs: Vec<TsConfig>,
+    workspace_packages: HashMap<String, String>,
 }
-
-const EXTENSIONS: &[&str] = &[
-    "", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs",
-];
 
 impl ImportResolver {
     pub fn new(known_files: HashSet<String>, tsconfig: Option<TsConfig>) -> Self {
@@ -42,6 +39,7 @@ impl ImportResolver {
         Self {
             known_files,
             configs,
+            workspace_packages: HashMap::new(),
         }
     }
 
@@ -49,15 +47,25 @@ impl ImportResolver {
         Self {
             known_files,
             configs,
+            workspace_packages: HashMap::new(),
+        }
+    }
+
+    pub fn with_configs_and_packages(
+        known_files: HashSet<String>,
+        configs: Vec<TsConfig>,
+        workspace_packages: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            known_files,
+            configs,
+            workspace_packages,
         }
     }
 
     fn get_config_for_file(&self, from_file: &str) -> Option<&TsConfig> {
         if self.configs.is_empty() {
             return None;
-        }
-        if self.configs.len() == 1 {
-            return Some(&self.configs[0]);
         }
 
         // Find nearest config by walking directory hierarchy upwards
@@ -120,38 +128,60 @@ impl ImportResolver {
 
         // 2. TypeScript path alias and baseUrl resolution
         if let Some(cfg) = self.get_config_for_file(from_file) {
+            // Find the best-matching pattern in cfg.paths
+            // Patterns are sorted descending by pattern_specificity:
+            // exact match first, longest prefix+suffix wildcard next.
+            let mut best_match: Option<(&str, &Vec<String>, Option<&str>)> = None;
+
             for (pattern, targets) in &cfg.paths {
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    if let Some(remainder) = clean_spec.strip_prefix(prefix) {
-                        for target in targets {
-                            let target_prefix = target.strip_suffix('*').unwrap_or(target);
-                            let mapped = format!("{target_prefix}{remainder}");
-                            let candidate_path = Self::join_base_and_target(
-                                &cfg.config_dir,
-                                cfg.base_url.as_deref(),
-                                &mapped,
-                            );
-                            if let Some(normalized) = Self::normalize_path(&candidate_path) {
-                                if let Some(hit) = self.try_resolve_file(&normalized) {
-                                    return ResolvedTarget::Internal(hit);
-                                }
-                            }
-                        }
+                if let Some(pos) = pattern.find('*') {
+                    let prefix = &pattern[..pos];
+                    let suffix = &pattern[pos + 1..];
+                    if clean_spec.starts_with(prefix)
+                        && clean_spec.ends_with(suffix)
+                        && clean_spec.len() >= prefix.len() + suffix.len()
+                    {
+                        let mid = &clean_spec[prefix.len()..clean_spec.len() - suffix.len()];
+                        best_match = Some((pattern.as_str(), targets, Some(mid)));
+                        break;
                     }
                 } else if pattern == clean_spec {
-                    for target in targets {
-                        let candidate_path = Self::join_base_and_target(
-                            &cfg.config_dir,
-                            cfg.base_url.as_deref(),
-                            target,
-                        );
-                        if let Some(normalized) = Self::normalize_path(&candidate_path) {
-                            if let Some(hit) = self.try_resolve_file(&normalized) {
-                                return ResolvedTarget::Internal(hit);
-                            }
+                    best_match = Some((pattern.as_str(), targets, None));
+                    break;
+                }
+            }
+
+            if let Some((_pattern, targets, maybe_wildcard)) = best_match {
+                // Non-fallthrough rule:
+                // Once the best-matching pattern is selected, resolution attempts ONLY
+                // the substitution targets for that pattern. If none resolve, it does NOT
+                // continue to other mappings in paths!
+                for target in targets {
+                    let mapped = if let Some(mid) = maybe_wildcard {
+                        if target.contains('*') {
+                            target.replace('*', mid)
+                        } else {
+                            target.clone()
+                        }
+                    } else {
+                        target.clone()
+                    };
+
+                    let candidate_path = Self::join_base_and_target(
+                        &cfg.config_dir,
+                        cfg.base_url.as_deref(),
+                        &mapped,
+                    );
+                    if let Some(normalized) = Self::normalize_path(&candidate_path) {
+                        if let Some(hit) = self.try_resolve_file(&normalized) {
+                            return ResolvedTarget::Internal(hit);
                         }
                     }
                 }
+                // Do NOT fall through to other patterns in paths or baseUrl if an explicit alias pattern matched
+                return ResolvedTarget::Unresolved(format!(
+                    "Cannot resolve target for path alias in '{clean_spec}' from '{from_file}'"
+                ));
             }
 
             // Fallback: baseUrl alone for non-relative non-alias imports
@@ -179,7 +209,29 @@ impl ImportResolver {
             ));
         }
 
-        // 4. Bare external package specifiers (e.g. "react", "@radix-ui/react-dialog", "lodash/get")
+        // 4. Workspace package imports resolution (e.g. "@myorg/core" or "@myorg/core/utils")
+        if let Some(target) = self.workspace_packages.get(clean_spec) {
+            return ResolvedTarget::Internal(target.clone());
+        }
+        for (pkg_name, entry_path) in &self.workspace_packages {
+            let prefix = format!("{pkg_name}/");
+            if let Some(sub) = clean_spec.strip_prefix(&prefix) {
+                let mut pkg_dir = Path::new(entry_path).parent();
+                if let Some(d) = pkg_dir {
+                    if d.ends_with("src") || d.ends_with("dist") || d.ends_with("lib") {
+                        pkg_dir = d.parent();
+                    }
+                }
+                let base = pkg_dir.unwrap_or_else(|| Path::new("")).join(sub);
+                if let Some(norm) = Self::normalize_path(&base) {
+                    if let Some(hit) = self.try_resolve_file(&norm) {
+                        return ResolvedTarget::Internal(hit);
+                    }
+                }
+            }
+        }
+
+        // 5. Bare external package specifiers (e.g. "react", "@radix-ui/react-dialog", "lodash/get")
         // Note: unconfigured "@/..." alias imports are NOT treated as npm packages!
         if !clean_spec.starts_with('.')
             && !clean_spec.starts_with('/')
@@ -191,19 +243,20 @@ impl ImportResolver {
         ResolvedTarget::Unresolved(format!("Unable to resolve import '{clean_spec}'"))
     }
 
+    fn has_script_extension(path: &str) -> bool {
+        let script_exts = [
+            ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts", ".d.mts",
+            ".d.cts",
+        ];
+        script_exts.iter().any(|ext| path.ends_with(ext))
+    }
+
     fn try_resolve_file(&self, base: &str) -> Option<String> {
         let trimmed = base.trim_start_matches("./");
 
-        // 1. Direct match with standard extensions appended
-        for ext in EXTENSIONS {
-            let candidate = if ext.is_empty() {
-                trimmed.to_string()
-            } else {
-                format!("{trimmed}{ext}")
-            };
-            if self.known_files.contains(&candidate) {
-                return Some(candidate);
-            }
+        // 1. Exact match for requested file
+        if self.known_files.contains(trimmed) {
+            return Some(trimmed.to_string());
         }
 
         // 2. TypeScript extension substitution (for ESM/NodeNext/Bundler runtime output imports)
@@ -238,7 +291,18 @@ impl ImportResolver {
             }
         }
 
-        // 3. Directory index resolution
+        // 3. Extensionless candidate matching: only append extensions if the file does NOT already have a script extension!
+        // This strictly prevents double-extension appending (e.g. "./util.js" resolving to "util.js.ts").
+        if !Self::has_script_extension(trimmed) {
+            for ext in &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"] {
+                let candidate = format!("{trimmed}{ext}");
+                if self.known_files.contains(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        // 4. Directory index resolution
         let index_prefix = if trimmed.is_empty() {
             String::new()
         } else {

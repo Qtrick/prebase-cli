@@ -183,7 +183,7 @@ sanitize_log "{log_path}"
         proc = subprocess.run(["/bin/bash", script_path], capture_output=True, text=True)
         out = proc.stdout
 
-        # Check for any leaked secret tokens
+        # Check for any leaked secret tokens or distinctive partial suffixes
         secrets_to_check = [
             "DummyBootstrapToken999",
             "DummySecret123",
@@ -204,11 +204,29 @@ sanitize_log "{log_path}"
             "Header.With.Tildes~123",
             "Bearer.With.Dots.And~Tildes_99",
             "Bootstrap.With.Special~Chars_88",
+            # Distinctive partial suffixes that would leak if character class was narrowed:
+            ".With.Dots~And-Dashes",
+            "~And-Dashes",
+            "-Dashes",
+            ".With.Tildes~123",
+            "~123",
+            ".With.Dots.And~Tildes_99",
+            "~Tildes_99",
+            ".With.Special~Chars_88",
+            "~Chars_88",
         ]
         leaked = [secret for secret in secrets_to_check if secret in out]
         if leaked:
             for secret in leaked:
-                fail_msg(f"Credential leaked in sanitized log: {secret}")
+                fail_msg(f"Credential or partial token leaked in sanitized log: {secret}")
+            return False
+
+        # Verify preservation of non-sensitive surrounding text
+        if "http://127.0.0.1:19881/?bootstrap=[REDACTED]&view=3d" not in out:
+            fail_msg(f"Surrounding URL structure was not properly preserved: {out}")
+            return False
+        if "Cookie: a=b; prebase_session_19881=[REDACTED]; c=d" not in out:
+            fail_msg(f"Surrounding cookie structure was not properly preserved: {out}")
             return False
 
         # Verify expected redacted placeholders are present

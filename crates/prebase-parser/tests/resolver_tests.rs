@@ -131,10 +131,6 @@ fn test_defect_r2_deterministic_overlapping_alias_precedence() {
             paths.insert("@/*".to_string(), vec!["src/*".to_string()]);
         }
 
-        let tsconfig = TsConfig {
-            base_url: None,
-            paths,
-        };
         let tsconfig = TsConfig::new(None, paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));
@@ -160,10 +156,6 @@ fn test_defect_r2_deterministic_overlapping_alias_precedence() {
             vec!["exact/Button.ts".to_string()],
         );
 
-        let tsconfig = TsConfig {
-            base_url: None,
-            paths,
-        };
         let tsconfig = TsConfig::new(None, paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));
@@ -184,10 +176,6 @@ fn test_defect_r2_deterministic_overlapping_alias_precedence() {
             vec!["vendor/*".to_string(), "fallback/*".to_string()],
         );
 
-        let tsconfig = TsConfig {
-            base_url: None,
-            paths,
-        };
         let tsconfig = TsConfig::new(None, paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));
@@ -230,10 +218,6 @@ fn test_defect_r3_base_url_interaction_with_paths() {
         let mut paths = HashMap::new();
         paths.insert("app/*".to_string(), vec!["*".to_string()]);
 
-        let tsconfig = TsConfig {
-            base_url: Some("./src".to_string()),
-            paths,
-        };
         let tsconfig = TsConfig::new(Some("./src".to_string()), paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));
@@ -251,10 +235,6 @@ fn test_defect_r3_base_url_interaction_with_paths() {
         let mut paths = HashMap::new();
         paths.insert("app/*".to_string(), vec!["*".to_string()]);
 
-        let tsconfig = TsConfig {
-            base_url: Some("src".to_string()),
-            paths,
-        };
         let tsconfig = TsConfig::new(Some("src".to_string()), paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));
@@ -272,10 +252,6 @@ fn test_defect_r3_base_url_interaction_with_paths() {
         let mut paths = HashMap::new();
         paths.insert("core/*".to_string(), vec!["core-pkg/*".to_string()]);
 
-        let tsconfig = TsConfig {
-            base_url: Some("packages".to_string()),
-            paths,
-        };
         let tsconfig = TsConfig::new(Some("packages".to_string()), paths);
 
         let resolver = ImportResolver::new(known_files.clone(), Some(tsconfig.clone()));

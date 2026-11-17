@@ -205,6 +205,7 @@ fn test_safe_read_toctou_symlink_substitution_mitigation() {
 #[cfg(unix)]
 #[test]
 fn test_safe_read_file_identity_check_detects_swapped_file() {
+    use prebase_core::{validate_descriptor_identity, SafeReadError};
     use std::os::unix::fs::MetadataExt;
 
     let repo_dir = tempdir().expect("failed to create repo tempdir");
@@ -226,9 +227,36 @@ fn test_safe_read_file_identity_check_detects_swapped_file() {
         "Fixtures file_a and file_b must have distinct inodes"
     );
 
-    // Normal read of object_a.ts succeeds
-    let res = safe_read_file_to_string(&repo_root, "object_a.ts", 1024).unwrap();
-    assert_eq!(res, "content of object A\n");
+    // 1. Open descriptor to file_a
+    let open_fd = fs::File::open(&file_a).expect("file_a must open");
+
+    // 2. Validate descriptor identity matches disk before swap
+    assert!(
+        validate_descriptor_identity(&open_fd, &file_a).is_ok(),
+        "Descriptor identity must match path on disk before swap"
+    );
+
+    // 3. Perform atomic in-place file replacement: rename file_b onto file_a.
+    // The open_fd descriptor still points to original file A's inode,
+    // but the filesystem directory entry at file_a now points to file B's inode!
+    fs::rename(&file_b, &file_a).expect("atomic rename must succeed");
+
+    // 4. Validate descriptor identity MUST now detect the identity mismatch and fail closed!
+    let swap_result = validate_descriptor_identity(&open_fd, &file_a);
+    assert!(
+        matches!(swap_result, Err(SafeReadError::ContainmentFailed(_))),
+        "validate_descriptor_identity must reject swapped file with ContainmentFailed, got {swap_result:?}"
+    );
+
+    // 5. Test symlink replacement detection:
+    // Create a symlink to file_a and verify validate_descriptor_identity rejects it as EscapesRoot
+    let link_path = repo_root.join("symlink_to_a.ts");
+    std::os::unix::fs::symlink(&file_a, &link_path).unwrap();
+    let sym_result = validate_descriptor_identity(&open_fd, &link_path);
+    assert!(
+        matches!(sym_result, Err(SafeReadError::EscapesRoot(_))),
+        "validate_descriptor_identity must reject symlink path with EscapesRoot, got {sym_result:?}"
+    );
 }
 
 /// Verifies that chained symlinks (A -> B -> C -> /outside/secret) and broken symlink chains fail closed.
