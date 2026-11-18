@@ -17,7 +17,11 @@ BENCH_DIR=$(mktemp -d -t prebase-bench-XXXXXX)
 PREBASE_PID=""
 BENCHMARK_COMPLETED=0
 TIERS_EXECUTED=0
-EXPECTED_TOTAL_TIERS=5
+if [ "${PREBASE_EXTENDED_BENCHMARKS:-0}" = "1" ] || [ "${1:-}" = "--extended" ]; then
+    EXPECTED_TOTAL_TIERS=8
+else
+    EXPECTED_TOTAL_TIERS=5
+fi
 
 # Redact credentials and sensitive tokens from logs before printing diagnostics
 sanitize_log() {
@@ -72,7 +76,9 @@ cleanup() {
     fi
 
     # Remove temporary scratch workspace
-    rm -rf "$BENCH_DIR"
+    if [ -n "${BENCH_DIR:-}" ] && [ -d "$BENCH_DIR" ]; then
+        rm -rf "$BENCH_DIR"
+    fi 2>/dev/null || rm -rf "$BENCH_DIR" 2>/dev/null || true
 
     # Ensure abnormal or premature termination produces a non-zero exit code
     if [ "$BENCHMARK_COMPLETED" -ne 1 ]; then
@@ -104,85 +110,68 @@ create_fixture() {
     git -C "$REPO_DIR" config user.email "bench@prebase.dev"
     git -C "$REPO_DIR" config user.name "Benchmarker"
 
-    case "$TOPOLOGY" in
-        "deep_chain")
-            # Linear chain: index -> 1 -> 2 -> ... -> N
-            for i in $(seq 1 "$COUNT"); do
-                if [ "$i" -lt "$COUNT" ]; then
-                    local NEXT=$(( i + 1 ))
-                    cat <<EOF > "$REPO_DIR/src/module_${i}.ts"
-import { helper_${NEXT} } from './module_${NEXT}';
-export function helper_${i}() { return ${i} + helper_${NEXT}(); }
-EOF
-                else
-                    cat <<EOF > "$REPO_DIR/src/module_${i}.ts"
-export function helper_${i}() { return ${i}; }
-EOF
-                fi
-            done
-            cat <<EOF > "$REPO_DIR/src/index.ts"
-import { helper_1 } from './module_1';
-console.log(helper_1());
-EOF
-            ;;
+    python3 - "$COUNT" "$TOPOLOGY" "$REPO_DIR" << 'PYEOF'
+import sys, os
 
-        "dense_hub")
-            # Dense connectivity: each module imports 3 deterministic peers
-            for i in $(seq 1 "$COUNT"); do
-                local N1=$(( (i % COUNT) + 1 ))
-                local N2=$(( ((i + 1) % COUNT) + 1 ))
-                local N3=$(( ((i + 2) % COUNT) + 1 ))
-                cat <<EOF > "$REPO_DIR/src/module_${i}.ts"
-import { helper_${N1} } from './module_${N1}';
-import { helper_${N2} } from './module_${N2}';
-import { helper_${N3} } from './module_${N3}';
-export function helper_${i}() { return ${i} + helper_${N1}() + helper_${N2}() + helper_${N3}(); }
-EOF
-            done
-            cat <<EOF > "$REPO_DIR/src/index.ts"
-import { helper_1 } from './module_1';
-console.log(helper_1());
-EOF
-            ;;
+count = int(sys.argv[1])
+topology = sys.argv[2]
+repo_dir = sys.argv[3]
+src_dir = os.path.join(repo_dir, "src")
 
-        "sparse_areas")
-            # Disconnected sparse areas in separate directories
-            mkdir -p "$REPO_DIR/src/area_a" "$REPO_DIR/src/area_b" "$REPO_DIR/src/area_c"
-            local PER_AREA=$(( COUNT / 3 ))
-            for i in $(seq 1 "$PER_AREA"); do
-                cat <<EOF > "$REPO_DIR/src/area_a/mod_a_${i}.ts"
-export function func_a_${i}() { return ${i}; }
-EOF
-                cat <<EOF > "$REPO_DIR/src/area_b/mod_b_${i}.ts"
-export function func_b_${i}() { return ${i}; }
-EOF
-                cat <<EOF > "$REPO_DIR/src/area_c/mod_c_${i}.ts"
-export function func_c_${i}() { return ${i}; }
-EOF
-            done
-            cat <<EOF > "$REPO_DIR/src/index.ts"
-import { func_a_1 } from './area_a/mod_a_1';
-import { func_b_1 } from './area_b/mod_b_1';
-import { func_c_1 } from './area_c/mod_c_1';
-console.log(func_a_1() + func_b_1() + func_c_1());
-EOF
-            ;;
+if topology == "deep_chain":
+    for i in range(1, count + 1):
+        path = os.path.join(src_dir, f"module_{i}.ts")
+        if i < count:
+            nxt = i + 1
+            content = f"import {{ helper_{nxt} }} from './module_{nxt}';\nexport function helper_{i}() {{ return {i} + helper_{nxt}(); }}\n"
+        else:
+            content = f"export function helper_{i}() {{ return {i}; }}\n"
+        with open(path, "w") as f:
+            f.write(content)
+    with open(os.path.join(src_dir, "index.ts"), "w") as f:
+        f.write("import { helper_1 } from './module_1';\nconsole.log(helper_1());\n")
 
-        *)
-            # Default modular cycle: 1 -> 2 -> ... -> N -> 1
-            for i in $(seq 1 "$COUNT"); do
-                local NEXT=$(( (i % COUNT) + 1 ))
-                cat <<EOF > "$REPO_DIR/src/module_${i}.ts"
-import { helper_${NEXT} } from './module_${NEXT}';
-export function helper_${i}() { return ${i} + helper_${NEXT}(); }
-EOF
-            done
-            cat <<EOF > "$REPO_DIR/src/index.ts"
-import { helper_1 } from './module_1';
-console.log(helper_1());
-EOF
-            ;;
-    esac
+elif topology == "dense_hub":
+    for i in range(1, count + 1):
+        n1 = (i % count) + 1
+        n2 = ((i + 1) % count) + 1
+        n3 = ((i + 2) % count) + 1
+        content = (
+            f"import {{ helper_{n1} }} from './module_{n1}';\n"
+            f"import {{ helper_{n2} }} from './module_{n2}';\n"
+            f"import {{ helper_{n3} }} from './module_{n3}';\n"
+            f"export function helper_{i}() {{ return {i} + helper_{n1}() + helper_{n2}() + helper_{n3}(); }}\n"
+        )
+        with open(os.path.join(src_dir, f"module_{i}.ts"), "w") as f:
+            f.write(content)
+    with open(os.path.join(src_dir, "index.ts"), "w") as f:
+        f.write("import { helper_1 } from './module_1';\nconsole.log(helper_1());\n")
+
+elif topology == "sparse_areas":
+    for area in ["area_a", "area_b", "area_c"]:
+        os.makedirs(os.path.join(src_dir, area), exist_ok=True)
+    per_area = count // 3
+    for i in range(1, per_area + 1):
+        for area, pfx in [("area_a", "a"), ("area_b", "b"), ("area_c", "c")]:
+            with open(os.path.join(src_dir, area, f"mod_{pfx}_{i}.ts"), "w") as f:
+                f.write(f"export function func_{pfx}_{i}() {{ return {i}; }}\n")
+    with open(os.path.join(src_dir, "index.ts"), "w") as f:
+        f.write(
+            "import { func_a_1 } from './area_a/mod_a_1';\n"
+            "import { func_b_1 } from './area_b/mod_b_1';\n"
+            "import { func_c_1 } from './area_c/mod_c_1';\n"
+            "console.log(func_a_1() + func_b_1() + func_c_1());\n"
+        )
+
+else:
+    for i in range(1, count + 1):
+        nxt = (i % count) + 1
+        content = f"import {{ helper_{nxt} }} from './module_{nxt}';\nexport function helper_{i}() {{ return {i} + helper_{nxt}(); }}\n"
+        with open(os.path.join(src_dir, f"module_{i}.ts"), "w") as f:
+            f.write(content)
+    with open(os.path.join(src_dir, "index.ts"), "w") as f:
+        f.write("import { helper_1 } from './module_1';\nconsole.log(helper_1());\n")
+PYEOF
 
     git -C "$REPO_DIR" add .
     git -C "$REPO_DIR" commit -q -m "chore: initial commit with ${COUNT} files [${TOPOLOGY}]"
@@ -379,12 +368,23 @@ run_benchmark() {
     TIERS_EXECUTED=$(( TIERS_EXECUTED + 1 ))
 }
 
-# Run all 5 required benchmark tiers
+# Run all 5 required baseline benchmark tiers
 run_benchmark 100 "modular_cycle"
 run_benchmark 100 "deep_chain"
 run_benchmark 500 "dense_hub"
 run_benchmark 500 "sparse_areas"
 run_benchmark 1000 "modular_cycle"
+
+# Extended Scalability Workloads (2.5k, 5k, 10k files)
+if [ "${PREBASE_EXTENDED_BENCHMARKS:-0}" = "1" ] || [ "${1:-}" = "--extended" ]; then
+    echo ""
+    echo "========================================================"
+    echo " Running Extended Scalability Workloads (2.5k, 5k, 10k)"
+    echo "========================================================"
+    run_benchmark 2500 "modular_cycle"
+    run_benchmark 5000 "sparse_areas"
+    run_benchmark 10000 "modular_cycle"
+fi
 
 if [ "$TIERS_EXECUTED" -ne "$EXPECTED_TOTAL_TIERS" ]; then
     echo "==> ERROR: Completed $TIERS_EXECUTED tiers, expected $EXPECTED_TOTAL_TIERS" >&2

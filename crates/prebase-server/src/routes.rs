@@ -16,8 +16,8 @@ use tokio_stream::StreamExt;
 use tracing::warn;
 
 use prebase_core::model::{
-    ArchitecturalInsights, DependencyEdge, FileImpactAnalysis, FileNode, GraphSnapshot,
-    IndexingStatus, RepositoryInfo, WatcherHealth,
+    ArchitecturalInsights, DependencyEdge, DependencyPathResult, FileImpactAnalysis, FileNode,
+    GraphSnapshot, IndexingStatus, PathDirection, RepositoryInfo, WatcherHealth,
 };
 use prebase_core::scanner::RepositoryScanner;
 use prebase_git::{CommitDetails, FileHistoryResult, GitStatus, HistoryPage};
@@ -61,6 +61,17 @@ pub struct FileHistoryQuery {
 #[derive(Deserialize)]
 pub struct ImpactQuery {
     pub depth: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct DependencyPathQuery {
+    pub source: Option<String>,
+    pub from: Option<String>,
+    pub target: Option<String>,
+    pub to: Option<String>,
+    pub direction: Option<String>,
+    pub depth: Option<usize>,
+    pub include_types: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +229,52 @@ pub async fn handle_file_impact(
         Some(impact) => Ok(Json(impact)),
         None => Err((StatusCode::NOT_FOUND, "File node not found")),
     }
+}
+
+pub async fn handle_dependency_path(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DependencyPathQuery>,
+) -> Result<Json<DependencyPathResult>, (StatusCode, &'static str)> {
+    let source = query.source.or(query.from).filter(|s| !s.trim().is_empty());
+    let target = query.target.or(query.to).filter(|s| !s.trim().is_empty());
+
+    let (source, target) = match (source, target) {
+        (Some(s), Some(t)) => (s, t),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Missing source or target parameter",
+            ))
+        }
+    };
+
+    if source.len() > 1024 || target.len() > 1024 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Endpoint parameter exceeds maximum length",
+        ));
+    }
+
+    let published = match state.get_published() {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Repository index not ready yet",
+            ));
+        }
+    };
+
+    let direction = match query.direction.as_deref() {
+        Some("incoming" | "used_by") => PathDirection::Incoming,
+        _ => PathDirection::Outgoing,
+    };
+
+    let include_types = query.include_types.unwrap_or(true);
+    let result = published
+        .index
+        .find_path(&source, &target, direction, include_types);
+    Ok(Json(result))
 }
 
 pub async fn handle_search_files(
@@ -436,9 +493,22 @@ pub async fn handle_file_history(
 
     tokio::task::spawn_blocking(move || git.get_file_history(&path, limit, cursor.as_deref()))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Worker thread failed".to_string(),
+            )
+        })?
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| match e {
+            prebase_git::GitError::StaleCursor(msg) => (StatusCode::GONE, msg),
+            prebase_git::GitError::InvalidRevision(msg) => (StatusCode::BAD_REQUEST, msg),
+            prebase_git::GitError::FileNotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve file history".to_string(),
+            ),
+        })
 }
 
 pub async fn handle_git_status(

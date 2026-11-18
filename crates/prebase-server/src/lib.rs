@@ -1377,4 +1377,201 @@ mod tests {
         let unauth_resp = app.oneshot(unauth_req).await.unwrap();
         assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn test_dependency_path_endpoint() {
+        use prebase_core::model::{
+            AnalysisCoverage, DependencyEdge, DependencyEvidence, FileKind, FileNode,
+            GraphSnapshot, NodeAnalysisStatus, RelationshipKind, ResolutionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().canonicalize().unwrap();
+
+        let state = Arc::new(AppState::new(
+            repo_root,
+            "test-repo".into(),
+            "repo-123".into(),
+            "token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        let snap = GraphSnapshot {
+            schema_version: "1.0.0".into(),
+            repository_id: "repo-123".into(),
+            revision: 1,
+            nodes: vec![
+                FileNode {
+                    id: "src/a.ts".into(),
+                    relative_path: "src/a.ts".into(),
+                    filename: "a.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 1,
+                },
+                FileNode {
+                    id: "src/b.ts".into(),
+                    relative_path: "src/b.ts".into(),
+                    filename: "b.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 2,
+                },
+                FileNode {
+                    id: "src/c.ts".into(),
+                    relative_path: "src/c.ts".into(),
+                    filename: "c.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 0,
+                },
+            ],
+            edges: vec![
+                DependencyEdge {
+                    id: "edge-1".into(),
+                    source_file_id: "src/a.ts".into(),
+                    target_file_id: "src/b.ts".into(),
+                    relationship_kind: RelationshipKind::Import,
+                    resolution_status: ResolutionStatus::ResolvedInternal,
+                    evidence: vec![DependencyEvidence {
+                        source_file_id: "src/a.ts".into(),
+                        import_specifier: "./b".into(),
+                        line: 1,
+                        column: 1,
+                        relationship_kind: RelationshipKind::Import,
+                        is_type_only: false,
+                    }],
+                },
+                DependencyEdge {
+                    id: "edge-2".into(),
+                    source_file_id: "src/b.ts".into(),
+                    target_file_id: "src/c.ts".into(),
+                    relationship_kind: RelationshipKind::TypeOnly,
+                    resolution_status: ResolutionStatus::ResolvedInternal,
+                    evidence: vec![DependencyEvidence {
+                        source_file_id: "src/b.ts".into(),
+                        import_specifier: "./c".into(),
+                        line: 1,
+                        column: 1,
+                        relationship_kind: RelationshipKind::TypeOnly,
+                        is_type_only: true,
+                    }],
+                },
+            ],
+            coverage: AnalysisCoverage::default(),
+            issues: vec![],
+            insights: None,
+        };
+
+        let index = GraphIndex::build(&snap);
+        state.publish_network(snap, index, vec![], None).unwrap();
+
+        let app = create_router(state);
+
+        // 1. Unauthorized request must return 401
+        let unauth_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=src/a.ts&target=src/c.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .body(Body::empty())
+            .unwrap();
+        let unauth_resp = app.clone().oneshot(unauth_req).await.unwrap();
+        assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Missing target parameter must return 400 Bad Request
+        let missing_param_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=src/a.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let missing_resp = app.clone().oneshot(missing_param_req).await.unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 3. Empty source parameter must return 400 Bad Request
+        let empty_param_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=&target=src/c.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let empty_resp = app.clone().oneshot(empty_param_req).await.unwrap();
+        assert_eq!(empty_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 4. Valid outgoing path search with source & target
+        let path_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=src/a.ts&target=src/c.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let path_resp = app.clone().oneshot(path_req).await.unwrap();
+        assert_eq!(path_resp.status(), StatusCode::OK);
+        let path_bytes = axum::body::to_bytes(path_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let path_json: serde_json::Value = serde_json::from_slice(&path_bytes).unwrap();
+        assert_eq!(path_json["status"], "found");
+        assert_eq!(path_json["path"]["hops"], 2);
+        assert_eq!(
+            path_json["path"]["nodes"],
+            serde_json::json!(["src/a.ts", "src/b.ts", "src/c.ts"])
+        );
+
+        // 5. Alternative from & to parameter aliases
+        let alias_req = Request::builder()
+            .uri("/api/v1/dependency-path?from=src/a.ts&to=src/b.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let alias_resp = app.clone().oneshot(alias_req).await.unwrap();
+        assert_eq!(alias_resp.status(), StatusCode::OK);
+        let alias_bytes = axum::body::to_bytes(alias_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let alias_json: serde_json::Value = serde_json::from_slice(&alias_bytes).unwrap();
+        assert_eq!(alias_json["status"], "found");
+        assert_eq!(alias_json["path"]["hops"], 1);
+
+        // 6. Incoming direction (used_by)
+        let incoming_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=src/c.ts&target=src/a.ts&direction=incoming")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let incoming_resp = app.clone().oneshot(incoming_req).await.unwrap();
+        assert_eq!(incoming_resp.status(), StatusCode::OK);
+        let in_bytes = axum::body::to_bytes(incoming_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let in_json: serde_json::Value = serde_json::from_slice(&in_bytes).unwrap();
+        assert_eq!(in_json["status"], "found");
+
+        // 7. Filtering out type-only edges: include_types=false breaks path a -> b -[type]-> c
+        let no_types_req = Request::builder()
+            .uri("/api/v1/dependency-path?source=src/a.ts&target=src/c.ts&include_types=false")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let no_types_resp = app.clone().oneshot(no_types_req).await.unwrap();
+        assert_eq!(no_types_resp.status(), StatusCode::OK);
+        let no_types_bytes = axum::body::to_bytes(no_types_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let no_types_json: serde_json::Value = serde_json::from_slice(&no_types_bytes).unwrap();
+        assert_eq!(no_types_json["status"], "not_found");
+    }
 }

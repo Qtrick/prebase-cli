@@ -112,7 +112,11 @@
         "files": { "type": "array", "items": { "type": "string" } },
         "example_cycle": { "type": "array", "items": { "type": "string" } },
         "is_type_only": { "type": "boolean" },
-        "edge_count": { "type": "integer" }
+        "edge_count": { "type": "integer" },
+        "classification": {
+          "type": "string",
+          "enum": ["RuntimeRelevant", "TypeOnly", "MixedStructural"]
+        }
       }
     },
     "HighlyDependedFile": {
@@ -153,11 +157,35 @@
       "properties": {
         "total_discovered": { "type": "integer" },
         "total_analyzed": { "type": "integer" },
+        "total_fully_analyzed": { "type": "integer" },
         "total_partially_analyzed": { "type": "integer" },
         "total_unsupported": { "type": "integer" },
         "total_failed": { "type": "integer" },
         "total_unresolved_imports": { "type": "integer" },
         "total_issues": { "type": "integer" }
+      }
+    },
+    "DependencyPath": {
+      "type": "object",
+      "required": ["nodes", "edges", "hops", "is_type_only"],
+      "properties": {
+        "nodes": { "type": "array", "items": { "type": "string" } },
+        "edges": { "type": "array", "items": { "$ref": "#/definitions/DependencyEdge" } },
+        "hops": { "type": "integer" },
+        "is_type_only": { "type": "boolean" }
+      }
+    },
+    "DependencyPathResult": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["found", "not_found", "same_file", "missing_endpoint"] },
+        "path": { "$ref": "#/definitions/DependencyPath" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "file_id": { "type": "string" },
+        "hops": { "type": "integer" },
+        "missing_file_id": { "type": "string" }
       }
     },
     "ArchitecturalInsights": {

@@ -50,12 +50,15 @@ export interface AnalysisIssue {
   column?: number | null;
 }
 
+export type CycleClassification = 'RuntimeRelevant' | 'TypeOnly' | 'MixedStructural';
+
 export interface CycleGroup {
   id: string;
   files: string[];
   example_cycle: string[];
   is_type_only: boolean;
   edge_count: number;
+  classification?: CycleClassification;
 }
 
 export interface HighlyDependedFile {
@@ -84,12 +87,28 @@ export interface AreaCoupling {
 export interface DiagnosticsSummary {
   total_discovered: number;
   total_analyzed: number;
+  total_fully_analyzed?: number;
   total_partially_analyzed: number;
   total_unsupported: number;
   total_failed: number;
   total_unresolved_imports: number;
   total_issues: number;
 }
+
+export type PathDirection = 'outgoing' | 'incoming';
+
+export interface DependencyPath {
+  nodes: string[];
+  edges: DependencyEdge[];
+  hops: number;
+  is_type_only: boolean;
+}
+
+export type DependencyPathResult =
+  | { status: 'found'; path: DependencyPath }
+  | { status: 'not_found'; from: string; to: string }
+  | { status: 'same_file'; file_id: string; hops: 0 }
+  | { status: 'missing_endpoint'; missing_file_id: string };
 
 export interface ArchitecturalInsights {
   cycle_groups: CycleGroup[];

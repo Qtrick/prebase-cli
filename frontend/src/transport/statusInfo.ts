@@ -16,7 +16,8 @@ export function resolveWatcherStatusInfo(
   sseState: 'connected' | 'reconnecting' | 'error',
   liveRevision: number,
   isDelayedReconnecting: boolean,
-  reconciliationFailed = false
+  reconciliationFailed = false,
+  isUpdating = false
 ): WatcherStatusBadgeInfo {
   if (reconciliationFailed) {
     return {
@@ -40,6 +41,13 @@ export function resolveWatcherStatusInfo(
       text: 'Watcher Degraded',
       color: '#f59e0b',
       pulse: false,
+    };
+  }
+  if (isUpdating && sseState === 'connected') {
+    return {
+      text: liveRevision > 0 ? `Updating graph (rev ${liveRevision})...` : 'Updating graph...',
+      color: '#2dd4bf',
+      pulse: true,
     };
   }
   if (sseState === 'connected') {

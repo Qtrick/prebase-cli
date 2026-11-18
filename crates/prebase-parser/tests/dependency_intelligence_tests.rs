@@ -759,6 +759,50 @@ fn test_tsconfig_local_bounded_extends() {
 }
 
 #[test]
+fn test_tsconfig_multi_extends_array_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    // Base config 1: provides baseUrl
+    let base1_json = r#"{
+        "compilerOptions": {
+            "baseUrl": "./base"
+        }
+    }"#;
+    fs::write(root.join("tsconfig.base1.json"), base1_json).unwrap();
+
+    // Base config 2: provides paths and overrides baseUrl
+    let base2_json = r#"{
+        "compilerOptions": {
+            "baseUrl": "./base2",
+            "paths": {
+                "@components/*": ["src/components/*"]
+            }
+        }
+    }"#;
+    fs::write(root.join("tsconfig.base2.json"), base2_json).unwrap();
+
+    // Child config with multi-extends array
+    let child_json = r#"{
+        "extends": ["./tsconfig.base1.json", "./tsconfig.base2.json"]
+    }"#;
+    fs::write(root.join("tsconfig.json"), child_json).unwrap();
+
+    let loaded = TsConfig::load_from_file_in_repo(root, "tsconfig.json");
+    assert!(
+        loaded.is_some(),
+        "Multi-extends config must load successfully"
+    );
+    let cfg = loaded.unwrap();
+
+    // base2 overrode base1's baseUrl
+    assert_eq!(cfg.base_url.as_deref(), Some("./base2"));
+    // paths inherited from base2
+    assert_eq!(cfg.paths.len(), 1);
+    assert_eq!(cfg.paths[0].0, "@components/*");
+}
+
+#[test]
 fn test_tsconfig_extends_cycle_prevention() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

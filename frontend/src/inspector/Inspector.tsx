@@ -1,5 +1,13 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { DependencyEdge, FileInspection, FileImpactAnalysis, FileNode, GraphSnapshot } from '../types/graph';
+import {
+  CycleGroup,
+  DependencyEdge,
+  DependencyPathResult,
+  FileImpactAnalysis,
+  FileInspection,
+  FileNode,
+  GraphSnapshot,
+} from '../types/graph';
 import { api } from '../transport/api';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from '../graphs/network/fileTypeColors';
 import {
@@ -8,6 +16,8 @@ import {
   AreaEdge,
 } from '../utils/repositoryAreas';
 import { useCopyFeedback } from '../utils/clipboard';
+import { PathExplorer } from './PathExplorer';
+import { CycleGroupInspector } from './CycleGroupInspector';
 import {
   X,
   ArrowRight,
@@ -29,6 +39,9 @@ import {
   ArrowDownLeft,
   Repeat,
   CheckCircle2,
+  Route,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 interface InspectorProps {
@@ -36,6 +49,14 @@ interface InspectorProps {
   selectedEdge: DependencyEdge | null;
   selectedAreaId?: string | null;
   onSelectArea?: (areaId: string | null) => void;
+  selectedCycleGroup?: CycleGroup | null;
+  onSelectCycleGroup?: (cg: CycleGroup | null) => void;
+  isPathExplorerOpen?: boolean;
+  onTogglePathExplorer?: (open: boolean) => void;
+  pathExplorerSourceNode?: FileNode | null;
+  activeDependencyPath?: DependencyPathResult | null;
+  onActivePathChange?: (result: DependencyPathResult | null) => void;
+  onOpenPathExplorer?: (node: FileNode) => void;
   snapshot: GraphSnapshot | null;
   onSelectNode: (node: FileNode) => void;
   onClose: () => void;
@@ -97,6 +118,14 @@ export const Inspector: React.FC<InspectorProps> = ({
   selectedEdge,
   selectedAreaId = null,
   onSelectArea,
+  selectedCycleGroup = null,
+  onSelectCycleGroup,
+  isPathExplorerOpen = false,
+  onTogglePathExplorer,
+  pathExplorerSourceNode = null,
+  activeDependencyPath: _activeDependencyPath = null,
+  onActivePathChange,
+  onOpenPathExplorer,
   snapshot,
   onSelectNode,
   onClose,
@@ -115,6 +144,9 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
   const [impactAnalysis, setImpactAnalysis] = useState<FileImpactAnalysis | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
+  const [showAllImpact, setShowAllImpact] = useState<boolean>(false);
+  const [diagnosticsFilterCategory, setDiagnosticsFilterCategory] = useState<string>('all');
+  const [isDiagnosticsExpanded, setIsDiagnosticsExpanded] = useState<boolean>(false);
   const { copied: copiedPath, copy: copyPath } = useCopyFeedback();
   const { copied: copiedCode, copy: copyCode } = useCopyFeedback();
   const [focusedAreaEdge, setFocusedAreaEdge] = useState<AreaEdge | null>(null);
@@ -140,6 +172,17 @@ export const Inspector: React.FC<InspectorProps> = ({
     return deriveRepositoryStructure(snapshot.nodes, snapshot.edges);
   }, [snapshot]);
 
+  // Fast O(1) node lookup map by ID and relative path
+  const nodeMap = useMemo(() => {
+    const map = new Map<string, FileNode>();
+    if (!snapshot) return map;
+    for (const node of snapshot.nodes) {
+      map.set(node.id, node);
+      map.set(node.relative_path, node);
+    }
+    return map;
+  }, [snapshot]);
+
   useEffect(() => {
     if (selectedNode) {
       const currentToken = ++requestTokenRef.current;
@@ -149,6 +192,7 @@ export const Inspector: React.FC<InspectorProps> = ({
       setInspection(null);
       setSourcePreview(null);
       setImpactAnalysis(null);
+      setShowAllImpact(false);
       setLoading(true);
       setImpactLoading(true);
 
@@ -204,6 +248,38 @@ export const Inspector: React.FC<InspectorProps> = ({
       setImpactLoading(false);
     }
   }, [selectedNode]);
+
+  // 0A. DEPENDENCY PATH EXPLORER
+  if (isPathExplorerOpen) {
+    return (
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+        <PathExplorer
+          initialSourceNode={pathExplorerSourceNode || selectedNode}
+          snapshot={snapshot}
+          onSelectNode={onSelectNode}
+          onClose={() => onTogglePathExplorer?.(false)}
+          onActivePathChange={onActivePathChange}
+          onSwitchTo3D={onSwitchTo3D}
+          onExplore2D={onExplore2D}
+        />
+      </aside>
+    );
+  }
+
+  // 0B. CIRCULAR DEPENDENCY GROUP INSPECTOR
+  if (selectedCycleGroup) {
+    return (
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+        <CycleGroupInspector
+          cycleGroup={selectedCycleGroup}
+          snapshot={snapshot}
+          onSelectNode={onSelectNode}
+          onClose={() => onSelectCycleGroup?.(null)}
+          onClearFocus={() => onSelectCycleGroup?.(null)}
+        />
+      </aside>
+    );
+  }
 
   // 1A. DETAILED INTER-AREA RELATIONSHIP VIEW
   if (!selectedNode && !selectedEdge && selectedAreaId && focusedAreaEdge) {
@@ -281,8 +357,8 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
             <ul className="relation-list">
               {focusedAreaEdge.contributingFilePairs.map((pair, idx) => {
-                const srcNode = snapshot?.nodes.find((n) => n.id === pair.sourceFileId);
-                const tgtNode = snapshot?.nodes.find((n) => n.id === pair.targetFileId);
+                const srcNode = nodeMap.get(pair.sourceFileId);
+                const tgtNode = nodeMap.get(pair.targetFileId);
                 return (
                   <li key={idx} className="area-relation-pair-card">
                     <div className="pair-endpoints">
@@ -540,6 +616,32 @@ export const Inspector: React.FC<InspectorProps> = ({
             </p>
           </div>
 
+          {/* Quick Action: Dependency Path Explorer */}
+          <div style={{ marginBottom: '14px' }}>
+            <button
+              type="button"
+              className="btn secondary text-xs"
+              onClick={() => onTogglePathExplorer?.(true)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                background: 'var(--card-bg, #1e293b)',
+                border: '1px solid var(--border-color, #334155)',
+                color: 'var(--text-primary, #f8fafc)',
+                cursor: 'pointer',
+              }}
+              title="Find verified dependency paths between two files"
+            >
+              <Route size={14} color="#2dd4bf" />
+              <span className="font-medium">Explore Dependency Paths</span>
+            </button>
+          </div>
+
           {/* Key Files Worth Exploring */}
           {repoStructure && repoStructure.suggestions.length > 0 && (
             <div className="exploration-section">
@@ -549,7 +651,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               </div>
               <div className="suggestion-cards-list">
                 {repoStructure.suggestions.slice(0, 4).map((sug) => {
-                  const node = snapshot.nodes.find((n) => n.id === sug.nodeId);
+                  const node = nodeMap.get(sug.nodeId);
                   return (
                     <button
                       key={sug.nodeId}
@@ -618,39 +720,55 @@ export const Inspector: React.FC<InspectorProps> = ({
                 <div className="cycle-groups-list">
                   <p className="insight-warning-text">
                     {snapshot.insights.cycle_groups.length} cycle group(s) involving{' '}
-                    {snapshot.insights.total_cycle_files} files:
+                    {snapshot.insights.total_cycle_files} files (click group to inspect & highlight):
                   </p>
-                  {snapshot.insights.cycle_groups.map((cg) => (
-                    <div key={cg.id} className="cycle-group-card">
-                      <div className="cycle-group-header">
-                        <span className="cycle-group-name">Cycle Group #{cg.id}</span>
-                        {cg.is_type_only && <span className="type-badge small">type-only</span>}
-                        <span className="cycle-files-count">{cg.files.length} files</span>
+                  {snapshot.insights.cycle_groups.map((cg) => {
+                    const classification =
+                      cg.classification || (cg.is_type_only ? 'TypeOnly' : 'RuntimeRelevant');
+                    const badgeText =
+                      classification === 'RuntimeRelevant'
+                        ? 'runtime'
+                        : classification === 'MixedStructural'
+                        ? 'mixed'
+                        : 'type-only';
+                    return (
+                      <div
+                        key={cg.id}
+                        className="cycle-group-card clickable"
+                        onClick={() => onSelectCycleGroup?.(cg)}
+                        title={`Select and inspect Cycle Group #${cg.id}`}
+                      >
+                        <div className="cycle-group-header">
+                          <span className="cycle-group-name">Cycle Group #{cg.id}</span>
+                          <span className={`type-badge small ${badgeText}`}>{badgeText}</span>
+                          <span className="cycle-files-count">
+                            {cg.files.length} files ({cg.edge_count} edges)
+                          </span>
+                        </div>
+                        <div className="cycle-path-display mono">
+                          {cg.example_cycle.map((f, idx) => (
+                            <React.Fragment key={idx}>
+                              <button
+                                type="button"
+                                className="cycle-node-link clickable"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const target = nodeMap.get(f);
+                                  if (target) onSelectNode(target);
+                                }}
+                                title={`Inspect ${f}`}
+                              >
+                                {f.split('/').pop()}
+                              </button>
+                              {idx < cg.example_cycle.length - 1 && (
+                                <span className="cycle-arrow">→</span>
+                              )}
+                            </React.Fragment>
+                          ))}
+                        </div>
                       </div>
-                      <div className="cycle-path-display mono">
-                        {cg.example_cycle.map((f, idx) => (
-                          <React.Fragment key={idx}>
-                            <button
-                              type="button"
-                              className="cycle-node-link clickable"
-                              onClick={() => {
-                                const target = snapshot.nodes.find(
-                                  (n) => n.id === f || n.relative_path === f
-                                );
-                                if (target) onSelectNode(target);
-                              }}
-                              title={`Inspect ${f}`}
-                            >
-                              {f.split('/').pop()}
-                            </button>
-                            {idx < cg.example_cycle.length - 1 && (
-                              <span className="cycle-arrow">→</span>
-                            )}
-                          </React.Fragment>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -665,9 +783,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               </div>
               <div className="depended-files-list">
                 {snapshot.insights.highly_depended_files.slice(0, 5).map((f) => {
-                  const node = snapshot.nodes.find(
-                    (n) => n.id === f.file_id || n.relative_path === f.relative_path
-                  );
+                  const node = nodeMap.get(f.file_id);
                   return (
                     <button
                       key={f.file_id}
@@ -689,6 +805,50 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
           )}
 
+          {/* Architectural Insights: Area Coupling */}
+          {snapshot.insights && snapshot.insights.area_couplings.length > 0 && (
+            <div className="insights-section area-coupling-section">
+              <div className="section-title">
+                <Layers size={14} color="#38bdf8" />
+                <h4>Architectural Area Coupling</h4>
+              </div>
+              <div className="area-couplings-list" style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}>
+                {snapshot.insights.area_couplings.slice(0, 6).map((ac) => (
+                  <div
+                    key={ac.area_id}
+                    className="area-coupling-card"
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      background: 'var(--card-bg, #1e293b)',
+                      border: '1px solid var(--border-color, #334155)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="area-name-btn clickable font-medium text-xs mono"
+                        onClick={() => onSelectArea?.(ac.area_id)}
+                        style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', padding: 0 }}
+                        title={`Focus on area: ${ac.area_id}`}
+                      >
+                        {ac.area_id}
+                      </button>
+                      <span className="text-xs text-muted">
+                        {ac.file_count} files
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '12px', marginTop: '4px', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      <span><strong>{ac.internal_edge_count}</strong> internal</span>
+                      <span><strong>{ac.outbound_edge_count}</strong> out</span>
+                      <span><strong>{ac.inbound_edge_count}</strong> in</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Architectural Insights: Diagnostics Summary */}
           {snapshot.insights && (
             <div className="diagnostics-summary-box">
@@ -705,6 +865,12 @@ export const Inspector: React.FC<InspectorProps> = ({
                   <span className="diag-label">Analyzed</span>
                   <span className="diag-val">{snapshot.insights.diagnostics_summary.total_analyzed}</span>
                 </div>
+                {snapshot.insights.diagnostics_summary.total_fully_analyzed !== undefined && (
+                  <div className="diag-stat">
+                    <span className="diag-label">Fully Analyzed</span>
+                    <span className="diag-val">{snapshot.insights.diagnostics_summary.total_fully_analyzed}</span>
+                  </div>
+                )}
                 <div className="diag-stat">
                   <span className="diag-label">Partially Analyzed</span>
                   <span className="diag-val">{snapshot.insights.diagnostics_summary.total_partially_analyzed}</span>
@@ -722,6 +888,79 @@ export const Inspector: React.FC<InspectorProps> = ({
                   <span className="diag-val">{snapshot.insights.diagnostics_summary.total_unresolved_imports}</span>
                 </div>
               </div>
+
+              {snapshot.issues.length > 0 && (
+                <div style={{ marginTop: '10px' }}>
+                  <button
+                    type="button"
+                    className="btn-text text-xs"
+                    onClick={() => setIsDiagnosticsExpanded(!isDiagnosticsExpanded)}
+                    style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    {isDiagnosticsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    {isDiagnosticsExpanded
+                      ? 'Hide issues list'
+                      : `View all ${snapshot.issues.length} issues`}
+                  </button>
+
+                  {isDiagnosticsExpanded && (
+                    <div style={{ marginTop: '8px' }}>
+                      <div style={{ marginBottom: '6px' }}>
+                        <select
+                          className="text-xs"
+                          value={diagnosticsFilterCategory}
+                          onChange={(e) => setDiagnosticsFilterCategory(e.target.value)}
+                          style={{
+                            padding: '3px 6px',
+                            borderRadius: '4px',
+                            background: 'var(--card-bg, #1e293b)',
+                            border: '1px solid var(--border-color, #334155)',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          <option value="all">All Issues ({snapshot.issues.length})</option>
+                          <option value="UnresolvedImport">Unresolved Imports</option>
+                          <option value="UnresolvedInternalTarget">Unresolved Internal Targets</option>
+                          <option value="UnsupportedImport">Unsupported Imports</option>
+                        </select>
+                      </div>
+
+                      <ul className="issues-list" style={{ maxHeight: '180px', overflowY: 'auto' }}>
+                        {snapshot.issues
+                          .filter(
+                            (iss) =>
+                              diagnosticsFilterCategory === 'all' ||
+                              iss.issue_kind === diagnosticsFilterCategory
+                          )
+                          .map((iss, i) => (
+                            <li key={i} style={{ fontSize: '11px', marginBottom: '4px' }}>
+                              <button
+                                type="button"
+                                className="clickable mono"
+                                style={{
+                                  background: 'none',
+                                  border: 'none',
+                                  color: '#38bdf8',
+                                  textAlign: 'left',
+                                  padding: 0,
+                                  cursor: 'pointer',
+                                }}
+                                onClick={() => {
+                                  const node = nodeMap.get(iss.file_path);
+                                  if (node) onSelectNode(node);
+                                }}
+                              >
+                                {iss.file_path}
+                                {iss.line ? `:${iss.line}` : ''}:
+                              </button>{' '}
+                              <span className="text-muted">{iss.message}</span>
+                            </li>
+                          ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -805,7 +1044,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               type="button"
               className="rel-endpoint clickable"
               onClick={() => {
-                const src = snapshot?.nodes.find((n) => n.id === selectedEdge.source_file_id);
+                const src = nodeMap.get(selectedEdge.source_file_id);
                 if (src) onSelectNode(src);
               }}
               title={`Inspect ${selectedEdge.source_file_id}`}
@@ -821,7 +1060,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               type="button"
               className="rel-endpoint clickable"
               onClick={() => {
-                const tgt = snapshot?.nodes.find((n) => n.id === selectedEdge.target_file_id);
+                const tgt = nodeMap.get(selectedEdge.target_file_id);
                 if (tgt) onSelectNode(tgt);
               }}
               title={`Inspect ${selectedEdge.target_file_id}`}
@@ -976,6 +1215,18 @@ export const Inspector: React.FC<InspectorProps> = ({
                 <span>File History</span>
               </button>
             )}
+
+            {selectedNode && onOpenPathExplorer && (
+              <button
+                type="button"
+                className="view-path-btn secondary-action"
+                onClick={() => onOpenPathExplorer(selectedNode)}
+                title="Trace dependency paths to or from this file"
+              >
+                <Compass size={13} />
+                <span>Trace Path</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -1127,10 +1378,8 @@ export const Inspector: React.FC<InspectorProps> = ({
                   {impactAnalysis.impacted_files.length > 0 && (
                     <div className="impact-files-list">
                       <span className="impact-list-heading">Cascade order:</span>
-                      {impactAnalysis.impacted_files.slice(0, 10).map((imp) => {
-                        const impNode = snapshot?.nodes.find(
-                          (n) => n.id === imp.file_id || n.relative_path === imp.relative_path
-                        );
+                      {(showAllImpact ? impactAnalysis.impacted_files : impactAnalysis.impacted_files.slice(0, 10)).map((imp) => {
+                        const impNode = nodeMap.get(imp.file_id) || nodeMap.get(imp.relative_path);
                         return (
                           <button
                             key={imp.file_id}
@@ -1148,9 +1397,28 @@ export const Inspector: React.FC<InspectorProps> = ({
                         );
                       })}
                       {impactAnalysis.impacted_files.length > 10 && (
-                        <span className="dim-hint">
-                          ...and {impactAnalysis.impacted_files.length - 10} more files
-                        </span>
+                        <button
+                          type="button"
+                          className="toggle-all-impact-btn"
+                          onClick={() => setShowAllImpact(!showAllImpact)}
+                          style={{
+                            background: 'transparent',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            color: 'var(--text-secondary)',
+                            fontSize: '11px',
+                            padding: '4px 8px',
+                            marginTop: '6px',
+                            cursor: 'pointer',
+                            display: 'block',
+                            width: '100%',
+                            textAlign: 'center',
+                          }}
+                        >
+                          {showAllImpact
+                            ? 'Show top 10 files'
+                            : `Show all ${impactAnalysis.impacted_files.length} cascade files`}
+                        </button>
                       )}
                     </div>
                   )}

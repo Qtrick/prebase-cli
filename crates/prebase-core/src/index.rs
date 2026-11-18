@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::model::{
-    ArchitecturalInsights, DependencyEdge, FileImpactAnalysis, FileNode, GraphSnapshot,
-    ResolutionStatus,
+    ArchitecturalInsights, DependencyEdge, DependencyPath, DependencyPathResult,
+    FileImpactAnalysis, FileNode, GraphSnapshot, PathDirection, RelationshipKind, ResolutionStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,61 +195,205 @@ impl GraphIndex {
     }
 
     pub fn analyze_impact(&self, file_id: &str, max_depth: usize) -> Option<FileImpactAnalysis> {
-        let target_node = self.nodes_by_id.get(file_id)?;
+        let max_files = 100;
+        let target_exists = self.nodes_by_id.contains_key(file_id);
+        if !target_exists {
+            return None;
+        }
 
-        let mut queue = std::collections::VecDeque::new();
-        let mut visited = std::collections::HashSet::new();
-        visited.insert(file_id);
-
-        let direct_edges = self.incoming_by_target.get(file_id);
-        let direct_dependents_count = direct_edges.map(|e| e.len()).unwrap_or(0);
-
-        if let Some(edge_ids) = direct_edges {
-            for eid in edge_ids {
-                if let Some(edge) = self.edges_by_id.get(eid) {
-                    if edge.resolution_status == ResolutionStatus::ResolvedInternal {
-                        let is_type = edge.relationship_kind
-                            == crate::model::RelationshipKind::TypeOnly
-                            || (!edge.evidence.is_empty()
-                                && edge.evidence.iter().all(|ev| ev.is_type_only));
-                        let src_id = edge.source_file_id.as_str();
-                        if visited.insert(src_id) {
-                            queue.push_back((src_id, 1, is_type));
+        let get_rel_path = |id: &str| self.nodes_by_id.get(id).map(|n| n.relative_path.clone());
+        let get_deps = |u: &str| -> Vec<(String, bool)> {
+            let mut deps_map: HashMap<String, bool> = HashMap::new();
+            if let Some(edge_ids) = self.incoming_by_target.get(u) {
+                for eid in edge_ids {
+                    if let Some(edge) = self.edges_by_id.get(eid) {
+                        if edge.resolution_status == ResolutionStatus::ResolvedInternal {
+                            let src = &edge.source_file_id;
+                            if src != u {
+                                let is_type = edge.relationship_kind
+                                    == crate::model::RelationshipKind::TypeOnly
+                                    || (!edge.evidence.is_empty()
+                                        && edge.evidence.iter().all(|ev| ev.is_type_only));
+                                deps_map
+                                    .entry(src.clone())
+                                    .and_modify(|t| *t = *t && is_type)
+                                    .or_insert(is_type);
+                            }
                         }
                     }
                 }
             }
+            let mut list: Vec<(String, bool)> = deps_map.into_iter().collect();
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+            list
+        };
+
+        crate::insights::compute_impact_authoritative(
+            file_id,
+            max_depth,
+            max_files,
+            &self.insights.cycle_groups,
+            target_exists,
+            get_rel_path,
+            get_deps,
+        )
+    }
+
+    /// Finds the shortest dependency path between two files using BFS.
+    ///
+    /// Supports both `Outgoing` ("depends on") and `Incoming` ("used by") directions,
+    /// with optional filtering of type-only dependencies.
+    pub fn find_path(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        direction: PathDirection,
+        include_types: bool,
+    ) -> DependencyPathResult {
+        let from_resolved = self
+            .nodes_by_id
+            .get(from_id)
+            .map(|n| n.id.as_str())
+            .or_else(|| self.nodes_by_path.get(from_id).map(|s| s.as_str()));
+        let to_resolved = self
+            .nodes_by_id
+            .get(to_id)
+            .map(|n| n.id.as_str())
+            .or_else(|| self.nodes_by_path.get(to_id).map(|s| s.as_str()));
+
+        let from_id = match from_resolved {
+            Some(id) => id,
+            None => return DependencyPathResult::MissingEndpoint(from_id.to_string()),
+        };
+        let to_id = match to_resolved {
+            Some(id) => id,
+            None => return DependencyPathResult::MissingEndpoint(to_id.to_string()),
+        };
+        if from_id == to_id {
+            return DependencyPathResult::SameFile {
+                file_id: from_id.to_string(),
+                hops: 0,
+            };
         }
 
-        let mut impacted_files = Vec::new();
-        let max_files = 100;
-        let clamped_depth = max_depth.clamp(1, 20);
+        let max_hops = 100;
+        let max_visited = 10_000;
 
-        while let Some((curr_id, depth, is_type)) = queue.pop_front() {
-            if let Some(node) = self.nodes_by_id.get(curr_id) {
-                impacted_files.push(crate::model::ImpactItem {
-                    file_id: curr_id.to_string(),
-                    relative_path: node.relative_path.clone(),
-                    depth,
-                    is_type_only: is_type,
-                });
+        let mut queue = std::collections::VecDeque::new();
+        let mut visited = std::collections::HashSet::new();
+
+        match direction {
+            PathDirection::Outgoing => {
+                let mut predecessors: HashMap<String, (String, DependencyEdge)> = HashMap::new();
+                visited.insert(from_id.to_string());
+                queue.push_back((from_id.to_string(), 0usize));
+
+                while let Some((curr, depth)) = queue.pop_front() {
+                    if depth >= max_hops || visited.len() >= max_visited {
+                        continue;
+                    }
+                    if let Some(edge_ids) = self.outgoing_by_source.get(&curr) {
+                        for eid in edge_ids {
+                            if let Some(edge) = self.edges_by_id.get(eid) {
+                                if edge.resolution_status != ResolutionStatus::ResolvedInternal {
+                                    continue;
+                                }
+                                let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
+                                    || (!edge.evidence.is_empty()
+                                        && edge.evidence.iter().all(|ev| ev.is_type_only));
+                                if !include_types && is_type {
+                                    continue;
+                                }
+
+                                let next_id = &edge.target_file_id;
+                                if next_id == to_id {
+                                    let mut rev_nodes = vec![next_id.clone(), curr.clone()];
+                                    let mut rev_edges = vec![edge.clone()];
+                                    let mut tracer = curr.clone();
+                                    while let Some((parent, p_edge)) = predecessors.get(&tracer) {
+                                        rev_nodes.push(parent.clone());
+                                        rev_edges.push(p_edge.clone());
+                                        tracer = parent.clone();
+                                    }
+                                    rev_nodes.reverse();
+                                    rev_edges.reverse();
+                                    let hops = rev_edges.len();
+                                    let path_is_type = rev_edges.iter().all(|e| {
+                                        e.relationship_kind == RelationshipKind::TypeOnly
+                                            || (!e.evidence.is_empty()
+                                                && e.evidence.iter().all(|ev| ev.is_type_only))
+                                    });
+                                    return DependencyPathResult::Found(DependencyPath {
+                                        nodes: rev_nodes,
+                                        edges: rev_edges,
+                                        hops,
+                                        is_type_only: path_is_type,
+                                    });
+                                }
+
+                                if visited.insert(next_id.clone()) {
+                                    predecessors
+                                        .insert(next_id.clone(), (curr.clone(), edge.clone()));
+                                    queue.push_back((next_id.clone(), depth + 1));
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            PathDirection::Incoming => {
+                // "Direction 'incoming' (used by): D is used by A -> returns [A, B, C, D]"
+                let mut predecessors: HashMap<String, (String, DependencyEdge)> = HashMap::new();
+                visited.insert(from_id.to_string());
+                queue.push_back((from_id.to_string(), 0usize));
 
-            if impacted_files.len() >= max_files || depth >= clamped_depth {
-                continue;
-            }
+                while let Some((curr, depth)) = queue.pop_front() {
+                    if depth >= max_hops || visited.len() >= max_visited {
+                        continue;
+                    }
+                    if let Some(edge_ids) = self.incoming_by_target.get(&curr) {
+                        for eid in edge_ids {
+                            if let Some(edge) = self.edges_by_id.get(eid) {
+                                if edge.resolution_status != ResolutionStatus::ResolvedInternal {
+                                    continue;
+                                }
+                                let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
+                                    || (!edge.evidence.is_empty()
+                                        && edge.evidence.iter().all(|ev| ev.is_type_only));
+                                if !include_types && is_type {
+                                    continue;
+                                }
 
-            if let Some(edge_ids) = self.incoming_by_target.get(curr_id) {
-                for eid in edge_ids {
-                    if let Some(edge) = self.edges_by_id.get(eid) {
-                        if edge.resolution_status == ResolutionStatus::ResolvedInternal {
-                            let next_is_type = edge.relationship_kind
-                                == crate::model::RelationshipKind::TypeOnly
-                                || (!edge.evidence.is_empty()
-                                    && edge.evidence.iter().all(|ev| ev.is_type_only));
-                            let src_id = edge.source_file_id.as_str();
-                            if visited.insert(src_id) {
-                                queue.push_back((src_id, depth + 1, is_type && next_is_type));
+                                let next_id = &edge.source_file_id;
+                                if next_id == to_id {
+                                    let mut fwd_nodes = vec![next_id.clone(), curr.clone()];
+                                    let mut fwd_edges = vec![edge.clone()];
+                                    let mut tracer = curr.clone();
+                                    while let Some((downstream, d_edge)) = predecessors.get(&tracer)
+                                    {
+                                        fwd_nodes.push(downstream.clone());
+                                        fwd_edges.push(d_edge.clone());
+                                        tracer = downstream.clone();
+                                    }
+                                    let hops = fwd_edges.len();
+                                    let path_is_type = fwd_edges.iter().all(|e| {
+                                        e.relationship_kind == RelationshipKind::TypeOnly
+                                            || (!e.evidence.is_empty()
+                                                && e.evidence.iter().all(|ev| ev.is_type_only))
+                                    });
+                                    return DependencyPathResult::Found(DependencyPath {
+                                        nodes: fwd_nodes,
+                                        edges: fwd_edges,
+                                        hops,
+                                        is_type_only: path_is_type,
+                                    });
+                                }
+
+                                if visited.insert(next_id.clone()) {
+                                    predecessors
+                                        .insert(next_id.clone(), (curr.clone(), edge.clone()));
+                                    queue.push_back((next_id.clone(), depth + 1));
+                                }
                             }
                         }
                     }
@@ -257,28 +401,6 @@ impl GraphIndex {
             }
         }
 
-        let transitive_count = if impacted_files.len() > direct_dependents_count {
-            impacted_files.len() - direct_dependents_count
-        } else {
-            0
-        };
-
-        let (is_part_of_cycle, cycle_group_id) = self
-            .insights
-            .cycle_groups
-            .iter()
-            .find(|g| g.files.iter().any(|f| f == file_id))
-            .map(|g| (true, Some(g.id.clone())))
-            .unwrap_or((false, None));
-
-        Some(FileImpactAnalysis {
-            file_id: target_node.id.clone(),
-            direct_dependents_count,
-            transitive_dependents_count: transitive_count,
-            total_impact_count: impacted_files.len(),
-            is_part_of_cycle,
-            cycle_group_id,
-            impacted_files,
-        })
+        DependencyPathResult::NotFound
     }
 }

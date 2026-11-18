@@ -60,6 +60,8 @@ interface NetworkCanvasProps {
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   selectedAreaId?: string | null;
+  highlightedNodeIds?: Set<string> | null;
+  highlightedEdgeIds?: Set<string> | null;
   onSelectNode: (node: FileNode | null) => void;
   onSelectEdge: (edge: DependencyEdge | null) => void;
   revealRequest?: RevealRequest | null;
@@ -85,6 +87,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   selectedNodeId,
   selectedEdgeId,
   selectedAreaId = null,
+  highlightedNodeIds = null,
+  highlightedEdgeIds = null,
   onSelectNode,
   onSelectEdge,
   revealRequest,
@@ -555,10 +559,14 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           );
           if (!desc) continue;
 
-          // If an architectural area is selected and there is no active node highlight,
-          // dim edges that don't connect to or from this area
+          // If highlighted edges are specified (e.g. active dependency path or cycle group),
+          // dim non-path edges. Otherwise if an architectural area is selected, dim cross-area edges.
           let areaAlphaMultiplier = 1.0;
-          if (selectedAreaId && !activeHighlightId) {
+          if (highlightedEdgeIds && highlightedEdgeIds.size > 0) {
+            if (!highlightedEdgeIds.has(edge.id)) {
+              areaAlphaMultiplier = 0.08;
+            }
+          } else if (selectedAreaId && !activeHighlightId) {
             const srcArea = getAreaIdForPath(p1.node.relative_path);
             const tgtArea = getAreaIdForPath(p2.node.relative_path);
             if (srcArea !== selectedAreaId && tgtArea !== selectedAreaId) {
@@ -622,6 +630,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           let isDimmed = false;
           if (connectedNodes) {
             isDimmed = !connectedNodes.has(pNode.id);
+          } else if (highlightedNodeIds) {
+            isDimmed = !highlightedNodeIds.has(pNode.id);
           } else if (selectedAreaId) {
             isDimmed = getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId;
           }
@@ -633,9 +643,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.globalAlpha = isDimmed ? 0.18 : depthAlpha;
 
           const isLight = theme === 'light';
+          const isHighlighted = (highlightedNodeIds && highlightedNodeIds.has(pNode.id)) || false;
 
-          // Selection / Hover outer ring
-          if (isSelected) {
+          // Selection / Hover / Highlight outer ring
+          if (isSelected || isHighlighted) {
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 6, 0, Math.PI * 2);
             ctx.strokeStyle = isLight ? 'rgba(13, 148, 136, 0.45)' : 'rgba(45, 212, 191, 0.45)';
@@ -799,6 +810,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       selectedEdgeId,
       hoveredNodeId,
       selectedAreaId,
+      highlightedNodeIds,
+      highlightedEdgeIds,
       entryCandidate,
       disambiguatedLabels,
       neighborMap,
@@ -816,7 +829,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, isVisible, theme, requestRender]);
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, highlightedNodeIds, highlightedEdgeIds, isVisible, theme, requestRender]);
 
   // Clean up RAF and inertia on unmount
   useEffect(() => {

@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::model::{
     AnalysisCoverage, AnalysisIssue, ArchitecturalInsights, AreaCoupling, ConnectedArea,
-    CycleGroup, DependencyEdge, DiagnosticsSummary, FileImpactAnalysis, FileNode,
-    HighlyDependedFile, ImpactItem, NodeAnalysisStatus, RelationshipKind, ResolutionStatus,
+    CycleClassification, CycleGroup, DependencyEdge, DiagnosticsSummary, FileImpactAnalysis,
+    FileNode, HighlyDependedFile, ImpactItem, NodeAnalysisStatus, RelationshipKind,
+    ResolutionStatus,
 };
 
 /// Resolves a relative path to its canonical architectural area identifier.
@@ -97,6 +98,9 @@ pub fn detect_cycles(nodes: &[FileNode], edges: &[DependencyEdge]) -> (Vec<Cycle
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut self_loops: HashSet<usize> = HashSet::new();
 
+    // Track whether there is any runtime edge between (u, v)
+    let mut runtime_edges: HashSet<(usize, usize)> = HashSet::new();
+
     for edge in &internal_edges {
         if let (Some(&u), Some(&v)) = (
             id_to_idx.get(edge.source_file_id.as_str()),
@@ -104,10 +108,21 @@ pub fn detect_cycles(nodes: &[FileNode], edges: &[DependencyEdge]) -> (Vec<Cycle
         ) {
             if u == v {
                 self_loops.insert(u);
-            } else if !adj[u].contains(&v) {
-                adj[u].push(v);
+            }
+            adj[u].push(v);
+
+            let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
+                || (!edge.evidence.is_empty() && edge.evidence.iter().all(|e| e.is_type_only));
+            if !is_type {
+                runtime_edges.insert((u, v));
             }
         }
+    }
+
+    // Sort and deduplicate adj[u] - O(deg log deg) fixing AI-05, also guarantees deterministic neighbor order
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
     }
 
     // Tarjan's SCC state
@@ -194,29 +209,27 @@ pub fn detect_cycles(nodes: &[FileNode], edges: &[DependencyEdge]) -> (Vec<Cycle
         }
     }
 
+    // Sort each SCC's internal indices deterministically
+    for scc in &mut sccs {
+        scc.sort_unstable();
+    }
+
+    // Sort SCCs deterministically by their first node ID before assigning cycle-1, cycle-2, etc.
+    sccs.sort_by(|a, b| node_ids[a[0]].cmp(&node_ids[b[0]]));
+
     let mut cycle_groups = Vec::new();
     let mut total_cycle_files = 0;
 
-    // Edge lookup for evidence and type-only check: (source, target) -> edge
-    let mut edge_map: HashMap<(&str, &str), &DependencyEdge> = HashMap::new();
-    for edge in &internal_edges {
-        edge_map.insert(
-            (edge.source_file_id.as_str(), edge.target_file_id.as_str()),
-            edge,
-        );
-    }
-
     for (group_idx, scc_indices) in sccs.into_iter().enumerate() {
-        let mut files: Vec<String> = scc_indices
+        let files: Vec<String> = scc_indices
             .iter()
             .map(|&idx| node_ids[idx].clone())
             .collect();
-        files.sort(); // Deterministic file ordering
         total_cycle_files += files.len();
 
         let scc_set: HashSet<usize> = scc_indices.iter().copied().collect();
 
-        // Count internal edges inside this cycle group
+        // Count internal edges inside this cycle group and check if all are type-only
         let mut group_edge_count = 0;
         let mut all_type_only = true;
 
@@ -224,19 +237,21 @@ pub fn detect_cycles(nodes: &[FileNode], edges: &[DependencyEdge]) -> (Vec<Cycle
             for &v in &adj[u] {
                 if scc_set.contains(&v) {
                     group_edge_count += 1;
-                    let u_id = node_ids[u].as_str();
-                    let v_id = node_ids[v].as_str();
-                    if let Some(edge) = edge_map.get(&(u_id, v_id)) {
-                        let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
-                            || (!edge.evidence.is_empty()
-                                && edge.evidence.iter().all(|e| e.is_type_only));
-                        if !is_type {
-                            all_type_only = false;
-                        }
+                    if runtime_edges.contains(&(u, v)) {
+                        all_type_only = false;
                     }
                 }
             }
         }
+
+        let is_type_only = all_type_only;
+        let classification = if all_type_only {
+            CycleClassification::TypeOnly
+        } else if has_runtime_cycle(&scc_indices, &adj, &runtime_edges) {
+            CycleClassification::RuntimeRelevant
+        } else {
+            CycleClassification::MixedStructural
+        };
 
         // Extract a bounded, concrete example cycle path using BFS within the SCC subgraph
         let example_cycle = find_example_cycle(&scc_indices, &adj, &node_ids);
@@ -245,18 +260,75 @@ pub fn detect_cycles(nodes: &[FileNode], edges: &[DependencyEdge]) -> (Vec<Cycle
             id: format!("cycle-{}", group_idx + 1),
             files,
             example_cycle,
-            is_type_only: all_type_only,
+            is_type_only,
             edge_count: group_edge_count,
+            classification,
         });
     }
-
-    // Sort cycle groups deterministically by first file path
-    cycle_groups.sort_by(|a, b| a.files.first().cmp(&b.files.first()));
 
     (cycle_groups, total_cycle_files)
 }
 
-/// Finds a minimal example cycle within an SCC subgraph starting from the lexicographically first node.
+/// Checks if the runtime subgraph within an SCC contains a directed cycle (using Kahn's topological sort).
+fn has_runtime_cycle(
+    scc_indices: &[usize],
+    adj: &[Vec<usize>],
+    runtime_edges: &HashSet<(usize, usize)>,
+) -> bool {
+    let scc_set: HashSet<usize> = scc_indices.iter().copied().collect();
+
+    // 1. Check for runtime self-loop
+    for &u in scc_indices {
+        if runtime_edges.contains(&(u, u)) {
+            return true;
+        }
+    }
+
+    // 2. Build runtime subgraph within this SCC
+    let mut in_degree: HashMap<usize, usize> = HashMap::new();
+    let mut runtime_adj: HashMap<usize, Vec<usize>> = HashMap::new();
+
+    for &u in scc_indices {
+        in_degree.insert(u, 0);
+        runtime_adj.insert(u, Vec::new());
+    }
+
+    for &u in scc_indices {
+        for &v in &adj[u] {
+            if u != v && scc_set.contains(&v) && runtime_edges.contains(&(u, v)) {
+                runtime_adj.entry(u).or_default().push(v);
+                *in_degree.entry(v).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // 3. Kahn's algorithm
+    let mut queue = VecDeque::new();
+    for &u in scc_indices {
+        if in_degree.get(&u).copied().unwrap_or(0) == 0 {
+            queue.push_back(u);
+        }
+    }
+
+    let mut visited_count = 0;
+    while let Some(u) = queue.pop_front() {
+        visited_count += 1;
+        if let Some(neighbors) = runtime_adj.get(&u) {
+            for &v in neighbors {
+                if let Some(deg) = in_degree.get_mut(&v) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(v);
+                    }
+                }
+            }
+        }
+    }
+
+    visited_count < scc_indices.len()
+}
+
+/// Finds a minimal example cycle within an SCC subgraph starting from candidate nodes in deterministic sorted order.
 fn find_example_cycle(
     scc_indices: &[usize],
     adj: &[Vec<usize>],
@@ -268,76 +340,65 @@ fn find_example_cycle(
 
     let scc_set: HashSet<usize> = scc_indices.iter().copied().collect();
 
-    // Pick lexicographically smallest node as starting candidate
     let mut sorted_scc = scc_indices.to_vec();
     sorted_scc.sort_by_key(|&idx| &node_ids[idx]);
-    let start_node = sorted_scc[0];
 
-    // Check for self-loop first
-    if adj[start_node].contains(&start_node) {
-        return vec![node_ids[start_node].clone(), node_ids[start_node].clone()];
+    // Handle single-node SCC (self-loop)
+    if sorted_scc.len() == 1 {
+        let u = sorted_scc[0];
+        if adj[u].contains(&u) {
+            return vec![node_ids[u].clone(), node_ids[u].clone()];
+        }
+        return Vec::new();
     }
 
-    // BFS to find shortest path from any outgoing neighbor of start_node back to start_node
-    let mut queue = VecDeque::new();
-    let mut prev: HashMap<usize, usize> = HashMap::new();
-    let mut visited: HashSet<usize> = HashSet::new();
+    // Try finding a cycle of length >= 2 starting from candidate nodes in sorted order
+    for &start_node in &sorted_scc {
+        let mut queue = VecDeque::new();
+        let mut prev: HashMap<usize, usize> = HashMap::new();
+        let mut visited: HashSet<usize> = HashSet::new();
 
-    for &next in &adj[start_node] {
-        if scc_set.contains(&next) {
-            queue.push_back(next);
-            prev.insert(next, start_node);
-            visited.insert(next);
-        }
-    }
-
-    let mut found = false;
-    while let Some(curr) = queue.pop_front() {
-        if curr == start_node {
-            found = true;
-            break;
-        }
-
-        for &next in &adj[curr] {
-            if next == start_node {
-                prev.insert(next, curr);
-                found = true;
-                break;
-            }
-            if scc_set.contains(&next) && visited.insert(next) {
-                prev.insert(next, curr);
+        for &next in &adj[start_node] {
+            if next != start_node && scc_set.contains(&next) && visited.insert(next) {
+                prev.insert(next, start_node);
                 queue.push_back(next);
             }
         }
 
+        let mut found = false;
+        while let Some(curr) = queue.pop_front() {
+            if adj[curr].contains(&start_node) {
+                prev.insert(start_node, curr);
+                found = true;
+                break;
+            }
+
+            for &next in &adj[curr] {
+                if next != start_node && scc_set.contains(&next) && visited.insert(next) {
+                    prev.insert(next, curr);
+                    queue.push_back(next);
+                }
+            }
+        }
+
         if found {
-            break;
+            let mut path = vec![start_node];
+            let mut curr = prev.get(&start_node).copied();
+            while let Some(p) = curr {
+                path.push(p);
+                if p == start_node {
+                    break;
+                }
+                curr = prev.get(&p).copied();
+            }
+            path.reverse();
+            return path.iter().map(|&idx| node_ids[idx].clone()).collect();
+        } else if adj[start_node].contains(&start_node) {
+            return vec![node_ids[start_node].clone(), node_ids[start_node].clone()];
         }
     }
 
-    if found {
-        let mut path = vec![start_node];
-        let mut curr = prev.get(&start_node).copied();
-        while let Some(p) = curr {
-            path.push(p);
-            if p == start_node {
-                break;
-            }
-            curr = prev.get(&p).copied();
-        }
-        path.reverse();
-        path.iter().map(|&idx| node_ids[idx].clone()).collect()
-    } else {
-        // Fallback: list of nodes in SCC
-        let mut path: Vec<String> = sorted_scc
-            .iter()
-            .map(|&idx| node_ids[idx].clone())
-            .collect();
-        if let Some(first) = path.first().cloned() {
-            path.push(first);
-        }
-        path
-    }
+    Vec::new()
 }
 
 /// Identifies top files with the most incoming dependencies (dependents).
@@ -392,91 +453,104 @@ pub fn compute_highly_depended_files(
 
 /// Calculates architectural area coupling and cross-area communication metrics.
 pub fn compute_area_couplings(nodes: &[FileNode], edges: &[DependencyEdge]) -> Vec<AreaCoupling> {
-    let mut file_to_area: HashMap<&str, String> = HashMap::new();
-    let mut area_nodes: HashMap<String, Vec<&FileNode>> = HashMap::new();
+    struct AreaAcc {
+        area_id: String,
+        file_count: usize,
+        analyzed_file_count: usize,
+        internal_edges: usize,
+        outbound_edges: usize,
+        inbound_edges: usize,
+        connected: HashMap<usize, (usize, usize)>, // other_area_idx -> (outbound, inbound)
+    }
+
+    let mut area_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut areas: Vec<AreaAcc> = Vec::new();
+    let mut file_to_area_idx: HashMap<&str, usize> = HashMap::with_capacity(nodes.len());
 
     for node in nodes {
         let area_id = get_area_id_for_path(&node.relative_path);
-        file_to_area.insert(node.id.as_str(), area_id.clone());
-        area_nodes.entry(area_id).or_default().push(node);
-    }
+        let is_analyzed = matches!(
+            node.analysis_status,
+            NodeAnalysisStatus::Analyzed | NodeAnalysisStatus::PartiallyAnalyzed
+        );
 
-    let mut internal_counts: HashMap<String, usize> = HashMap::new();
-    let mut outbound_counts: HashMap<String, usize> = HashMap::new();
-    let mut inbound_counts: HashMap<String, usize> = HashMap::new();
-    let mut area_matrix: HashMap<(String, String), usize> = HashMap::new();
+        let area_idx = match area_to_idx.get(&area_id) {
+            Some(&idx) => idx,
+            None => {
+                let idx = areas.len();
+                area_to_idx.insert(area_id.clone(), idx);
+                areas.push(AreaAcc {
+                    area_id,
+                    file_count: 0,
+                    analyzed_file_count: 0,
+                    internal_edges: 0,
+                    outbound_edges: 0,
+                    inbound_edges: 0,
+                    connected: HashMap::new(),
+                });
+                idx
+            }
+        };
+
+        areas[area_idx].file_count += 1;
+        if is_analyzed {
+            areas[area_idx].analyzed_file_count += 1;
+        }
+        file_to_area_idx.insert(node.id.as_str(), area_idx);
+    }
 
     for edge in edges {
         if edge.resolution_status == ResolutionStatus::ResolvedInternal {
-            let src_area = file_to_area.get(edge.source_file_id.as_str());
-            let tgt_area = file_to_area.get(edge.target_file_id.as_str());
-
-            if let (Some(src), Some(tgt)) = (src_area, tgt_area) {
-                if src == tgt {
-                    *internal_counts.entry(src.clone()).or_default() += 1;
+            if let (Some(&src_idx), Some(&tgt_idx)) = (
+                file_to_area_idx.get(edge.source_file_id.as_str()),
+                file_to_area_idx.get(edge.target_file_id.as_str()),
+            ) {
+                if src_idx == tgt_idx {
+                    areas[src_idx].internal_edges += 1;
                 } else {
-                    *outbound_counts.entry(src.clone()).or_default() += 1;
-                    *inbound_counts.entry(tgt.clone()).or_default() += 1;
-                    *area_matrix.entry((src.clone(), tgt.clone())).or_default() += 1;
+                    areas[src_idx].outbound_edges += 1;
+                    areas[tgt_idx].inbound_edges += 1;
+                    areas[src_idx].connected.entry(tgt_idx).or_default().0 += 1;
+                    areas[tgt_idx].connected.entry(src_idx).or_default().1 += 1;
                 }
             }
         }
     }
 
-    let mut area_couplings = Vec::new();
-    let mut all_areas: Vec<String> = area_nodes.keys().cloned().collect();
-    all_areas.sort();
+    let area_names: Vec<String> = areas.iter().map(|a| a.area_id.clone()).collect();
+    let mut area_couplings: Vec<AreaCoupling> = areas
+        .into_iter()
+        .map(|acc| {
+            let mut connected_areas: Vec<ConnectedArea> = acc
+                .connected
+                .into_iter()
+                .map(|(other_idx, (out_c, in_c))| ConnectedArea {
+                    area_id: area_names[other_idx].clone(),
+                    outbound_count: out_c,
+                    inbound_count: in_c,
+                })
+                .collect();
 
-    for area_id in all_areas {
-        let nodes_in_area = &area_nodes[&area_id];
-        let file_count = nodes_in_area.len();
-        let analyzed_file_count = nodes_in_area
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.analysis_status,
-                    NodeAnalysisStatus::Analyzed | NodeAnalysisStatus::PartiallyAnalyzed
-                )
-            })
-            .count();
+            // Sort by total inter-area communication descending, then area_id ascending
+            connected_areas.sort_by(|a, b| {
+                (b.outbound_count + b.inbound_count)
+                    .cmp(&(a.outbound_count + a.inbound_count))
+                    .then_with(|| a.area_id.cmp(&b.area_id))
+            });
 
-        let mut connected_areas_map: HashMap<String, (usize, usize)> = HashMap::new();
-        for ((s, t), &count) in &area_matrix {
-            if s == &area_id {
-                connected_areas_map.entry(t.clone()).or_default().0 += count;
-            } else if t == &area_id {
-                connected_areas_map.entry(s.clone()).or_default().1 += count;
+            AreaCoupling {
+                area_id: acc.area_id,
+                file_count: acc.file_count,
+                analyzed_file_count: acc.analyzed_file_count,
+                internal_edge_count: acc.internal_edges,
+                outbound_edge_count: acc.outbound_edges,
+                inbound_edge_count: acc.inbound_edges,
+                connected_areas,
             }
-        }
+        })
+        .collect();
 
-        let mut connected_areas: Vec<ConnectedArea> = connected_areas_map
-            .into_iter()
-            .map(|(other_area, (out_c, in_c))| ConnectedArea {
-                area_id: other_area,
-                outbound_count: out_c,
-                inbound_count: in_c,
-            })
-            .collect();
-
-        // Sort by total inter-area communication descending
-        connected_areas.sort_by(|a, b| {
-            (b.outbound_count + b.inbound_count)
-                .cmp(&(a.outbound_count + a.inbound_count))
-                .then_with(|| a.area_id.cmp(&b.area_id))
-        });
-
-        area_couplings.push(AreaCoupling {
-            area_id: area_id.clone(),
-            file_count,
-            analyzed_file_count,
-            internal_edge_count: internal_counts.get(&area_id).copied().unwrap_or(0),
-            outbound_edge_count: outbound_counts.get(&area_id).copied().unwrap_or(0),
-            inbound_edge_count: inbound_counts.get(&area_id).copied().unwrap_or(0),
-            connected_areas,
-        });
-    }
-
-    // Sort by outbound communication descending
+    // Sort by outbound communication descending, then area_id ascending
     area_couplings.sort_by(|a, b| {
         b.outbound_edge_count
             .cmp(&a.outbound_edge_count)
@@ -492,12 +566,14 @@ pub fn compute_diagnostics_summary(
     issues: &[AnalysisIssue],
     coverage: &AnalysisCoverage,
 ) -> DiagnosticsSummary {
+    let mut fully_analyzed = 0;
     let mut partially_analyzed = 0;
     let mut unsupported = 0;
     let mut failed = 0;
 
     for node in nodes {
         match node.analysis_status {
+            NodeAnalysisStatus::Analyzed => fully_analyzed += 1,
             NodeAnalysisStatus::PartiallyAnalyzed => partially_analyzed += 1,
             NodeAnalysisStatus::Unsupported => unsupported += 1,
             NodeAnalysisStatus::Failed => failed += 1,
@@ -515,12 +591,143 @@ pub fn compute_diagnostics_summary(
     DiagnosticsSummary {
         total_discovered: coverage.total_discovered,
         total_analyzed: coverage.total_analyzed,
+        total_fully_analyzed: fully_analyzed,
         total_partially_analyzed: partially_analyzed,
         total_unsupported: unsupported,
         total_failed: failed,
         total_unresolved_imports: unresolved_imports,
         total_issues: issues.len(),
     }
+}
+
+/// Authoritative implementation of downstream impact analysis.
+pub fn compute_impact_authoritative<FRelPath, FDependents>(
+    target_file_id: &str,
+    max_depth: usize,
+    max_files: usize,
+    cycle_groups: &[CycleGroup],
+    target_exists: bool,
+    get_relative_path: FRelPath,
+    get_dependents: FDependents,
+) -> Option<FileImpactAnalysis>
+where
+    FRelPath: Fn(&str) -> Option<String>,
+    FDependents: Fn(&str) -> Vec<(String, bool)>,
+{
+    if !target_exists {
+        return None;
+    }
+
+    let clamped_depth = max_depth.clamp(1, 20);
+    let bound_files = max_files;
+
+    let (is_part_of_cycle, cycle_group_id) = cycle_groups
+        .iter()
+        .find(|g| g.files.iter().any(|f| f == target_file_id))
+        .map(|g| (true, Some(g.id.clone())))
+        .unwrap_or((false, None));
+
+    if bound_files == 0 {
+        return Some(FileImpactAnalysis {
+            file_id: target_file_id.to_string(),
+            direct_dependents_count: 0,
+            transitive_dependents_count: 0,
+            total_impact_count: 0,
+            is_part_of_cycle,
+            cycle_group_id,
+            impacted_files: Vec::new(),
+        });
+    }
+
+    let direct_deps = get_dependents(target_file_id);
+    let direct_dependents_count = direct_deps.len();
+
+    // Cache get_dependents results to avoid recomputation across BFS traversals
+    let mut deps_cache: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    deps_cache.insert(target_file_id.to_string(), direct_deps.clone());
+
+    let mut get_cached_deps = |id: &str| -> Vec<(String, bool)> {
+        if let Some(cached) = deps_cache.get(id) {
+            return cached.clone();
+        }
+        let deps = get_dependents(id);
+        deps_cache.insert(id.to_string(), deps.clone());
+        deps
+    };
+
+    // 1. Runtime reachability: BFS starting from target_file_id following pure runtime edges up to clamped_depth
+    let mut runtime_reachable: HashSet<String> = HashSet::new();
+    let mut runtime_queue: VecDeque<(String, usize)> = VecDeque::new();
+    let mut runtime_visited: HashSet<String> = HashSet::new();
+
+    runtime_visited.insert(target_file_id.to_string());
+    runtime_queue.push_back((target_file_id.to_string(), 0));
+
+    while let Some((curr, depth)) = runtime_queue.pop_front() {
+        if depth < clamped_depth {
+            let deps = get_cached_deps(&curr);
+            for (dep_id, is_type) in deps {
+                if !is_type && runtime_visited.insert(dep_id.clone()) {
+                    runtime_reachable.insert(dep_id.clone());
+                    runtime_queue.push_back((dep_id, depth + 1));
+                }
+            }
+        }
+    }
+
+    // 2. General BFS: collect impacted files up to bound_files and clamped_depth
+    let mut impacted_files: Vec<ImpactItem> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(target_file_id.to_string());
+
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    for (dep_id, _) in direct_deps {
+        if visited.insert(dep_id.clone()) {
+            queue.push_back((dep_id, 1));
+        }
+    }
+
+    while let Some((curr_id, depth)) = queue.pop_front() {
+        if impacted_files.len() >= bound_files {
+            break;
+        }
+
+        if let Some(rel_path) = get_relative_path(&curr_id) {
+            let is_type_only = !runtime_reachable.contains(&curr_id);
+            impacted_files.push(ImpactItem {
+                file_id: curr_id.clone(),
+                relative_path: rel_path,
+                depth,
+                is_type_only,
+            });
+        }
+
+        if impacted_files.len() >= bound_files {
+            break;
+        }
+
+        if depth < clamped_depth {
+            let next_deps = get_cached_deps(&curr_id);
+            for (next_id, _) in next_deps {
+                if visited.insert(next_id.clone()) {
+                    queue.push_back((next_id, depth + 1));
+                }
+            }
+        }
+    }
+
+    let transitive_dependents_count = impacted_files.iter().filter(|i| i.depth > 1).count();
+    let total_impact_count = impacted_files.len();
+
+    Some(FileImpactAnalysis {
+        file_id: target_file_id.to_string(),
+        direct_dependents_count,
+        transitive_dependents_count,
+        total_impact_count,
+        is_part_of_cycle,
+        cycle_group_id,
+        impacted_files,
+    })
 }
 
 /// Computes bounded transitive downstream impact for a file (who depends on this file directly and transitively).
@@ -532,88 +739,57 @@ pub fn analyze_file_impact(
     max_depth: usize,
     max_files: usize,
 ) -> Option<FileImpactAnalysis> {
-    let target_node = nodes.iter().find(|n| n.id == target_file_id)?;
+    let target_exists = nodes.iter().any(|n| n.id == target_file_id);
+    if !target_exists {
+        return None;
+    }
 
-    // Map file ID to relative path
     let id_to_path: HashMap<&str, &str> = nodes
         .iter()
         .map(|n| (n.id.as_str(), n.relative_path.as_str()))
         .collect();
 
     // Inverted adjacency: target -> [sources that import target]
-    let mut dependents_adj: HashMap<&str, Vec<(&str, bool)>> = HashMap::new();
+    let mut dependents_adj: HashMap<&str, HashMap<&str, bool>> = HashMap::new();
     for edge in edges {
         if edge.resolution_status == ResolutionStatus::ResolvedInternal {
-            let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
-                || (!edge.evidence.is_empty() && edge.evidence.iter().all(|e| e.is_type_only));
-            dependents_adj
-                .entry(edge.target_file_id.as_str())
-                .or_default()
-                .push((edge.source_file_id.as_str(), is_type));
-        }
-    }
-
-    let mut direct_dependents_count = 0;
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(target_file_id);
-
-    let mut queue: VecDeque<(&str, usize, bool)> = VecDeque::new();
-
-    if let Some(direct_deps) = dependents_adj.get(target_file_id) {
-        direct_dependents_count = direct_deps.len();
-        for &(dep_id, is_type) in direct_deps {
-            if visited.insert(dep_id) {
-                queue.push_back((dep_id, 1, is_type));
+            let src = edge.source_file_id.as_str();
+            let tgt = edge.target_file_id.as_str();
+            if src != tgt {
+                let is_type = edge.relationship_kind == RelationshipKind::TypeOnly
+                    || (!edge.evidence.is_empty() && edge.evidence.iter().all(|e| e.is_type_only));
+                dependents_adj
+                    .entry(tgt)
+                    .or_default()
+                    .entry(src)
+                    .and_modify(|t| *t = *t && is_type)
+                    .or_insert(is_type);
             }
         }
     }
 
-    let mut impacted_files = Vec::new();
-
-    while let Some((curr_id, depth, is_type)) = queue.pop_front() {
-        if let Some(&rel_path) = id_to_path.get(curr_id) {
-            impacted_files.push(ImpactItem {
-                file_id: curr_id.to_string(),
-                relative_path: rel_path.to_string(),
-                depth,
-                is_type_only: is_type,
-            });
-        }
-
-        if impacted_files.len() >= max_files || depth >= max_depth {
-            continue;
-        }
-
-        if let Some(next_deps) = dependents_adj.get(curr_id) {
-            for &(next_id, next_is_type) in next_deps {
-                if visited.insert(next_id) {
-                    queue.push_back((next_id, depth + 1, is_type && next_is_type));
-                }
-            }
-        }
+    let mut sorted_dependents: HashMap<&str, Vec<(String, bool)>> = HashMap::new();
+    for (&tgt, deps) in &dependents_adj {
+        let mut list: Vec<(String, bool)> =
+            deps.iter().map(|(&s, &t)| (s.to_string(), t)).collect();
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        sorted_dependents.insert(tgt, list);
     }
 
-    let transitive_count = if impacted_files.len() > direct_dependents_count {
-        impacted_files.len() - direct_dependents_count
-    } else {
-        0
+    let get_rel_path = |id: &str| id_to_path.get(id).map(|s| s.to_string());
+    let get_deps = |id: &str| -> Vec<(String, bool)> {
+        sorted_dependents.get(id).cloned().unwrap_or_default()
     };
 
-    let (is_part_of_cycle, cycle_group_id) = cycle_groups
-        .iter()
-        .find(|g| g.files.iter().any(|f| f == target_file_id))
-        .map(|g| (true, Some(g.id.clone())))
-        .unwrap_or((false, None));
-
-    Some(FileImpactAnalysis {
-        file_id: target_node.id.clone(),
-        direct_dependents_count,
-        transitive_dependents_count: transitive_count,
-        total_impact_count: impacted_files.len(),
-        is_part_of_cycle,
-        cycle_group_id,
-        impacted_files,
-    })
+    compute_impact_authoritative(
+        target_file_id,
+        max_depth,
+        max_files,
+        cycle_groups,
+        target_exists,
+        get_rel_path,
+        get_deps,
+    )
 }
 
 #[cfg(test)]
@@ -800,5 +976,37 @@ mod tests {
             .find(|i| i.file_id == "src/c.ts")
             .unwrap();
         assert_eq!(c_item.depth, 2);
+    }
+
+    #[test]
+    fn test_diagnostics_summary_counts_fully_analyzed() {
+        let mut n1 = make_node("src/a.ts");
+        n1.analysis_status = NodeAnalysisStatus::Analyzed;
+        let mut n2 = make_node("src/b.ts");
+        n2.analysis_status = NodeAnalysisStatus::PartiallyAnalyzed;
+        let mut n3 = make_node("src/c.ts");
+        n3.analysis_status = NodeAnalysisStatus::Unsupported;
+        let mut n4 = make_node("src/d.ts");
+        n4.analysis_status = NodeAnalysisStatus::Failed;
+        let mut n5 = make_node("src/e.ts");
+        n5.analysis_status = NodeAnalysisStatus::Analyzed;
+
+        let nodes = vec![n1, n2, n3, n4, n5];
+        let coverage = AnalysisCoverage {
+            total_discovered: 5,
+            total_analyzed: 3,
+            total_excluded: 0,
+            total_issues: 0,
+            is_complete: true,
+        };
+
+        let summary = compute_diagnostics_summary(&nodes, &[], &coverage);
+        assert_eq!(summary.total_discovered, 5);
+        assert_eq!(summary.total_analyzed, 3);
+        assert_eq!(summary.total_fully_analyzed, 2);
+        assert_eq!(summary.total_partially_analyzed, 1);
+        assert_eq!(summary.total_unsupported, 1);
+        assert_eq!(summary.total_failed, 1);
+        assert_eq!(summary.total_issues, 0);
     }
 }

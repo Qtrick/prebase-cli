@@ -1,4 +1,4 @@
-use prebase_git::GitEngine;
+use prebase_git::{GitEngine, GitError};
 use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
@@ -320,4 +320,283 @@ fn test_file_history_anchor_continuation_and_pagination() {
             c.hash
         );
     }
+}
+
+/// HIST-01: Pagination cursor is pinned to commit revision (`{pinned_head}:{offset}:{last_hash}`)
+#[test]
+fn test_hist_01_cursor_pinned_to_commit_revision() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "PreBase Test"]);
+    run_git(repo_path, &["config", "user.email", "test@prebase.dev"]);
+
+    let tracked_file = repo_path.join("file.txt");
+    for i in 1..=15 {
+        fs::write(&tracked_file, format!("content version {i}\n")).unwrap();
+        run_git(repo_path, &["add", "file.txt"]);
+        run_git(
+            repo_path,
+            &["commit", "-m", &format!("commit {i} for file.txt")],
+        );
+    }
+
+    let head_sha_bytes = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap()
+        .stdout;
+    let head_sha = String::from_utf8_lossy(&head_sha_bytes).trim().to_string();
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+    let page1 = engine
+        .get_file_history("file.txt", 10, None)
+        .expect("page 1 failed");
+
+    assert_eq!(page1.commits.len(), 10);
+    assert!(page1.has_more);
+    let cursor = page1.next_cursor.expect("next_cursor must be present");
+
+    // Format must be: "{pinned_head}:{offset}:{last_hash}"
+    let parts: Vec<&str> = cursor.split(':').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "Cursor must have exactly 3 colon-delimited parts '{{pinned_head}}:{{offset}}:{{last_hash}}', got: {:?}",
+        cursor
+    );
+    assert_eq!(
+        parts[0], head_sha,
+        "Cursor pinned_head must match the repository HEAD SHA at page 1 query time"
+    );
+    assert_eq!(
+        parts[1], "10",
+        "Cursor offset must be 10 after fetching 10 commits"
+    );
+    assert_eq!(
+        parts[2], page1.commits[9].hash,
+        "Cursor last_hash must match the hash of the last commit in page 1"
+    );
+}
+
+/// HIST-01: Interleaving commits pagination correctness:
+/// Create repo with 15 commits to file.txt. Fetch page 1 (limit 10). Create 3 new commits on main.
+/// Fetch page 2 using page 1's cursor.
+/// Assert: zero duplicate commits, zero skipped commits.
+#[test]
+fn test_hist_01_interleaving_commits_pagination_correctness() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "PreBase Test"]);
+    run_git(repo_path, &["config", "user.email", "test@prebase.dev"]);
+
+    let tracked_file = repo_path.join("file.txt");
+    let mut original_hashes = Vec::new();
+    for i in 1..=15 {
+        fs::write(&tracked_file, format!("line {i}\n")).unwrap();
+        run_git(repo_path, &["add", "file.txt"]);
+        run_git(repo_path, &["commit", "-m", &format!("commit {i}")]);
+        let sha_bytes = Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+        original_hashes.push(String::from_utf8_lossy(&sha_bytes).trim().to_string());
+    }
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+
+    // Fetch page 1 (limit 10)
+    let page1 = engine
+        .get_file_history("file.txt", 10, None)
+        .expect("page 1 failed");
+    assert_eq!(page1.commits.len(), 10);
+    assert!(page1.has_more);
+    let cursor = page1.next_cursor.clone().expect("cursor should exist");
+
+    // Create 3 new interleaving commits on main modifying file.txt
+    for i in 16..=18 {
+        fs::write(&tracked_file, format!("interleaving commit {i}\n")).unwrap();
+        run_git(repo_path, &["add", "file.txt"]);
+        run_git(repo_path, &["commit", "-m", &format!("commit {i}")]);
+    }
+
+    // Fetch page 2 using page 1's cursor
+    let page2 = engine
+        .get_file_history("file.txt", 10, Some(&cursor))
+        .expect("page 2 failed");
+
+    // Assert: page 2 must fetch the remaining 5 commits from the pinned history
+    assert_eq!(
+        page2.commits.len(),
+        5,
+        "Page 2 must return exactly 5 remaining commits from pinned revision"
+    );
+
+    // Assert: zero duplicate commits
+    let p1_hashes: std::collections::HashSet<_> =
+        page1.commits.iter().map(|c| c.hash.clone()).collect();
+    for c in &page2.commits {
+        assert!(
+            !p1_hashes.contains(&c.hash),
+            "Duplicate commit found in page 2 that was already in page 1: {} ({})",
+            c.hash,
+            c.summary
+        );
+    }
+
+    // Assert: zero skipped commits (all 15 original commits must be present in reverse chronological order)
+    let combined_hashes: Vec<String> = page1
+        .commits
+        .iter()
+        .chain(page2.commits.iter())
+        .map(|c| c.hash.clone())
+        .collect();
+
+    assert_eq!(
+        combined_hashes.len(),
+        15,
+        "Combined page 1 and page 2 must contain exactly 15 commits"
+    );
+
+    // Original hashes were chronological 1..=15, git log order is 15..=1
+    let mut expected_order = original_hashes.clone();
+    expected_order.reverse();
+    assert_eq!(
+        combined_hashes, expected_order,
+        "Combined commits must match the exact pinned original commits with zero skipped"
+    );
+
+    // Commits 16, 17, 18 created AFTER page 1 must NOT appear in page 2
+    for c in &page2.commits {
+        assert!(
+            !c.summary.contains("commit 16")
+                && !c.summary.contains("commit 17")
+                && !c.summary.contains("commit 18"),
+            "Interleaved commit appeared in paginated results: {}",
+            c.summary
+        );
+    }
+}
+
+/// HIST-01: Invalid cursor format or non-existent commit hash in cursor returns GitError::InvalidRevision or GitError::StaleCursor
+#[test]
+fn test_hist_01_invalid_cursor_and_non_existent_commit_hash() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "PreBase Test"]);
+    run_git(repo_path, &["config", "user.email", "test@prebase.dev"]);
+
+    let tracked_file = repo_path.join("file.txt");
+    fs::write(&tracked_file, "initial\n").unwrap();
+    run_git(repo_path, &["add", "file.txt"]);
+    run_git(repo_path, &["commit", "-m", "initial commit"]);
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+
+    // 1. Invalid cursor formats: non-SHA, invalid syntax
+    let invalid_cursors = [
+        "not_a_valid_cursor",
+        "zzzzzz:10:yyyyyy",
+        "123:abc",
+        "::",
+        ":10:",
+    ];
+
+    for cur in invalid_cursors {
+        let res = engine.get_file_history("file.txt", 10, Some(cur));
+        assert!(
+            res.is_err(),
+            "Expected error for invalid cursor '{cur}', but got Ok"
+        );
+        match res.unwrap_err() {
+            GitError::InvalidRevision(_) | GitError::StaleCursor(_) => {}
+            other => panic!(
+                "Expected GitError::InvalidRevision or GitError::StaleCursor for '{cur}', got: {:?}",
+                other
+            ),
+        }
+    }
+
+    // 2. Non-existent commit SHA in cursor
+    let fake_sha_cursor =
+        "0123456789abcdef0123456789abcdef01234567:10:0123456789abcdef0123456789abcdef01234567";
+    let fake_res = engine.get_file_history("file.txt", 10, Some(fake_sha_cursor));
+    assert!(
+        fake_res.is_err(),
+        "Expected error for non-existent commit SHA cursor, but got Ok"
+    );
+    match fake_res.unwrap_err() {
+        GitError::StaleCursor(_) | GitError::InvalidRevision(_) => {}
+        other => panic!(
+            "Expected GitError::StaleCursor or GitError::InvalidRevision for non-existent SHA, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// HIST-01: File history on a file that has been renamed (old.txt -> new.txt)
+#[test]
+fn test_hist_01_file_rename_history_tracking() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "PreBase Test"]);
+    run_git(repo_path, &["config", "user.email", "test@prebase.dev"]);
+
+    // Commit 1: create old.txt
+    let old_file = repo_path.join("old.txt");
+    fs::write(&old_file, "content in old file\n").unwrap();
+    run_git(repo_path, &["add", "old.txt"]);
+    run_git(repo_path, &["commit", "-m", "commit 1: add old.txt"]);
+
+    // Commit 2: update old.txt
+    fs::write(&old_file, "content in old file updated\n").unwrap();
+    run_git(repo_path, &["add", "old.txt"]);
+    run_git(repo_path, &["commit", "-m", "commit 2: update old.txt"]);
+
+    // Commit 3: rename old.txt -> new.txt
+    run_git(repo_path, &["mv", "old.txt", "new.txt"]);
+    run_git(
+        repo_path,
+        &["commit", "-m", "commit 3: rename old.txt to new.txt"],
+    );
+
+    // Commit 4: update new.txt
+    let new_file = repo_path.join("new.txt");
+    fs::write(&new_file, "content in new file updated again\n").unwrap();
+    run_git(repo_path, &["add", "new.txt"]);
+    run_git(repo_path, &["commit", "-m", "commit 4: update new.txt"]);
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+
+    // Query file history for new.txt
+    let history = engine
+        .get_file_history("new.txt", 10, None)
+        .expect("get_file_history for new.txt failed");
+
+    assert_eq!(
+        history.commits.len(),
+        4,
+        "File history across rename must follow all 4 commits, found: {:?}",
+        history
+            .commits
+            .iter()
+            .map(|c| &c.summary)
+            .collect::<Vec<_>>()
+    );
+
+    let summaries: Vec<&str> = history.commits.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(summaries[0], "commit 4: update new.txt");
+    assert_eq!(summaries[1], "commit 3: rename old.txt to new.txt");
+    assert_eq!(summaries[2], "commit 2: update old.txt");
+    assert_eq!(summaries[3], "commit 1: add old.txt");
 }

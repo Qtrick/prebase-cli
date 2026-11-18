@@ -137,6 +137,14 @@ pub struct GraphSnapshot {
     pub insights: Option<ArchitecturalInsights>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CycleClassification {
+    #[default]
+    RuntimeRelevant,
+    TypeOnly,
+    MixedStructural,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CycleGroup {
     pub id: String,
@@ -144,6 +152,8 @@ pub struct CycleGroup {
     pub example_cycle: Vec<String>,
     pub is_type_only: bool,
     pub edge_count: usize,
+    #[serde(default)]
+    pub classification: CycleClassification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +186,8 @@ pub struct AreaCoupling {
 pub struct DiagnosticsSummary {
     pub total_discovered: usize,
     pub total_analyzed: usize,
+    #[serde(default)]
+    pub total_fully_analyzed: usize,
     pub total_partially_analyzed: usize,
     pub total_unsupported: usize,
     pub total_failed: usize,
@@ -209,4 +221,159 @@ pub struct FileImpactAnalysis {
     pub is_part_of_cycle: bool,
     pub cycle_group_id: Option<String>,
     pub impacted_files: Vec<ImpactItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PathDirection {
+    #[default]
+    Outgoing,
+    Incoming,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyPath {
+    pub nodes: Vec<String>,
+    pub edges: Vec<DependencyEdge>,
+    pub hops: usize,
+    pub is_type_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencyPathResult {
+    Found(DependencyPath),
+    NotFound,
+    SameFile { file_id: String, hops: usize },
+    MissingEndpoint(String),
+}
+
+impl Serialize for DependencyPathResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            Self::Found(path) => {
+                let mut s = serializer.serialize_struct("DependencyPathResult", 2)?;
+                s.serialize_field("status", "found")?;
+                s.serialize_field("path", path)?;
+                s.end()
+            }
+            Self::NotFound => {
+                let mut s = serializer.serialize_struct("DependencyPathResult", 1)?;
+                s.serialize_field("status", "not_found")?;
+                s.end()
+            }
+            Self::SameFile { file_id, hops } => {
+                let mut s = serializer.serialize_struct("DependencyPathResult", 3)?;
+                s.serialize_field("status", "same_file")?;
+                s.serialize_field("file_id", file_id)?;
+                s.serialize_field("hops", hops)?;
+                s.end()
+            }
+            Self::MissingEndpoint(missing_file_id) => {
+                let mut s = serializer.serialize_struct("DependencyPathResult", 2)?;
+                s.serialize_field("status", "missing_endpoint")?;
+                s.serialize_field("missing_file_id", missing_file_id)?;
+                s.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DependencyPathResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SameFileHelper {
+            file_id: String,
+            #[serde(default)]
+            hops: usize,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Tagged {
+                status: String,
+                path: Option<DependencyPath>,
+                file_id: Option<String>,
+                hops: Option<usize>,
+                missing_file_id: Option<String>,
+            },
+            LegacyFound {
+                #[serde(rename = "Found")]
+                found: DependencyPath,
+            },
+            #[allow(dead_code)]
+            LegacyNotFound(String),
+            LegacySameFile {
+                #[serde(rename = "SameFile")]
+                same_file: SameFileHelper,
+            },
+            LegacyMissingEndpoint {
+                #[serde(rename = "MissingEndpoint")]
+                missing: String,
+            },
+        }
+
+        match Helper::deserialize(deserializer)? {
+            Helper::Tagged {
+                status,
+                path,
+                file_id,
+                hops,
+                missing_file_id,
+            } => match status.as_str() {
+                "found" => path
+                    .map(Self::Found)
+                    .ok_or_else(|| serde::de::Error::missing_field("path")),
+                "same_file" => {
+                    let fid = file_id.unwrap_or_default();
+                    Ok(Self::SameFile {
+                        file_id: fid,
+                        hops: hops.unwrap_or(0),
+                    })
+                }
+                "missing_endpoint" => {
+                    Ok(Self::MissingEndpoint(missing_file_id.unwrap_or_default()))
+                }
+                _ => Ok(Self::NotFound),
+            },
+            Helper::LegacyFound { found } => Ok(Self::Found(found)),
+            Helper::LegacyNotFound(_) => Ok(Self::NotFound),
+            Helper::LegacySameFile { same_file } => Ok(Self::SameFile {
+                file_id: same_file.file_id,
+                hops: same_file.hops,
+            }),
+            Helper::LegacyMissingEndpoint { missing } => Ok(Self::MissingEndpoint(missing)),
+        }
+    }
+}
+
+impl DependencyPathResult {
+    pub fn is_found(&self) -> bool {
+        matches!(self, Self::Found(_))
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound)
+    }
+
+    pub fn path(&self) -> Option<&DependencyPath> {
+        match self {
+            Self::Found(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn hops(&self) -> usize {
+        match self {
+            Self::Found(p) => p.hops,
+            Self::SameFile { hops, .. } => *hops,
+            _ => 0,
+        }
+    }
 }

@@ -180,6 +180,21 @@ impl GitEngine {
         git_meta.is_file()
     }
 
+    /// Returns the HEAD commit hash, or None if empty repository, non-git directory, or unborn branch.
+    pub fn get_head_commit(&self) -> Option<String> {
+        match self.run_git_str(&["rev-parse", "HEAD"]) {
+            Ok(h) => {
+                let trimmed = h.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
     /// Retrieves repository status including active branch, head commit, and uncommitted dirty files,
     /// using null-delimited porcelain format to prevent path-escaping and encoding bugs.
     pub fn get_status(&self) -> Result<GitStatus, GitError> {
@@ -213,17 +228,7 @@ impl GitEngine {
         };
 
         // Head commit hash
-        let head_commit = match self.run_git_str(&["rev-parse", "HEAD"]) {
-            Ok(h) => {
-                let trimmed = h.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }
-            Err(_) => None,
-        };
+        let head_commit = self.get_head_commit();
 
         // Parse dirty files using NUL-delimited porcelain format (-z)
         // Format: XY <path>\0 [orig_path\0]
@@ -277,9 +282,9 @@ impl GitEngine {
         }
 
         // Get current HEAD commit SHA
-        let current_head = match self.run_git_str(&["rev-parse", "HEAD"]) {
-            Ok(out) => out.trim().to_string(),
-            Err(_) => {
+        let current_head = match self.get_head_commit() {
+            Some(out) => out,
+            None => {
                 // Empty repository (unborn branch)
                 return Ok(HistoryPage {
                     commits: Vec::new(),
@@ -289,15 +294,6 @@ impl GitEngine {
                 });
             }
         };
-
-        if current_head.is_empty() {
-            return Ok(HistoryPage {
-                commits: Vec::new(),
-                next_cursor: None,
-                has_more: false,
-                total_commits: Some(0),
-            });
-        }
 
         let fetch_limit = limit.clamp(1, 200);
 
@@ -549,34 +545,110 @@ impl GitEngine {
         })
     }
 
-    /// Fetches the commit history that touched a specific file path (supports renames via --follow and anchor cursor continuation).
+    /// Fetches the commit history that touched a specific file path (supports renames via --follow and pinned cursor continuation).
     pub fn get_file_history(
         &self,
         file_path: &str,
         limit: usize,
         cursor: Option<&str>,
     ) -> Result<FileHistoryResult, GitError> {
-        let clean_path = file_path.trim_start_matches('/').trim_start_matches('\\');
-        let fetch_limit = limit.clamp(1, 200);
+        if !self.is_git_repository() {
+            return Err(GitError::NotAGitRepository(self.root_path.clone()));
+        }
 
-        let offset = match cursor {
-            Some(cur) => {
-                let cur = cur.trim();
-                if let Some(pos) = cur.rfind(':') {
-                    cur[pos + 1..].parse::<usize>().unwrap_or(0)
-                } else {
-                    cur.parse::<usize>().unwrap_or(0)
-                }
+        let clean_path = file_path.trim_start_matches('/').trim_start_matches('\\');
+        if clean_path.is_empty() {
+            return Err(GitError::FileNotFound(file_path.to_string()));
+        }
+        if clean_path.contains('\0')
+            || std::path::Path::new(clean_path)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(GitError::InvalidRevision(clean_path.to_string()));
+        }
+        let current_head = match self.get_head_commit() {
+            Some(h) => h,
+            None => {
+                return Ok(FileHistoryResult {
+                    file_path: clean_path.to_string(),
+                    commits: Vec::new(),
+                    next_cursor: None,
+                    has_more: false,
+                    total_commits: Some(0),
+                });
             }
-            None => 0,
         };
 
-        // Total commits touching file
-        let total_commits =
-            match self.run_git_str(&["rev-list", "--count", "HEAD", "--", clean_path]) {
-                Ok(out) => out.trim().parse::<usize>().ok(),
-                Err(_) => None,
-            };
+        let fetch_limit = limit.clamp(1, 200);
+
+        let (pinned_head, offset) = match cursor {
+            Some(cur) if !cur.trim().is_empty() => {
+                let cursor_str = cur.trim();
+                let parts: Vec<&str> = cursor_str.split(':').collect();
+                if parts.len() != 3 {
+                    return Err(GitError::InvalidRevision(cursor_str.to_string()));
+                }
+                let pinned = parts[0].trim();
+                let offset_str = parts[1].trim();
+                let last_hash = parts[2].trim();
+
+                if !is_valid_commit_hash(pinned) {
+                    return Err(GitError::InvalidRevision(cursor_str.to_string()));
+                }
+
+                if self
+                    .run_git_cmd(&["cat-file", "-e", &format!("{pinned}^{{commit}}")])
+                    .is_err()
+                {
+                    return Err(GitError::StaleCursor(cursor_str.to_string()));
+                }
+
+                let parsed_offset = offset_str
+                    .parse::<usize>()
+                    .map_err(|_| GitError::InvalidRevision(cursor_str.to_string()))?;
+
+                if !last_hash.is_empty() && !is_valid_commit_hash(last_hash) {
+                    return Err(GitError::InvalidRevision(cursor_str.to_string()));
+                }
+
+                if parsed_offset > 0 && !last_hash.is_empty() {
+                    let skip_arg = format!("--skip={}", parsed_offset - 1);
+                    let verify_args = [
+                        "log",
+                        "--follow",
+                        "--topo-order",
+                        "--format=%H",
+                        "-n",
+                        "1",
+                        &skip_arg,
+                        pinned,
+                        "--",
+                        clean_path,
+                    ];
+                    let expected_hash = self.run_git_str(&verify_args).unwrap_or_default();
+                    if expected_hash.trim() != last_hash {
+                        return Err(GitError::StaleCursor(cursor_str.to_string()));
+                    }
+                }
+
+                (pinned.to_string(), parsed_offset)
+            }
+            _ => (current_head, 0),
+        };
+
+        // Total commits touching file from the pinned HEAD
+        let total_commits = match self.run_git_str(&[
+            "log",
+            "--follow",
+            "--format=%H",
+            &pinned_head,
+            "--",
+            clean_path,
+        ]) {
+            Ok(out) => Some(out.lines().filter(|l| !l.trim().is_empty()).count()),
+            Err(_) => None,
+        };
 
         let mut args: Vec<String> = vec![
             "log".into(),
@@ -591,6 +663,7 @@ impl GitEngine {
             args.push(format!("--skip={offset}"));
         }
 
+        args.push(pinned_head.clone());
         args.push("--".into());
         args.push(clean_path.into());
 
@@ -606,7 +679,7 @@ impl GitEngine {
         let next_offset = offset + raw_commits.len();
         let next_cursor = if has_more {
             let last_hash = raw_commits.last().map(|c| c.hash.as_str()).unwrap_or("");
-            Some(format!("{last_hash}:{next_offset}"))
+            Some(format!("{pinned_head}:{next_offset}:{last_hash}"))
         } else {
             None
         };
@@ -621,6 +694,10 @@ impl GitEngine {
             total_commits,
         })
     }
+}
+
+fn is_valid_commit_hash(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn is_valid_sha(s: &str) -> bool {

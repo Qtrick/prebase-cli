@@ -105,9 +105,15 @@ export function computeRelationshipLayout(
   if (!isVertical) {
     // -------------------------------------------------------------------------
     // HORIZONTAL 3-to-5 COLUMN LAYOUT (Dependents -> Focus -> Dependencies)
+    // Dynamic widescreen column spacing: expands comfortably on displays >= 1600px
     // -------------------------------------------------------------------------
+    const effectiveColSpacing =
+      viewport.width >= 1600
+        ? Math.min(460, Math.round(COL_SPACING * (viewport.width / 1300)))
+        : COL_SPACING;
+
     for (const col of graphData.columns) {
-      const colX = col.columnIndex * COL_SPACING;
+      const colX = col.columnIndex * effectiveColSpacing;
       const count = col.nodes.length;
       const isFocusCol = col.role === 'focus';
       const cardWidth = isFocusCol ? FOCUS_WIDTH : NEIGHBOR_WIDTH;

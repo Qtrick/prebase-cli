@@ -13,6 +13,16 @@ pub use insights::{
     get_area_id_for_path,
 };
 pub use model::*;
+
+pub fn find_dependency_path(
+    index: &GraphIndex,
+    from_id: &str,
+    to_id: &str,
+    direction: PathDirection,
+    include_types: bool,
+) -> DependencyPathResult {
+    index.find_path(from_id, to_id, direction, include_types)
+}
 #[cfg(unix)]
 pub use safe_reader::validate_descriptor_identity;
 pub use safe_reader::{is_safe_relative_path, safe_read_file_to_string, SafeReadError};

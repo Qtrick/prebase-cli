@@ -174,7 +174,8 @@ impl RepositoryAnalyzer {
                                 if let Some(norm) = ImportResolver::normalize_path(&target) {
                                     entry_candidate = Some(norm);
                                 }
-                            } else if let Some(types_val) = v.get("types").and_then(|t| t.as_str()) {
+                            } else if let Some(types_val) = v.get("types").and_then(|t| t.as_str())
+                            {
                                 let target = pkg_dir.join(types_val.trim_start_matches("./"));
                                 if let Some(norm) = ImportResolver::normalize_path(&target) {
                                     entry_candidate = Some(norm);
@@ -332,11 +333,6 @@ impl RepositoryAnalyzer {
                             } else {
                                 "UnresolvedImport".to_string()
                             };
-                        let issue_kind = if reason.contains("Workspace package") || reason.contains("target") {
-                            "UnresolvedInternalTarget".to_string()
-                        } else {
-                            "UnresolvedImport".to_string()
-                        };
                         issues.push(AnalysisIssue {
                             file_path: file.relative_path.clone(),
                             issue_kind,

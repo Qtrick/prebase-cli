@@ -1,5 +1,14 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { DependencyEdge, FileNode, GraphSnapshot, RepositoryInfo, WatcherHealth, ViewportInsets } from '../types/graph';
+import {
+  DependencyEdge,
+  FileNode,
+  GraphSnapshot,
+  RepositoryInfo,
+  WatcherHealth,
+  ViewportInsets,
+  CycleGroup,
+  DependencyPathResult,
+} from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession, defaultNetworkCoordinator } from '../transport/api';
 import { NetworkCanvas, RevealRequest } from '../graphs/network/NetworkCanvas';
@@ -243,6 +252,31 @@ export const App: React.FC = () => {
     left: 20,
     right: 20,
   }), []);
+
+  // Path Explorer & Cycle Group state
+  const [selectedCycleGroup, setSelectedCycleGroup] = useState<CycleGroup | null>(null);
+  const [activeDependencyPath, setActiveDependencyPath] = useState<DependencyPathResult | null>(null);
+  const [isPathExplorerOpen, setIsPathExplorerOpen] = useState(false);
+  const [pathExplorerSourceNode, setPathExplorerSourceNode] = useState<FileNode | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  // Compute highlighted nodes and edges for Path Explorer and Cycle Group Focus
+  const highlightedNodeIds = useMemo<Set<string> | undefined>(() => {
+    if (selectedCycleGroup) {
+      return new Set(selectedCycleGroup.files);
+    }
+    if (activeDependencyPath?.status === 'found') {
+      return new Set(activeDependencyPath.path.nodes);
+    }
+    return undefined;
+  }, [selectedCycleGroup, activeDependencyPath]);
+
+  const highlightedEdgeIds = useMemo<Set<string> | undefined>(() => {
+    if (activeDependencyPath?.status === 'found') {
+      return new Set(activeDependencyPath.path.edges.map((e) => e.id));
+    }
+    return undefined;
+  }, [activeDependencyPath]);
 
   // SSE Reconnecting Grace Period (2.0s delay prevents flashing "Reconnecting..." on brief blips)
   useEffect(() => {
@@ -494,14 +528,10 @@ export const App: React.FC = () => {
   // Bounded snapshot reconciliation with exponential backoff after failed fetch or network drop
   const scheduleSnapshotReconciliation = useCallback(() => {
     if (reconciliationTimerRef.current) return;
-    if (coordinator.isConverged()) {
-      reconciliationAttemptsRef.current = 0;
-      setReconciliationFailed(false);
-      return;
-    }
     const attempt = reconciliationAttemptsRef.current;
     if (attempt >= 10) {
       setReconciliationFailed(true);
+      setIsUpdating(false);
       return;
     }
     const delay = Math.min(8000, 200 * Math.pow(1.5, Math.min(attempt, 6)));
@@ -513,6 +543,7 @@ export const App: React.FC = () => {
         .then((st) => {
           if (st.watcher_health) setWatcherHealth(st.watcher_health);
           if (coordinator.shouldApplySnapshot(st.revision)) {
+            setIsUpdating(true);
             coordinator.recordObservedEventRevision(st.revision);
             api
               .getNetwork()
@@ -521,12 +552,14 @@ export const App: React.FC = () => {
                 if (coordinator.isConverged()) {
                   reconciliationAttemptsRef.current = 0;
                   setReconciliationFailed(false);
+                  setIsUpdating(false);
                 } else {
                   reconciliationAttemptsRef.current++;
                   if (reconciliationAttemptsRef.current < 10) {
                     scheduleSnapshotReconciliation();
                   } else {
                     setReconciliationFailed(true);
+                    setIsUpdating(false);
                   }
                 }
               })
@@ -536,6 +569,7 @@ export const App: React.FC = () => {
                   scheduleSnapshotReconciliation();
                 } else {
                   setReconciliationFailed(true);
+                  setIsUpdating(false);
                 }
               });
           } else {
@@ -543,12 +577,14 @@ export const App: React.FC = () => {
             if (coordinator.isConverged()) {
               reconciliationAttemptsRef.current = 0;
               setReconciliationFailed(false);
+              setIsUpdating(false);
             } else {
               reconciliationAttemptsRef.current++;
               if (reconciliationAttemptsRef.current < 10) {
                 scheduleSnapshotReconciliation();
               } else {
                 setReconciliationFailed(true);
+                setIsUpdating(false);
               }
             }
           }
@@ -559,6 +595,7 @@ export const App: React.FC = () => {
             scheduleSnapshotReconciliation();
           } else {
             setReconciliationFailed(true);
+            setIsUpdating(false);
           }
         });
     }, delay);
@@ -643,6 +680,7 @@ export const App: React.FC = () => {
       // Trailing fetch check: executes even if the incoming snapshot was stale/rejected,
       // ensuring newer announced revisions are never stranded!
       if (coordinator.hasPendingNewerRevision()) {
+        setIsUpdating(true);
         if (!shouldApply) {
           // If the snapshot we just received did not advance the revision, do not immediately re-fetch in a tight loop.
           // Schedule bounded reconciliation with backoff.
@@ -655,6 +693,8 @@ export const App: React.FC = () => {
               scheduleSnapshotReconciliation();
             });
         }
+      } else {
+        setIsUpdating(false);
       }
     };
 
@@ -666,6 +706,7 @@ export const App: React.FC = () => {
         if (event.type === 'network.updated') {
           const { revision, changed_files } = event.data;
           if (coordinator.shouldProcessSseEvent(revision)) {
+            setIsUpdating(true);
             coordinator.recordObservedEventRevision(revision);
             api
               .getNetwork()
@@ -689,6 +730,7 @@ export const App: React.FC = () => {
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
+              setIsUpdating(true);
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
@@ -714,6 +756,7 @@ export const App: React.FC = () => {
           api.getStatus().then((st) => {
             if (st.watcher_health) setWatcherHealth(st.watcher_health);
             if (coordinator.shouldApplySnapshot(st.revision)) {
+              setIsUpdating(true);
               coordinator.recordObservedEventRevision(st.revision);
               api
                 .getNetwork()
@@ -750,6 +793,8 @@ export const App: React.FC = () => {
         setSelectedEdge(null);
         setSelectedCommit(null);
         setRevealRequest(null);
+        setSelectedCycleGroup(null);
+        setActiveDependencyPath(null);
         return;
       }
 
@@ -1009,7 +1054,8 @@ export const App: React.FC = () => {
               sseState,
               liveRevision,
               isDelayedReconnecting,
-              reconciliationFailed
+              reconciliationFailed,
+              isUpdating || coordinator.hasPendingNewerRevision()
             );
 
             return (
@@ -1217,6 +1263,8 @@ export const App: React.FC = () => {
                       selectedNodeId={selectedNode?.id || null}
                       selectedEdgeId={selectedEdge?.id || null}
                       selectedAreaId={selectedAreaId}
+                      highlightedNodeIds={highlightedNodeIds}
+                      highlightedEdgeIds={highlightedEdgeIds}
                       onSelectNode={handleSelectNode}
                       onSelectEdge={handleSelectEdge}
                       revealRequest={revealRequest}
@@ -1376,6 +1424,8 @@ export const App: React.FC = () => {
             setSelectedNode(null);
             setSelectedEdge(null);
             setSelectedAreaId(null);
+            setSelectedCycleGroup(null);
+            setActiveDependencyPath(null);
           }}
           onViewFileHistory={handleViewFileHistory}
           onRevealNode={handleExplicitRevealNode}
@@ -1390,6 +1440,17 @@ export const App: React.FC = () => {
           onSwitchTo3D={() => handleSwitchNetworkMode('3d')}
           isCollapsed={inspectorCollapsed}
           onToggleCollapse={() => setInspectorCollapsed((c) => !c)}
+          selectedCycleGroup={selectedCycleGroup}
+          onSelectCycleGroup={setSelectedCycleGroup}
+          isPathExplorerOpen={isPathExplorerOpen}
+          onTogglePathExplorer={setIsPathExplorerOpen}
+          pathExplorerSourceNode={pathExplorerSourceNode}
+          activeDependencyPath={activeDependencyPath}
+          onActivePathChange={setActiveDependencyPath}
+          onOpenPathExplorer={(node) => {
+            setPathExplorerSourceNode(node);
+            setIsPathExplorerOpen(true);
+          }}
         />
       )}
 

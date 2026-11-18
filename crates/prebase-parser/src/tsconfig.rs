@@ -9,9 +9,16 @@ pub struct CompilerOptions {
     pub paths: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ExtendsField {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawTsConfig {
-    pub extends: Option<String>,
+    pub extends: Option<ExtendsField>,
     #[serde(rename = "compilerOptions")]
     pub compiler_options: Option<CompilerOptions>,
 }
@@ -73,21 +80,29 @@ impl TsConfig {
             return None;
         }
 
-        let content = match prebase_core::safe_read_file_to_string(
-            repo_root,
-            &normalized_path,
-            1024 * 1024,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
-                    warn!("Failed or rejected reading tsconfig at {normalized_path}: {e}");
-                }
-                return None;
-            }
-        };
+        let res = Self::load_with_inheritance_inner(repo_root, &normalized_path, visited, depth);
+        visited.remove(&normalized_path);
+        res
+    }
 
-        let parent_dir = Path::new(&normalized_path)
+    fn load_with_inheritance_inner(
+        repo_root: &Path,
+        normalized_path: &str,
+        visited: &mut std::collections::HashSet<String>,
+        depth: usize,
+    ) -> Option<Self> {
+        let content =
+            match prebase_core::safe_read_file_to_string(repo_root, normalized_path, 1024 * 1024) {
+                Ok(c) => c,
+                Err(e) => {
+                    if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
+                        warn!("Failed or rejected reading tsconfig at {normalized_path}: {e}");
+                    }
+                    return None;
+                }
+            };
+
+        let parent_dir = Path::new(normalized_path)
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_string_lossy()
@@ -102,11 +117,18 @@ impl TsConfig {
             }
         };
 
-        let mut base_config = if let Some(extends_ref) = &raw.extends {
+        let extends_list: Vec<String> = match raw.extends {
+            Some(ExtendsField::Single(s)) => vec![s],
+            Some(ExtendsField::Multiple(list)) => list,
+            None => Vec::new(),
+        };
+
+        let mut base_config: Option<Self> = None;
+        for extends_ref in &extends_list {
             if extends_ref.starts_with('.') {
                 let p = Path::new(&parent_dir).join(extends_ref);
                 let candidate = crate::resolver::ImportResolver::normalize_path(&p);
-                if let Some(target) = candidate {
+                let loaded = if let Some(target) = candidate {
                     let resolved = if prebase_core::is_safe_relative_path(&target)
                         && repo_root.join(&target).is_file()
                     {
@@ -126,18 +148,40 @@ impl TsConfig {
                     })
                 } else {
                     None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+                };
 
-        if let Some(extends_ref) = &raw.extends {
-            if extends_ref.starts_with('.') && base_config.is_none() {
-                warn!("Failed to resolve local tsconfig extends reference '{extends_ref}' at {normalized_path}");
-                return None;
+                let next_base = match loaded {
+                    Some(cfg) => cfg,
+                    None => {
+                        warn!("Failed to resolve local tsconfig extends reference '{extends_ref}' at {normalized_path}");
+                        return None;
+                    }
+                };
+
+                let has_next_base_url = next_base.base_url.is_some();
+                let has_next_paths = next_base.paths_anchor.is_some();
+                base_config = Some(match base_config {
+                    Some(prev) => Self {
+                        config_dir: next_base.config_dir,
+                        base_url: next_base.base_url.or(prev.base_url),
+                        base_url_anchor: if has_next_base_url {
+                            next_base.base_url_anchor
+                        } else {
+                            prev.base_url_anchor
+                        },
+                        paths: if has_next_paths {
+                            next_base.paths
+                        } else {
+                            prev.paths
+                        },
+                        paths_anchor: if has_next_paths {
+                            next_base.paths_anchor
+                        } else {
+                            prev.paths_anchor
+                        },
+                    },
+                    None => next_base,
+                });
             }
         }
 

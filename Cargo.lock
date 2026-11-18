@@ -1146,6 +1146,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "ignore",
+ "rand",
  "serde",
  "serde_json",
  "sha2 0.10.9",

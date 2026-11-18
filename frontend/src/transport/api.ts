@@ -1,9 +1,11 @@
 import {
   ArchitecturalInsights,
+  DependencyPathResult,
   FileImpactAnalysis,
   FileInspection,
   FileNode,
   GraphSnapshot,
+  PathDirection,
   RepositoryInfo,
   DependencyEdge,
   WatcherHealth,
@@ -186,6 +188,21 @@ export const api = {
   getImpact: (fileId: string, depth = 5, signal?: AbortSignal) => {
     const encoded = fileId.split('/').map(encodeURIComponent).join('/');
     return request<FileImpactAnalysis>(`/api/v1/impact/${encoded}?depth=${depth}`, signal);
+  },
+  getDependencyPath: (
+    source: string,
+    target: string,
+    direction: PathDirection = 'outgoing',
+    includeTypes = true,
+    signal?: AbortSignal
+  ) => {
+    const params = new URLSearchParams({
+      source,
+      target,
+      direction,
+      include_types: String(includeTypes),
+    });
+    return request<DependencyPathResult>(`/api/v1/dependency-path?${params.toString()}`, signal);
   },
   searchFiles: (query: string, limit = 50, signal?: AbortSignal) =>
     request<FileNode[]>(`/api/v1/files?q=${encodeURIComponent(query)}&limit=${limit}`, signal),
