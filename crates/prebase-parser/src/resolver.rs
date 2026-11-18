@@ -167,11 +167,10 @@ impl ImportResolver {
                         target.clone()
                     };
 
-                    let candidate_path = Self::join_base_and_target(
-                        &cfg.config_dir,
-                        cfg.base_url.as_deref(),
-                        &mapped,
-                    );
+                    let anchor = cfg.paths_anchor.as_deref().unwrap_or(&cfg.config_dir);
+                    let base_anchor = cfg.base_url_anchor.as_deref().unwrap_or(anchor);
+                    let candidate_path =
+                        Self::join_base_and_target(base_anchor, cfg.base_url.as_deref(), &mapped);
                     if let Some(normalized) = Self::normalize_path(&candidate_path) {
                         if let Some(hit) = self.try_resolve_file(&normalized) {
                             return ResolvedTarget::Internal(hit);
@@ -186,8 +185,9 @@ impl ImportResolver {
 
             // Fallback: baseUrl alone for non-relative non-alias imports
             if let Some(base_url) = &cfg.base_url {
+                let base_anchor = cfg.base_url_anchor.as_deref().unwrap_or(&cfg.config_dir);
                 let candidate_path =
-                    Self::join_base_and_target(&cfg.config_dir, Some(base_url), clean_spec);
+                    Self::join_base_and_target(base_anchor, Some(base_url), clean_spec);
                 if let Some(normalized) = Self::normalize_path(&candidate_path) {
                     if let Some(hit) = self.try_resolve_file(&normalized) {
                         return ResolvedTarget::Internal(hit);
@@ -211,7 +211,43 @@ impl ImportResolver {
 
         // 4. Workspace package imports resolution (e.g. "@myorg/core" or "@myorg/core/utils")
         if let Some(target) = self.workspace_packages.get(clean_spec) {
-            return ResolvedTarget::Internal(target.clone());
+            if self.known_files.contains(target) {
+                return ResolvedTarget::Internal(target.clone());
+            } else {
+                // Attempt to resolve grounded source entrypoint (e.g. src/index.ts) if dist is absent
+                let mut fallback_source = None;
+                let pkg_dir = Path::new(target).parent().and_then(|p| {
+                    if p.ends_with("dist") || p.ends_with("lib") {
+                        p.parent()
+                    } else {
+                        Some(p)
+                    }
+                });
+                if let Some(dir) = pkg_dir {
+                    for candidate in &[
+                        "src/index.ts",
+                        "src/index.tsx",
+                        "src/index.js",
+                        "index.ts",
+                        "index.js",
+                    ] {
+                        let candidate_path = dir.join(candidate);
+                        if let Some(norm) = Self::normalize_path(&candidate_path) {
+                            if self.known_files.contains(&norm) {
+                                fallback_source = Some(norm);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(src) = fallback_source {
+                    return ResolvedTarget::Internal(src);
+                }
+
+                return ResolvedTarget::Unresolved(format!(
+                    "Workspace package '{clean_spec}' target '{target}' does not exist in indexed files"
+                ));
+            }
         }
         for (pkg_name, entry_path) in &self.workspace_packages {
             let prefix = format!("{pkg_name}/");

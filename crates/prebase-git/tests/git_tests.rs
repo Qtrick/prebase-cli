@@ -67,7 +67,7 @@ fn test_defect_g1_literal_pathspec_handling() {
     // It MUST NOT match commits 2 or 3 (which only modified private.txt).
     // It MUST only contain commit 1!
     let history_top = engine
-        .get_file_history(":(top)private.txt", 10)
+        .get_file_history(":(top)private.txt", 10, None)
         .expect("get_file_history for :(top)private.txt failed");
 
     assert_eq!(
@@ -102,7 +102,7 @@ fn test_defect_g1_literal_pathspec_handling() {
     // It MUST NOT match regular.txt, private.txt, etc.
     // It MUST only contain commit 5!
     let history_star = engine
-        .get_file_history("*.txt", 10)
+        .get_file_history("*.txt", 10, None)
         .expect("get_file_history for *.txt failed");
 
     assert_eq!(
@@ -160,7 +160,7 @@ fn test_defect_g2_record_separator_collision() {
 
     // 2. Test get_file_history
     let file_history = engine
-        .get_file_history("file.txt", 10)
+        .get_file_history("file.txt", 10, None)
         .expect("get_file_history failed");
 
     assert_eq!(
@@ -266,4 +266,58 @@ fn test_multi_commit_history_framing() {
 
     // Total count check
     assert_eq!(page1.total_commits, Some(6));
+}
+
+/// Verifies anchor continuation and pagination for file history
+#[test]
+fn test_file_history_anchor_continuation_and_pagination() {
+    let dir = tempdir().expect("failed to create tempdir");
+    let repo_path = dir.path();
+
+    run_git(repo_path, &["init", "-b", "main"]);
+    run_git(repo_path, &["config", "user.name", "PreBase Test"]);
+    run_git(repo_path, &["config", "user.email", "test@prebase.dev"]);
+
+    let tracked_file = repo_path.join("app.ts");
+    for i in 1..=15 {
+        fs::write(&tracked_file, format!("export const version = {i};\n")).unwrap();
+        run_git(repo_path, &["add", "app.ts"]);
+        run_git(
+            repo_path,
+            &["commit", "-m", &format!("commit {i} for app.ts")],
+        );
+    }
+
+    let engine = GitEngine::new(repo_path.to_path_buf());
+
+    // Fetch page 1 with limit 10
+    let page1 = engine
+        .get_file_history("app.ts", 10, None)
+        .expect("page 1 file history failed");
+
+    assert_eq!(page1.commits.len(), 10);
+    assert!(page1.has_more, "Page 1 must have has_more = true");
+    assert!(
+        page1.next_cursor.is_some(),
+        "Page 1 must return next_cursor"
+    );
+
+    // Fetch page 2 with cursor
+    let page2 = engine
+        .get_file_history("app.ts", 10, page1.next_cursor.as_deref())
+        .expect("page 2 file history failed");
+
+    assert_eq!(page2.commits.len(), 5);
+    assert!(!page2.has_more, "Page 2 must have has_more = false");
+    assert!(page2.next_cursor.is_none());
+
+    // Verify disjoint sets (0 duplicate commit SHAs)
+    let p1_shas: std::collections::HashSet<_> = page1.commits.iter().map(|c| &c.hash).collect();
+    for c in &page2.commits {
+        assert!(
+            !p1_shas.contains(&c.hash),
+            "Duplicate commit SHA in page 2: {}",
+            c.hash
+        );
+    }
 }

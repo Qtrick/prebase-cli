@@ -45,6 +45,7 @@ pub enum FileKind {
 pub enum NodeAnalysisStatus {
     Pending,
     Analyzed,
+    PartiallyAnalyzed,
     Excluded,
     Failed,
     Unsupported,
@@ -132,4 +133,80 @@ pub struct GraphSnapshot {
     pub edges: Vec<DependencyEdge>,
     pub coverage: AnalysisCoverage,
     pub issues: Vec<AnalysisIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insights: Option<ArchitecturalInsights>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CycleGroup {
+    pub id: String,
+    pub files: Vec<String>,
+    pub example_cycle: Vec<String>,
+    pub is_type_only: bool,
+    pub edge_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HighlyDependedFile {
+    pub file_id: String,
+    pub relative_path: String,
+    pub dependent_count: usize,
+    pub dependency_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectedArea {
+    pub area_id: String,
+    pub outbound_count: usize,
+    pub inbound_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaCoupling {
+    pub area_id: String,
+    pub file_count: usize,
+    pub analyzed_file_count: usize,
+    pub internal_edge_count: usize,
+    pub outbound_edge_count: usize,
+    pub inbound_edge_count: usize,
+    pub connected_areas: Vec<ConnectedArea>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticsSummary {
+    pub total_discovered: usize,
+    pub total_analyzed: usize,
+    pub total_partially_analyzed: usize,
+    pub total_unsupported: usize,
+    pub total_failed: usize,
+    pub total_unresolved_imports: usize,
+    pub total_issues: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitecturalInsights {
+    pub cycle_groups: Vec<CycleGroup>,
+    pub total_cycle_files: usize,
+    pub highly_depended_files: Vec<HighlyDependedFile>,
+    pub area_couplings: Vec<AreaCoupling>,
+    pub diagnostics_summary: DiagnosticsSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImpactItem {
+    pub file_id: String,
+    pub relative_path: String,
+    pub depth: usize,
+    pub is_type_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileImpactAnalysis {
+    pub file_id: String,
+    pub direct_dependents_count: usize,
+    pub transitive_dependents_count: usize,
+    pub total_impact_count: usize,
+    pub is_part_of_cycle: bool,
+    pub cycle_group_id: Option<String>,
+    pub impacted_files: Vec<ImpactItem>,
 }

@@ -1025,6 +1025,274 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   color: var(--text-secondary);
 }
 
+/* Architectural Insights & Circular Dependencies */
+.insights-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.insight-clean-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(45, 212, 191, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.25);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--accent-teal);
+  line-height: 1.4;
+}
+
+.insight-warning-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.cycle-groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cycle-group-card {
+  background: var(--bg-surface);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+.cycle-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-amber);
+  margin-bottom: 6px;
+}
+
+.cycle-files-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.cycle-path-display {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.cycle-node-link {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 3px;
+  padding: 1px 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cycle-node-link:hover {
+  background: rgba(245, 158, 11, 0.25);
+  border-color: var(--accent-amber);
+}
+
+.cycle-arrow {
+  color: var(--accent-amber);
+  font-size: 11px;
+}
+
+.depended-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.depended-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.depended-file-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-purple);
+}
+
+.depended-file-path {
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.depended-file-counts {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  margin-left: 8px;
+}
+
+.diagnostics-summary-box {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-top: 14px;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.diag-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.diag-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diag-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Downstream Transitive Impact Styles */
+.impact-section {
+  margin-top: 14px;
+}
+
+.impact-cycle-alert {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--accent-amber);
+  margin-bottom: 8px;
+}
+
+.impact-stats-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.impact-stat {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.impact-stat-num {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-amber);
+}
+
+.impact-stat-text {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.impact-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.impact-list-heading {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+
+.impact-item-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.impact-item-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-amber);
+}
+
+.depth-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--accent-amber);
+}
+
+.impact-path {
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.type-badge.small {
+  font-size: 9px;
+  padding: 1px 4px;
+}
+
+.dim-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 2px 4px;
+}
+
 /* Campaign 2: Git, Temporal & Live Updates Styles */
 
 .git-branch-badge {
@@ -1059,6 +1327,24 @@ body, .app-shell, .sidebar, .main-content, .inspector-panel, .workspace-header, 
   padding: 4px 8px;
   border-radius: 4px;
   margin-top: 8px;
+}
+
+.live-watcher-badge.interactive-retry {
+  cursor: pointer;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: var(--accent-amber);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.live-watcher-badge.interactive-retry:hover {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.6);
+}
+
+.live-watcher-badge.interactive-retry:focus-visible {
+  outline: 2px solid var(--accent-amber);
+  outline-offset: 1px;
 }
 
 .pulse-icon {

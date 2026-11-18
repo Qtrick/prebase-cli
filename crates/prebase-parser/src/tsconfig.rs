@@ -20,7 +20,9 @@ pub struct RawTsConfig {
 pub struct TsConfig {
     pub config_dir: String,
     pub base_url: Option<String>,
+    pub base_url_anchor: Option<String>,
     pub paths: Vec<(String, Vec<String>)>,
+    pub paths_anchor: Option<String>,
 }
 
 impl TsConfig {
@@ -37,23 +39,15 @@ impl TsConfig {
         Self {
             config_dir: String::new(),
             base_url,
+            base_url_anchor: None,
             paths,
+            paths_anchor: None,
         }
     }
 
     pub fn load_from_dir(dir: &Path) -> Option<Self> {
-        let content =
-            match prebase_core::safe_read_file_to_string(dir, "tsconfig.json", 1024 * 1024) {
-                Ok(c) => c,
-                Err(e) => {
-                    if !matches!(e, prebase_core::SafeReadError::NotFound(_)) {
-                        warn!("Failed or rejected reading tsconfig.json: {e}");
-                    }
-                    return None;
-                }
-            };
-
-        Self::parse_jsonc(&content, "")
+        let mut visited = std::collections::HashSet::new();
+        Self::load_with_inheritance(dir, "tsconfig.json", &mut visited, 0)
     }
 
     pub fn load_from_file_in_repo(repo_root: &Path, rel_config_path: &str) -> Option<Self> {
@@ -149,6 +143,7 @@ impl TsConfig {
 
         let opts = raw.compiler_options.unwrap_or_default();
         let mut child_paths = Vec::new();
+        let has_child_paths_field = opts.paths.is_some();
         if let Some(paths_map) = opts.paths {
             for (pattern, val) in paths_map {
                 if let Some(arr) = val.as_array() {
@@ -161,28 +156,42 @@ impl TsConfig {
             }
         }
 
-        let final_paths = if !child_paths.is_empty() {
+        let (final_paths, paths_anchor) = if has_child_paths_field {
             let mut paths = child_paths;
             paths.sort_by(|a, b| {
                 let spec_a = pattern_specificity(&a.0);
                 let spec_b = pattern_specificity(&b.0);
                 spec_b.cmp(&spec_a)
             });
-            paths
+            (paths, Some(parent_dir.clone()))
         } else if let Some(ref mut base) = base_config {
-            std::mem::take(&mut base.paths)
+            let anchor = base
+                .paths_anchor
+                .clone()
+                .or_else(|| Some(base.config_dir.clone()));
+            (std::mem::take(&mut base.paths), anchor)
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
 
-        let final_base_url = opts
-            .base_url
-            .or_else(|| base_config.and_then(|b| b.base_url));
+        let (final_base_url, base_url_anchor) = if opts.base_url.is_some() {
+            (opts.base_url, Some(parent_dir.clone()))
+        } else if let Some(ref base) = base_config {
+            let anchor = base
+                .base_url_anchor
+                .clone()
+                .or_else(|| Some(base.config_dir.clone()));
+            (base.base_url.clone(), anchor)
+        } else {
+            (None, None)
+        };
 
         Some(Self {
             config_dir: parent_dir,
             base_url: final_base_url,
+            base_url_anchor,
             paths: final_paths,
+            paths_anchor,
         })
     }
 
@@ -205,10 +214,6 @@ impl TsConfig {
                         }
                     }
                     // Sort descending by pattern specificity:
-                    // 1. Exact match (usize::MAX) first
-                    // 2. Longest prefix before '*' next
-                    // 3. Longest suffix after '*' next
-                    // 4. Stable sort preserves original declaration order when specificities are equal
                     paths.sort_by(|a, b| {
                         let spec_a = pattern_specificity(&a.0);
                         let spec_b = pattern_specificity(&b.0);
@@ -218,7 +223,9 @@ impl TsConfig {
                 Some(Self {
                     config_dir: config_dir.to_string(),
                     base_url: opts.base_url,
+                    base_url_anchor: Some(config_dir.to_string()),
                     paths,
+                    paths_anchor: Some(config_dir.to_string()),
                 })
             }
             Err(e) => {

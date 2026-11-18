@@ -50,6 +50,9 @@ export interface HistoryPage {
 export interface FileHistoryResult {
   file_path: string;
   commits: CommitSummary[];
+  next_cursor?: string | null;
+  has_more?: boolean;
+  total_commits?: number | null;
 }
 
 export interface GitStatus {

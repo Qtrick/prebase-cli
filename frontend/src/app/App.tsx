@@ -227,6 +227,7 @@ export const App: React.FC = () => {
   const [watcherHealth, setWatcherHealth] = useState<WatcherHealth>('active');
   const [sseState, setSseState] = useState<'connected' | 'reconnecting' | 'error'>('connected');
   const [isDelayedReconnecting, setIsDelayedReconnecting] = useState(false);
+  const [reconciliationFailed, setReconciliationFailed] = useState(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const coordinator = defaultNetworkCoordinator;
@@ -403,12 +404,12 @@ export const App: React.FC = () => {
     setTemporalError(null);
     try {
       if (filterPath) {
-        const res = await api.getFileHistory(filterPath, 100, controller.signal);
+        const res = await api.getFileHistory(filterPath, 50, null, controller.signal);
         if (currentToken !== commitsRequestTokenRef.current) return;
         setCommits(res.commits);
-        setNextCursor(null);
-        setHasMoreCommits(false);
-        setTotalCommits(res.commits.length);
+        setNextCursor(res.next_cursor || null);
+        setHasMoreCommits(res.has_more ?? false);
+        setTotalCommits(res.total_commits ?? res.commits.length);
       } else {
         const res = await api.getHistory(50, null, controller.signal);
         if (currentToken !== commitsRequestTokenRef.current) return;
@@ -441,12 +442,21 @@ export const App: React.FC = () => {
     const currentToken = ++commitsRequestTokenRef.current;
     setIsLoadingMore(true);
     try {
-      const res = await api.getHistory(50, nextCursor, controller.signal);
-      if (currentToken !== commitsRequestTokenRef.current) return;
-      setCommits((prev) => [...prev, ...res.commits]);
-      setNextCursor(res.next_cursor);
-      setHasMoreCommits(res.has_more);
-      setTotalCommits(res.total_commits);
+      if (temporalFilterPath) {
+        const res = await api.getFileHistory(temporalFilterPath, 50, nextCursor, controller.signal);
+        if (currentToken !== commitsRequestTokenRef.current) return;
+        setCommits((prev) => [...prev, ...res.commits]);
+        setNextCursor(res.next_cursor || null);
+        setHasMoreCommits(res.has_more ?? false);
+        setTotalCommits(res.total_commits ?? null);
+      } else {
+        const res = await api.getHistory(50, nextCursor, controller.signal);
+        if (currentToken !== commitsRequestTokenRef.current) return;
+        setCommits((prev) => [...prev, ...res.commits]);
+        setNextCursor(res.next_cursor);
+        setHasMoreCommits(res.has_more);
+        setTotalCommits(res.total_commits);
+      }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') return;
       if (currentToken !== commitsRequestTokenRef.current) return;
@@ -486,9 +496,14 @@ export const App: React.FC = () => {
     if (reconciliationTimerRef.current) return;
     if (coordinator.isConverged()) {
       reconciliationAttemptsRef.current = 0;
+      setReconciliationFailed(false);
       return;
     }
     const attempt = reconciliationAttemptsRef.current;
+    if (attempt >= 10) {
+      setReconciliationFailed(true);
+      return;
+    }
     const delay = Math.min(8000, 200 * Math.pow(1.5, Math.min(attempt, 6)));
 
     reconciliationTimerRef.current = setTimeout(() => {
@@ -505,10 +520,13 @@ export const App: React.FC = () => {
                 applySnapshotRef.current?.(newSnap, ['*']);
                 if (coordinator.isConverged()) {
                   reconciliationAttemptsRef.current = 0;
+                  setReconciliationFailed(false);
                 } else {
                   reconciliationAttemptsRef.current++;
                   if (reconciliationAttemptsRef.current < 10) {
                     scheduleSnapshotReconciliation();
+                  } else {
+                    setReconciliationFailed(true);
                   }
                 }
               })
@@ -516,16 +534,21 @@ export const App: React.FC = () => {
                 reconciliationAttemptsRef.current++;
                 if (reconciliationAttemptsRef.current < 10) {
                   scheduleSnapshotReconciliation();
+                } else {
+                  setReconciliationFailed(true);
                 }
               });
           } else {
             // Server revision already applied or not newer
             if (coordinator.isConverged()) {
               reconciliationAttemptsRef.current = 0;
+              setReconciliationFailed(false);
             } else {
               reconciliationAttemptsRef.current++;
               if (reconciliationAttemptsRef.current < 10) {
                 scheduleSnapshotReconciliation();
+              } else {
+                setReconciliationFailed(true);
               }
             }
           }
@@ -534,10 +557,30 @@ export const App: React.FC = () => {
           reconciliationAttemptsRef.current++;
           if (reconciliationAttemptsRef.current < 10) {
             scheduleSnapshotReconciliation();
+          } else {
+            setReconciliationFailed(true);
           }
         });
     }, delay);
   }, [coordinator]);
+
+  const handleManualReconcile = useCallback(() => {
+    setReconciliationFailed(false);
+    reconciliationAttemptsRef.current = 0;
+    api
+      .getStatus()
+      .then((st) => {
+        if (st.watcher_health) setWatcherHealth(st.watcher_health);
+        coordinator.recordObservedEventRevision(st.revision);
+        return api.getNetwork();
+      })
+      .then((snap) => {
+        applySnapshotRef.current?.(snap, ['*']);
+      })
+      .catch(() => {
+        scheduleSnapshotReconciliation();
+      });
+  }, [coordinator, scheduleSnapshotReconciliation]);
 
   // Stable ref for applySnapshot
   const applySnapshotRef = useRef<((newSnap: GraphSnapshot, changedFiles: string[]) => void) | null>(null);
@@ -548,9 +591,12 @@ export const App: React.FC = () => {
     let isCancelled = false;
 
     const applySnapshot = (newSnap: GraphSnapshot, changedFiles: string[]) => {
+      if (isCancelled) return;
       const shouldApply = coordinator.shouldApplySnapshot(newSnap.revision);
       if (shouldApply) {
         coordinator.recordAppliedRevision(newSnap.revision);
+        setReconciliationFailed(false);
+        reconciliationAttemptsRef.current = 0;
         setSnapshot(newSnap);
         setLiveRevision(newSnap.revision);
         setStatus('Ready');
@@ -962,14 +1008,27 @@ export const App: React.FC = () => {
               watcherHealth,
               sseState,
               liveRevision,
-              isDelayedReconnecting
+              isDelayedReconnecting,
+              reconciliationFailed
             );
 
             return (
               <div
-                className="live-watcher-badge"
-                title={statusInfo.text}
-                role="status"
+                className={`live-watcher-badge ${reconciliationFailed ? 'interactive-retry' : ''}`}
+                title={reconciliationFailed ? 'Click to retry synchronization' : statusInfo.text}
+                role={reconciliationFailed ? 'button' : 'status'}
+                tabIndex={reconciliationFailed ? 0 : undefined}
+                onClick={reconciliationFailed ? handleManualReconcile : undefined}
+                onKeyDown={
+                  reconciliationFailed
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleManualReconcile();
+                        }
+                      }
+                    : undefined
+                }
                 aria-label={statusInfo.text}
               >
                 <Radio
@@ -1301,6 +1360,9 @@ export const App: React.FC = () => {
           loadedCommitsCount={commits.length}
           temporalFilterPath={temporalFilterPath}
           onClearFilter={() => setTemporalFilterPath(null)}
+          hasMoreCommits={hasMoreCommits}
+          isLoadingMore={isLoadingMore}
+          onLoadMore={handleLoadMoreCommits}
         />
       ) : (
         <Inspector

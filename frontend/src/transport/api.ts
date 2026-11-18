@@ -1,4 +1,6 @@
 import {
+  ArchitecturalInsights,
+  FileImpactAnalysis,
   FileInspection,
   FileNode,
   GraphSnapshot,
@@ -179,6 +181,12 @@ export const api = {
   getNetwork: (signal?: AbortSignal): Promise<GraphSnapshot> => {
     return defaultNetworkCoordinator.fetchSnapshot(signal);
   },
+  getInsights: (signal?: AbortSignal) =>
+    request<ArchitecturalInsights>('/api/v1/insights', signal),
+  getImpact: (fileId: string, depth = 5, signal?: AbortSignal) => {
+    const encoded = fileId.split('/').map(encodeURIComponent).join('/');
+    return request<FileImpactAnalysis>(`/api/v1/impact/${encoded}?depth=${depth}`, signal);
+  },
   searchFiles: (query: string, limit = 50, signal?: AbortSignal) =>
     request<FileNode[]>(`/api/v1/files?q=${encodeURIComponent(query)}&limit=${limit}`, signal),
   inspectFile: (fileId: string, signal?: AbortSignal) =>
@@ -200,11 +208,13 @@ export const api = {
   },
   getCommitDetails: (hash: string, signal?: AbortSignal) =>
     request<CommitDetails>(`/api/v1/commits/${encodeURIComponent(hash)}`, signal),
-  getFileHistory: (path: string, limit = 50, signal?: AbortSignal) =>
-    request<FileHistoryResult>(
-      `/api/v1/file-history?path=${encodeURIComponent(path)}&limit=${limit}`,
-      signal
-    ),
+  getFileHistory: (path: string, limit = 50, cursor?: string | null, signal?: AbortSignal) => {
+    let url = `/api/v1/file-history?path=${encodeURIComponent(path)}&limit=${limit}`;
+    if (cursor) {
+      url += `&cursor=${encodeURIComponent(cursor)}`;
+    }
+    return request<FileHistoryResult>(url, signal);
+  },
   getGitStatus: (signal?: AbortSignal) =>
     request<GitStatus>('/api/v1/git/status', signal),
 

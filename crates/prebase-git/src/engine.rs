@@ -549,35 +549,76 @@ impl GitEngine {
         })
     }
 
-    /// Fetches the commit history that touched a specific file path (supports renames via --follow).
+    /// Fetches the commit history that touched a specific file path (supports renames via --follow and anchor cursor continuation).
     pub fn get_file_history(
         &self,
         file_path: &str,
         limit: usize,
+        cursor: Option<&str>,
     ) -> Result<FileHistoryResult, GitError> {
         let clean_path = file_path.trim_start_matches('/').trim_start_matches('\\');
         let fetch_limit = limit.clamp(1, 200);
-        let limit_str = fetch_limit.to_string();
 
-        let args = [
-            "log",
-            "--follow",
-            "--topo-order",
-            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00",
-            "-n",
-            &limit_str,
-            "--",
-            clean_path,
+        let offset = match cursor {
+            Some(cur) => {
+                let cur = cur.trim();
+                if let Some(pos) = cur.rfind(':') {
+                    cur[pos + 1..].parse::<usize>().unwrap_or(0)
+                } else {
+                    cur.parse::<usize>().unwrap_or(0)
+                }
+            }
+            None => 0,
+        };
+
+        // Total commits touching file
+        let total_commits =
+            match self.run_git_str(&["rev-list", "--count", "HEAD", "--", clean_path]) {
+                Ok(out) => out.trim().parse::<usize>().ok(),
+                Err(_) => None,
+            };
+
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            "--follow".into(),
+            "--topo-order".into(),
+            "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00".into(),
+            "-n".into(),
+            (fetch_limit + 1).to_string(),
         ];
 
-        let output_bytes = self.run_git_cmd(&args)?;
-        let mut commits = parse_commits_from_bytes(&output_bytes);
+        if offset > 0 {
+            args.push(format!("--skip={offset}"));
+        }
 
-        assign_topological_lanes(&mut commits);
+        args.push("--".into());
+        args.push(clean_path.into());
+
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output_bytes = self.run_git_cmd(&arg_refs)?;
+        let mut raw_commits = parse_commits_from_bytes(&output_bytes);
+
+        let has_more = raw_commits.len() > fetch_limit;
+        if has_more {
+            raw_commits.truncate(fetch_limit);
+        }
+
+        let next_offset = offset + raw_commits.len();
+        let next_cursor = if has_more {
+            let last_hash = raw_commits.last().map(|c| c.hash.as_str()).unwrap_or("");
+            Some(format!("{last_hash}:{next_offset}"))
+        } else {
+            None
+        };
+
+        assign_topological_lanes(&mut raw_commits);
 
         Ok(FileHistoryResult {
             file_path: clean_path.to_string(),
-            commits,
+            commits: raw_commits,
+            next_cursor,
+            has_more,
+            total_commits,
         })
     }
 }

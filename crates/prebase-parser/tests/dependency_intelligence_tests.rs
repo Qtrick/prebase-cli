@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-use prebase_core::model::ResolutionStatus;
+use prebase_core::model::{NodeAnalysisStatus, ResolutionStatus};
 use prebase_parser::tsconfig::clean_jsonc;
 use prebase_parser::{ImportResolver, RepositoryAnalyzer, ResolvedTarget, TsConfig};
 
@@ -774,5 +774,317 @@ fn test_tsconfig_extends_cycle_prevention() {
     assert!(
         loaded.is_none(),
         "Circular extends must be detected and return None"
+    );
+}
+
+// ============================================================================
+// 7. Advanced Dependency Intelligence & Diagnostic Rigor
+// ============================================================================
+
+/// Defect 1: Root tsconfig extends inheritance via load_from_dir
+///
+/// When root `tsconfig.json` has `"extends": "./tsconfig.base.json"`, loading via
+/// `TsConfig::load_from_dir` must properly resolve the local relative `extends` and
+/// inherit `baseUrl` and `paths` from the base configuration.
+#[test]
+fn test_root_tsconfig_extends_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let base_json = r#"{
+        "compilerOptions": {
+            "baseUrl": "./src",
+            "paths": {
+                "@components/*": ["components/*"]
+            }
+        }
+    }"#;
+    fs::write(root.join("tsconfig.base.json"), base_json).unwrap();
+
+    let root_json = r#"{
+        "extends": "./tsconfig.base.json"
+    }"#;
+    fs::write(root.join("tsconfig.json"), root_json).unwrap();
+
+    let loaded = TsConfig::load_from_dir(root).expect("Root tsconfig with extends must load");
+    assert_eq!(
+        loaded.base_url.as_deref(),
+        Some("./src"),
+        "Root tsconfig must inherit baseUrl from './tsconfig.base.json', got {:?}",
+        loaded.base_url
+    );
+    assert_eq!(
+        loaded.paths.len(),
+        1,
+        "Root tsconfig must inherit paths from './tsconfig.base.json', got {:?}",
+        loaded.paths
+    );
+    assert_eq!(loaded.paths[0].0, "@components/*");
+    assert_eq!(loaded.paths[0].1, vec!["components/*".to_string()]);
+}
+
+/// Defect 2: Explicit empty paths ("paths": {}) in child tsconfig clears inheritance
+///
+/// In TypeScript tsconfig inheritance, specifying an explicit `"paths": {}` in a child
+/// config intentionally overrides and clears the parent config's path mappings.
+/// It must NOT inherit parent paths when child explicitly specifies an empty object.
+#[test]
+fn test_child_tsconfig_explicit_empty_paths_clears_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let base_json = r#"{
+        "compilerOptions": {
+            "paths": {
+                "@/*": ["src/*"]
+            }
+        }
+    }"#;
+    fs::write(root.join("tsconfig.json"), base_json).unwrap();
+
+    let app_dir = root.join("packages/app");
+    fs::create_dir_all(&app_dir).unwrap();
+    let child_json = r#"{
+        "extends": "../../tsconfig.json",
+        "compilerOptions": {
+            "paths": {}
+        }
+    }"#;
+    fs::write(app_dir.join("tsconfig.json"), child_json).unwrap();
+
+    let loaded = TsConfig::load_from_file_in_repo(root, "packages/app/tsconfig.json")
+        .expect("Child tsconfig must load");
+
+    assert!(
+        loaded.paths.is_empty(),
+        "Child config with explicit empty '\"paths\": {{}}' must clear paths inheritance, got {:?}",
+        loaded.paths
+    );
+}
+
+/// Defect 3: Relative path anchor preservation when inheriting baseUrl
+///
+/// In TypeScript, `baseUrl` is resolved relative to the directory containing the tsconfig
+/// file where `baseUrl` was declared.
+/// If `tsconfig.base.json` in root defines `"baseUrl": "./src"`, and a child config in
+/// `packages/app/tsconfig.json` extends it without defining `baseUrl`, resolving an import
+/// alias in `packages/app` must anchor `baseUrl` to the root `src`, NOT `packages/app/src`!
+#[test]
+fn test_tsconfig_relative_path_anchor_preservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let base_json = r#"{
+        "compilerOptions": {
+            "baseUrl": "./src",
+            "paths": {
+                "@shared/*": ["shared/*"]
+            }
+        }
+    }"#;
+    fs::write(root.join("tsconfig.base.json"), base_json).unwrap();
+
+    // Root src/shared/util.ts exists
+    let root_shared_dir = root.join("src/shared");
+    fs::create_dir_all(&root_shared_dir).unwrap();
+    fs::write(root_shared_dir.join("util.ts"), "export const util = 1;\n").unwrap();
+
+    // Child packages/app/tsconfig.json extends ../../tsconfig.base.json without defining baseUrl
+    let app_dir = root.join("packages/app");
+    let app_src_dir = app_dir.join("src");
+    fs::create_dir_all(&app_src_dir).unwrap();
+    let child_json = r#"{
+        "extends": "../../tsconfig.base.json"
+    }"#;
+    fs::write(app_dir.join("tsconfig.json"), child_json).unwrap();
+    fs::write(
+        app_src_dir.join("index.ts"),
+        "import { util } from \"@shared/util\";\n",
+    )
+    .unwrap();
+
+    // Notice: packages/app/src/shared/util.ts does NOT exist on disk!
+
+    let mut known_files = HashSet::new();
+    known_files.insert("src/shared/util.ts".to_string());
+    known_files.insert("packages/app/src/index.ts".to_string());
+
+    let child_cfg = TsConfig::load_from_file_in_repo(root, "packages/app/tsconfig.json")
+        .expect("Child tsconfig must load");
+
+    let resolver = ImportResolver::with_configs(known_files, vec![child_cfg]);
+    let res = resolver.resolve("packages/app/src/index.ts", "@shared/util");
+
+    assert_eq!(
+        res,
+        ResolvedTarget::Internal("src/shared/util.ts".to_string()),
+        "Child config inheriting baseUrl './src' from root must anchor to root 'src/shared/util.ts', got {res:?}"
+    );
+}
+
+/// Defect 4: Workspace package missing dist target must not resolve as Internal
+///
+/// When `package.json` specifies `"main": "dist/index.js"`, but `dist/index.js` does NOT
+/// exist on disk/known_files:
+/// - Resolving `"@test/core"` must NOT return `ResolvedTarget::Internal("packages/core/dist/index.js")`.
+/// - It should resolve to grounded source (`"packages/core/src/index.ts"`) if available or return `Unresolved`.
+/// - The analyzer must NOT emit an internal edge pointing to a non-existent file!
+#[test]
+fn test_workspace_package_missing_dist_target_not_internal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let core_pkg_dir = root.join("packages/core");
+    let core_src_dir = core_pkg_dir.join("src");
+    fs::create_dir_all(&core_src_dir).unwrap();
+    fs::write(
+        core_pkg_dir.join("package.json"),
+        r#"{
+            "name": "@test/core",
+            "main": "dist/index.js"
+        }"#,
+    )
+    .unwrap();
+    fs::write(core_src_dir.join("index.ts"), "export const core = 1;\n").unwrap();
+
+    let app_pkg_dir = root.join("packages/app");
+    let app_src_dir = app_pkg_dir.join("src");
+    fs::create_dir_all(&app_src_dir).unwrap();
+    fs::write(
+        app_src_dir.join("index.ts"),
+        "import { core } from \"@test/core\";\nconsole.log(core);\n",
+    )
+    .unwrap();
+
+    let analyzer = RepositoryAnalyzer::default();
+    let res = analyzer.analyze_path(root).expect("Analysis must succeed");
+    let snapshot = res.snapshot;
+
+    // Must NOT have an internal edge to the non-existent dist target
+    let dist_edge = snapshot.edges.iter().find(|e| {
+        e.source_file_id == "packages/app/src/index.ts"
+            && e.target_file_id == "packages/core/dist/index.js"
+    });
+    assert!(
+        dist_edge.is_none(),
+        "Must NOT create an internal edge to non-existent 'packages/core/dist/index.js'"
+    );
+
+    // If resolver is queried directly, it must not resolve to missing dist
+    let mut known_files = HashSet::new();
+    known_files.insert("packages/core/src/index.ts".to_string());
+    known_files.insert("packages/app/src/index.ts".to_string());
+
+    let mut workspace_packages = HashMap::new();
+    workspace_packages.insert(
+        "@test/core".to_string(),
+        "packages/core/dist/index.js".to_string(),
+    );
+
+    let resolver =
+        ImportResolver::with_configs_and_packages(known_files, Vec::new(), workspace_packages);
+    let resolved = resolver.resolve("packages/app/src/index.ts", "@test/core");
+
+    assert_ne!(
+        resolved,
+        ResolvedTarget::Internal("packages/core/dist/index.js".to_string()),
+        "Resolving '@test/core' when dist/index.js is absent must NOT return Internal('packages/core/dist/index.js')"
+    );
+}
+
+/// Defect 5: Missing internal target records diagnostic issue and is not dropped silently
+///
+/// When analyzing a file that imports an internal target that is dropped or missing from
+/// known_files, the analyzer must record an issue (e.g. UnresolvedInternalTarget or MissingInternalTarget)
+/// in `snapshot.issues` rather than silently dropping the edge with zero issues.
+#[test]
+fn test_missing_internal_target_records_issue_and_does_not_drop_silently() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let pkg_dir = root.join("packages/pkg");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(
+        pkg_dir.join("package.json"),
+        r#"{
+            "name": "@test/pkg",
+            "main": "dist/index.js"
+        }"#,
+    )
+    .unwrap();
+
+    let app_dir = root.join("packages/app/src");
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(
+        app_dir.join("index.ts"),
+        "import { something } from \"@test/pkg\";\nexport const a = something;\n",
+    )
+    .unwrap();
+
+    let analyzer = RepositoryAnalyzer::default();
+    let res = analyzer.analyze_path(root).expect("Analysis must succeed");
+    let snapshot = res.snapshot;
+
+    let missing_issue = snapshot.issues.iter().find(|i| {
+        i.issue_kind == "UnresolvedInternalTarget" || i.issue_kind == "MissingInternalTarget"
+    });
+    assert!(
+        missing_issue.is_some(),
+        "Snapshot must record UnresolvedInternalTarget or MissingInternalTarget issue when internal target is missing from known files, found issues: {:?}",
+        snapshot.issues
+    );
+}
+
+/// Defect 6: Partially analyzed node status and SyntaxWarning issue
+///
+/// When a source file contains syntax errors (`has_syntax_errors`), the node's
+/// `analysis_status` must be set to `NodeAnalysisStatus::PartiallyAnalyzed` (not `Analyzed`),
+/// and an issue with `issue_kind: "SyntaxWarning"` must be recorded.
+#[test]
+fn test_partially_analyzed_node_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    fs::write(src_dir.join("valid.ts"), "export const x = 1;\n").unwrap();
+    fs::write(
+        src_dir.join("broken.ts"),
+        "import { x } from './valid';\nconst broken = {{{ ;\nexport const y = x;\n",
+    )
+    .unwrap();
+
+    let analyzer = RepositoryAnalyzer::default();
+    let res = analyzer.analyze_path(root).expect("Analysis must succeed");
+    let snapshot = res.snapshot;
+
+    let valid_node = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.relative_path == "src/valid.ts")
+        .expect("valid.ts node must exist");
+    assert_eq!(valid_node.analysis_status, NodeAnalysisStatus::Analyzed);
+
+    let broken_node = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.relative_path == "src/broken.ts")
+        .expect("broken.ts node must exist");
+    assert_eq!(
+        broken_node.analysis_status,
+        NodeAnalysisStatus::PartiallyAnalyzed,
+        "File with syntax errors must have PartiallyAnalyzed status, got {:?}",
+        broken_node.analysis_status
+    );
+
+    let syntax_warning = snapshot
+        .issues
+        .iter()
+        .find(|i| i.file_path == "src/broken.ts" && i.issue_kind == "SyntaxWarning");
+    assert!(
+        syntax_warning.is_some(),
+        "Expected SyntaxWarning issue for 'src/broken.ts', found: {:?}",
+        snapshot.issues
     );
 }

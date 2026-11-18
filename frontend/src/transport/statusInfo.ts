@@ -15,8 +15,19 @@ export function resolveWatcherStatusInfo(
   watcherHealth: WatcherHealth,
   sseState: 'connected' | 'reconnecting' | 'error',
   liveRevision: number,
-  isDelayedReconnecting: boolean
+  isDelayedReconnecting: boolean,
+  reconciliationFailed = false
 ): WatcherStatusBadgeInfo {
+  if (reconciliationFailed) {
+    return {
+      text:
+        liveRevision > 0
+          ? `Sync paused — click to update (rev ${liveRevision})`
+          : 'Sync paused — click to update',
+      color: '#f59e0b',
+      pulse: false,
+    };
+  }
   if (watcherHealth === 'disabled') {
     return {
       text: 'Watcher Disabled (--no-watch)',

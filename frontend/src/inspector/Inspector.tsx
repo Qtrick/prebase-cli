@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { DependencyEdge, FileInspection, FileNode, GraphSnapshot } from '../types/graph';
+import { DependencyEdge, FileInspection, FileImpactAnalysis, FileNode, GraphSnapshot } from '../types/graph';
 import { api } from '../transport/api';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from '../graphs/network/fileTypeColors';
 import {
@@ -27,6 +27,8 @@ import {
   ArrowLeft,
   ArrowUpRight,
   ArrowDownLeft,
+  Repeat,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface InspectorProps {
@@ -111,6 +113,8 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<string | null>(null);
+  const [impactAnalysis, setImpactAnalysis] = useState<FileImpactAnalysis | null>(null);
+  const [impactLoading, setImpactLoading] = useState(false);
   const { copied: copiedPath, copy: copyPath } = useCopyFeedback();
   const { copied: copiedCode, copy: copyCode } = useCopyFeedback();
   const [focusedAreaEdge, setFocusedAreaEdge] = useState<AreaEdge | null>(null);
@@ -144,7 +148,9 @@ export const Inspector: React.FC<InspectorProps> = ({
       // Immediately clear prior file's inspection and source preview to eliminate stale rendering races
       setInspection(null);
       setSourcePreview(null);
+      setImpactAnalysis(null);
       setLoading(true);
+      setImpactLoading(true);
 
       api
         .inspectFile(selectedNode.id, abortController.signal)
@@ -172,6 +178,20 @@ export const Inspector: React.FC<InspectorProps> = ({
           setSourcePreview(null);
         });
 
+      // Fetch downstream impact analysis
+      api
+        .getImpact(selectedNode.id, 5, abortController.signal)
+        .then((res) => {
+          if (currentToken !== requestTokenRef.current) return;
+          setImpactAnalysis(res);
+          setImpactLoading(false);
+        })
+        .catch(() => {
+          if (currentToken !== requestTokenRef.current) return;
+          setImpactAnalysis(null);
+          setImpactLoading(false);
+        });
+
       return () => {
         abortController.abort();
       };
@@ -179,7 +199,9 @@ export const Inspector: React.FC<InspectorProps> = ({
       requestTokenRef.current++;
       setInspection(null);
       setSourcePreview(null);
+      setImpactAnalysis(null);
       setLoading(false);
+      setImpactLoading(false);
     }
   }, [selectedNode]);
 
@@ -577,6 +599,132 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
           )}
 
+          {/* Architectural Insights: Circular Dependencies */}
+          {snapshot.insights && (
+            <div className="insights-section">
+              <div className="section-title">
+                <Repeat
+                  size={14}
+                  color={snapshot.insights.cycle_groups.length > 0 ? '#f59e0b' : '#2dd4bf'}
+                />
+                <h4>Circular Dependencies ({snapshot.insights.cycle_groups.length})</h4>
+              </div>
+              {snapshot.insights.cycle_groups.length === 0 ? (
+                <div className="insight-clean-card">
+                  <CheckCircle2 size={14} color="#2dd4bf" />
+                  <span>No circular dependencies detected. Graph is a clean DAG.</span>
+                </div>
+              ) : (
+                <div className="cycle-groups-list">
+                  <p className="insight-warning-text">
+                    {snapshot.insights.cycle_groups.length} cycle group(s) involving{' '}
+                    {snapshot.insights.total_cycle_files} files:
+                  </p>
+                  {snapshot.insights.cycle_groups.map((cg) => (
+                    <div key={cg.id} className="cycle-group-card">
+                      <div className="cycle-group-header">
+                        <span className="cycle-group-name">Cycle Group #{cg.id}</span>
+                        {cg.is_type_only && <span className="type-badge small">type-only</span>}
+                        <span className="cycle-files-count">{cg.files.length} files</span>
+                      </div>
+                      <div className="cycle-path-display mono">
+                        {cg.example_cycle.map((f, idx) => (
+                          <React.Fragment key={idx}>
+                            <button
+                              type="button"
+                              className="cycle-node-link clickable"
+                              onClick={() => {
+                                const target = snapshot.nodes.find(
+                                  (n) => n.id === f || n.relative_path === f
+                                );
+                                if (target) onSelectNode(target);
+                              }}
+                              title={`Inspect ${f}`}
+                            >
+                              {f.split('/').pop()}
+                            </button>
+                            {idx < cg.example_cycle.length - 1 && (
+                              <span className="cycle-arrow">→</span>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Architectural Insights: Top Depended-On Files */}
+          {snapshot.insights && snapshot.insights.highly_depended_files.length > 0 && (
+            <div className="insights-section">
+              <div className="section-title">
+                <Layers size={14} color="#a78bfa" />
+                <h4>Most Depended-On Files</h4>
+              </div>
+              <div className="depended-files-list">
+                {snapshot.insights.highly_depended_files.slice(0, 5).map((f) => {
+                  const node = snapshot.nodes.find(
+                    (n) => n.id === f.file_id || n.relative_path === f.relative_path
+                  );
+                  return (
+                    <button
+                      key={f.file_id}
+                      type="button"
+                      className="depended-file-item clickable"
+                      onClick={() => {
+                        if (node) onSelectNode(node);
+                      }}
+                      title={`Inspect ${f.relative_path}`}
+                    >
+                      <span className="depended-file-path mono">{f.relative_path}</span>
+                      <span className="depended-file-counts">
+                        <strong>{f.dependent_count}</strong> uses
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Architectural Insights: Diagnostics Summary */}
+          {snapshot.insights && (
+            <div className="diagnostics-summary-box">
+              <div className="section-title">
+                <Info size={14} color="#94a3b8" />
+                <h4>Analysis Diagnostics</h4>
+              </div>
+              <div className="diagnostics-grid">
+                <div className="diag-stat">
+                  <span className="diag-label">Discovered</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_discovered}</span>
+                </div>
+                <div className="diag-stat">
+                  <span className="diag-label">Analyzed</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_analyzed}</span>
+                </div>
+                <div className="diag-stat">
+                  <span className="diag-label">Partially Analyzed</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_partially_analyzed}</span>
+                </div>
+                <div className="diag-stat">
+                  <span className="diag-label">Unsupported</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_unsupported}</span>
+                </div>
+                <div className="diag-stat">
+                  <span className="diag-label">Failed</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_failed}</span>
+                </div>
+                <div className="diag-stat">
+                  <span className="diag-label">Unresolved Imports</span>
+                  <span className="diag-val">{snapshot.insights.diagnostics_summary.total_unresolved_imports}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Analysis boundaries and honest limitations */}
           <div className="limitations-box">
             <div className="limitations-title">
@@ -941,6 +1089,74 @@ export const Inspector: React.FC<InspectorProps> = ({
                 </ul>
               )}
             </div>
+
+            {/* Downstream Transitive Impact Analysis */}
+            {impactLoading ? (
+              <div className="relations-section impact-section">
+                <div className="section-title">
+                  <ArrowDownLeft size={14} color="#f59e0b" />
+                  <h4>Downstream Impact</h4>
+                </div>
+                <div className="loading-state" style={{ fontSize: '11px', padding: '6px 0' }}>
+                  Analyzing impact cascade...
+                </div>
+              </div>
+            ) : (
+              impactAnalysis && (
+                <div className="relations-section impact-section">
+                  <div className="section-title">
+                    <ArrowDownLeft size={14} color="#f59e0b" />
+                    <h4>Downstream Impact ({impactAnalysis.total_impact_count} files)</h4>
+                  </div>
+                  {impactAnalysis.is_part_of_cycle && (
+                    <div className="impact-cycle-alert">
+                      <Repeat size={12} color="#f59e0b" />
+                      <span>Part of a circular dependency group</span>
+                    </div>
+                  )}
+                  <div className="impact-stats-row">
+                    <div className="impact-stat">
+                      <span className="impact-stat-num">{impactAnalysis.direct_dependents_count}</span>
+                      <span className="impact-stat-text">Direct dependents</span>
+                    </div>
+                    <div className="impact-stat">
+                      <span className="impact-stat-num">{impactAnalysis.transitive_dependents_count}</span>
+                      <span className="impact-stat-text">Transitive cascade</span>
+                    </div>
+                  </div>
+                  {impactAnalysis.impacted_files.length > 0 && (
+                    <div className="impact-files-list">
+                      <span className="impact-list-heading">Cascade order:</span>
+                      {impactAnalysis.impacted_files.slice(0, 10).map((imp) => {
+                        const impNode = snapshot?.nodes.find(
+                          (n) => n.id === imp.file_id || n.relative_path === imp.relative_path
+                        );
+                        return (
+                          <button
+                            key={imp.file_id}
+                            type="button"
+                            className="impact-item-btn clickable"
+                            onClick={() => {
+                              if (impNode) onSelectNode(impNode);
+                            }}
+                            title={`Inspect ${imp.relative_path}`}
+                          >
+                            <span className="depth-badge">d{imp.depth}</span>
+                            <span className="impact-path mono">{imp.relative_path}</span>
+                            {imp.is_type_only && <span className="type-badge small">type</span>}
+                          </button>
+                        );
+                      })}
+                      {impactAnalysis.impacted_files.length > 10 && (
+                        <span className="dim-hint">
+                          ...and {impactAnalysis.impacted_files.length - 10} more files
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            )}
 
             {/* Source preview snippet */}
             {sourcePreview && (

@@ -1,5 +1,5 @@
 export type NodeKind = 'Source' | 'Test' | 'Config' | 'Doc' | 'Other';
-export type NodeAnalysisStatus = 'Pending' | 'Analyzed' | 'Excluded' | 'Failed' | 'Unsupported';
+export type NodeAnalysisStatus = 'Pending' | 'Analyzed' | 'PartiallyAnalyzed' | 'Excluded' | 'Failed' | 'Unsupported';
 
 export interface FileNode {
   id: string;
@@ -50,6 +50,72 @@ export interface AnalysisIssue {
   column?: number | null;
 }
 
+export interface CycleGroup {
+  id: string;
+  files: string[];
+  example_cycle: string[];
+  is_type_only: boolean;
+  edge_count: number;
+}
+
+export interface HighlyDependedFile {
+  file_id: string;
+  relative_path: string;
+  dependent_count: number;
+  dependency_count: number;
+}
+
+export interface ConnectedArea {
+  area_id: string;
+  outbound_count: number;
+  inbound_count: number;
+}
+
+export interface AreaCoupling {
+  area_id: string;
+  file_count: number;
+  analyzed_file_count: number;
+  internal_edge_count: number;
+  outbound_edge_count: number;
+  inbound_edge_count: number;
+  connected_areas: ConnectedArea[];
+}
+
+export interface DiagnosticsSummary {
+  total_discovered: number;
+  total_analyzed: number;
+  total_partially_analyzed: number;
+  total_unsupported: number;
+  total_failed: number;
+  total_unresolved_imports: number;
+  total_issues: number;
+}
+
+export interface ArchitecturalInsights {
+  cycle_groups: CycleGroup[];
+  total_cycle_files: number;
+  highly_depended_files: HighlyDependedFile[];
+  area_couplings: AreaCoupling[];
+  diagnostics_summary: DiagnosticsSummary;
+}
+
+export interface ImpactItem {
+  file_id: string;
+  relative_path: string;
+  depth: number;
+  is_type_only: boolean;
+}
+
+export interface FileImpactAnalysis {
+  file_id: string;
+  direct_dependents_count: number;
+  transitive_dependents_count: number;
+  total_impact_count: number;
+  is_part_of_cycle: boolean;
+  cycle_group_id?: string | null;
+  impacted_files: ImpactItem[];
+}
+
 export interface GraphSnapshot {
   schema_version: string;
   repository_id: string;
@@ -58,6 +124,7 @@ export interface GraphSnapshot {
   edges: DependencyEdge[];
   coverage: AnalysisCoverage;
   issues: AnalysisIssue[];
+  insights?: ArchitecturalInsights;
 }
 
 export type WatcherHealth = 'active' | 'degraded' | 'disabled';

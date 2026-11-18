@@ -31,6 +31,9 @@ interface CommitInspectorProps {
   loadedCommitsCount?: number;
   temporalFilterPath?: string | null;
   onClearFilter?: () => void;
+  hasMoreCommits?: boolean;
+  isLoadingMore?: boolean;
+  onLoadMore?: () => void;
 }
 
 export const CommitInspector: React.FC<CommitInspectorProps> = ({
@@ -45,6 +48,9 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   loadedCommitsCount,
   temporalFilterPath,
   onClearFilter,
+  hasMoreCommits = false,
+  isLoadingMore = false,
+  onLoadMore,
 }) => {
   const [details, setDetails] = useState<CommitDetails | null>(null);
   const [loading, setLoading] = useState(false);
@@ -190,6 +196,39 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
             <div style={{ marginTop: '6px', fontSize: '13px', color: 'var(--text-primary)' }}>
               <strong>{loadedCommitsCount || 0}</strong> {totalCommits ? `of ${totalCommits}` : ''} commits loaded
             </div>
+            {hasMoreCommits && onLoadMore && (
+              <button
+                type="button"
+                className="load-more-btn"
+                onClick={onLoadMore}
+                disabled={isLoadingMore}
+                style={{
+                  marginTop: '10px',
+                  width: '100%',
+                  padding: '6px 12px',
+                  background: 'var(--bg-hover)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-primary)',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  cursor: isLoadingMore ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                }}
+              >
+                {isLoadingMore ? (
+                  <>
+                    <Loader2 size={13} className="spinner" />
+                    <span>Loading older commits...</span>
+                  </>
+                ) : (
+                  <span>Load older commits</span>
+                )}
+              </button>
+            )}
           </div>
 
           <div className="stat-card">

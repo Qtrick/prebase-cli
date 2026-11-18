@@ -16,7 +16,8 @@ use tokio_stream::StreamExt;
 use tracing::warn;
 
 use prebase_core::model::{
-    DependencyEdge, FileNode, GraphSnapshot, IndexingStatus, RepositoryInfo, WatcherHealth,
+    ArchitecturalInsights, DependencyEdge, FileImpactAnalysis, FileNode, GraphSnapshot,
+    IndexingStatus, RepositoryInfo, WatcherHealth,
 };
 use prebase_core::scanner::RepositoryScanner;
 use prebase_git::{CommitDetails, FileHistoryResult, GitStatus, HistoryPage};
@@ -54,6 +55,12 @@ pub struct HistoryQuery {
 pub struct FileHistoryQuery {
     pub path: String,
     pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImpactQuery {
+    pub depth: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -176,6 +183,40 @@ pub async fn handle_network(
             StatusCode::SERVICE_UNAVAILABLE,
             "Repository indexing not ready yet",
         )),
+    }
+}
+
+pub async fn handle_insights(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ArchitecturalInsights>, (StatusCode, &'static str)> {
+    match state.get_published() {
+        Some(published) => Ok(Json(published.index.get_insights().clone())),
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Repository index not ready yet",
+        )),
+    }
+}
+
+pub async fn handle_file_impact(
+    State(state): State<Arc<AppState>>,
+    Path(file_id): Path<String>,
+    Query(query): Query<ImpactQuery>,
+) -> Result<Json<FileImpactAnalysis>, (StatusCode, &'static str)> {
+    let published = match state.get_published() {
+        Some(p) => p,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Repository index not ready yet",
+            ));
+        }
+    };
+
+    let depth = query.depth.unwrap_or(5);
+    match published.index.analyze_impact(&file_id, depth) {
+        Some(impact) => Ok(Json(impact)),
+        None => Err((StatusCode::NOT_FOUND, "File node not found")),
     }
 }
 
@@ -391,8 +432,9 @@ pub async fn handle_file_history(
     let limit = query.limit.unwrap_or(50).min(100);
     let git = state.git_engine.clone();
     let path = clean_path.to_string();
+    let cursor = query.cursor;
 
-    tokio::task::spawn_blocking(move || git.get_file_history(&path, limit))
+    tokio::task::spawn_blocking(move || git.get_file_history(&path, limit, cursor.as_deref()))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)

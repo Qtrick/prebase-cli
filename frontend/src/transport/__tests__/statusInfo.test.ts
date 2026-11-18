@@ -334,5 +334,12 @@ describe('Live Snapshot Reconciliation Helpers (statusInfo)', () => {
       expect(errorInfo.color).toBe('#f59e0b');
       expect(errorInfo.pulse).toBe(false);
     });
+
+    it('handles reconciliation failed / sync paused', () => {
+      const pausedInfo = resolveWatcherStatusInfo('active', 'connected', 4, false, true);
+      expect(pausedInfo.text).toBe('Sync paused — click to update (rev 4)');
+      expect(pausedInfo.color).toBe('#f59e0b');
+      expect(pausedInfo.pulse).toBe(false);
+    });
   });
 });

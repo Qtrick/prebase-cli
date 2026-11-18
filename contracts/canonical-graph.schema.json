@@ -27,7 +27,8 @@
     "issues": {
       "type": "array",
       "items": { "$ref": "#/definitions/AnalysisIssue" }
-    }
+    },
+    "insights": { "$ref": "#/definitions/ArchitecturalInsights" }
   },
   "definitions": {
     "FileNode": {
@@ -42,7 +43,7 @@
         "file_kind": { "type": "string" },
         "analysis_status": {
           "type": "string",
-          "enum": ["Pending", "Analyzed", "Excluded", "Failed", "Unsupported"]
+          "enum": ["Pending", "Analyzed", "PartiallyAnalyzed", "Excluded", "Failed", "Unsupported"]
         },
         "direct_dependency_count": { "type": "integer" },
         "direct_dependent_count": { "type": "integer" }
@@ -101,6 +102,73 @@
         "message": { "type": "string" },
         "line": { "type": ["integer", "null"] },
         "column": { "type": ["integer", "null"] }
+      }
+    },
+    "CycleGroup": {
+      "type": "object",
+      "required": ["id", "files", "example_cycle", "is_type_only", "edge_count"],
+      "properties": {
+        "id": { "type": "string" },
+        "files": { "type": "array", "items": { "type": "string" } },
+        "example_cycle": { "type": "array", "items": { "type": "string" } },
+        "is_type_only": { "type": "boolean" },
+        "edge_count": { "type": "integer" }
+      }
+    },
+    "HighlyDependedFile": {
+      "type": "object",
+      "required": ["file_id", "relative_path", "dependent_count", "dependency_count"],
+      "properties": {
+        "file_id": { "type": "string" },
+        "relative_path": { "type": "string" },
+        "dependent_count": { "type": "integer" },
+        "dependency_count": { "type": "integer" }
+      }
+    },
+    "ConnectedArea": {
+      "type": "object",
+      "required": ["area_id", "outbound_count", "inbound_count"],
+      "properties": {
+        "area_id": { "type": "string" },
+        "outbound_count": { "type": "integer" },
+        "inbound_count": { "type": "integer" }
+      }
+    },
+    "AreaCoupling": {
+      "type": "object",
+      "required": ["area_id", "file_count", "analyzed_file_count", "internal_edge_count", "outbound_edge_count", "inbound_edge_count", "connected_areas"],
+      "properties": {
+        "area_id": { "type": "string" },
+        "file_count": { "type": "integer" },
+        "analyzed_file_count": { "type": "integer" },
+        "internal_edge_count": { "type": "integer" },
+        "outbound_edge_count": { "type": "integer" },
+        "inbound_edge_count": { "type": "integer" },
+        "connected_areas": { "type": "array", "items": { "$ref": "#/definitions/ConnectedArea" } }
+      }
+    },
+    "DiagnosticsSummary": {
+      "type": "object",
+      "required": ["total_discovered", "total_analyzed", "total_partially_analyzed", "total_unsupported", "total_failed", "total_unresolved_imports", "total_issues"],
+      "properties": {
+        "total_discovered": { "type": "integer" },
+        "total_analyzed": { "type": "integer" },
+        "total_partially_analyzed": { "type": "integer" },
+        "total_unsupported": { "type": "integer" },
+        "total_failed": { "type": "integer" },
+        "total_unresolved_imports": { "type": "integer" },
+        "total_issues": { "type": "integer" }
+      }
+    },
+    "ArchitecturalInsights": {
+      "type": "object",
+      "required": ["cycle_groups", "total_cycle_files", "highly_depended_files", "area_couplings", "diagnostics_summary"],
+      "properties": {
+        "cycle_groups": { "type": "array", "items": { "$ref": "#/definitions/CycleGroup" } },
+        "total_cycle_files": { "type": "integer" },
+        "highly_depended_files": { "type": "array", "items": { "$ref": "#/definitions/HighlyDependedFile" } },
+        "area_couplings": { "type": "array", "items": { "$ref": "#/definitions/AreaCoupling" } },
+        "diagnostics_summary": { "$ref": "#/definitions/DiagnosticsSummary" }
       }
     }
   }

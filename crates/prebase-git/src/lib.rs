@@ -316,7 +316,7 @@ mod tests {
 
         // File was created as file_b.txt and renamed to file_b_renamed.txt
         let file_hist = engine
-            .get_file_history("file_b_renamed.txt", 10)
+            .get_file_history("file_b_renamed.txt", 10, None)
             .expect("failed to get file history");
 
         // Should find 2 commits: the rename commit and the initial creation commit!

@@ -174,8 +174,7 @@ impl RepositoryAnalyzer {
                                 if let Some(norm) = ImportResolver::normalize_path(&target) {
                                     entry_candidate = Some(norm);
                                 }
-                            } else if let Some(types_val) = v.get("types").and_then(|t| t.as_str())
-                            {
+                            } else if let Some(types_val) = v.get("types").and_then(|t| t.as_str()) {
                                 let target = pkg_dir.join(types_val.trim_start_matches("./"));
                                 if let Some(norm) = ImportResolver::normalize_path(&target) {
                                     entry_candidate = Some(norm);
@@ -283,9 +282,10 @@ impl RepositoryAnalyzer {
                     line: None,
                     column: None,
                 });
-            }
-
-            if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                if let Some(node) = graph.get_node_mut(&file.relative_path) {
+                    node.analysis_status = NodeAnalysisStatus::PartiallyAnalyzed;
+                }
+            } else if let Some(node) = graph.get_node_mut(&file.relative_path) {
                 node.analysis_status = NodeAnalysisStatus::Analyzed;
             }
             analyzed_counter.fetch_add(1, Ordering::Relaxed);
@@ -303,19 +303,43 @@ impl RepositoryAnalyzer {
 
                 match resolved {
                     ResolvedTarget::Internal(target_rel_path) => {
-                        graph.add_evidence_or_edge(
-                            &file.relative_path,
-                            &target_rel_path,
-                            evidence,
-                            imp.relationship_kind,
-                            ResolutionStatus::ResolvedInternal,
-                        );
+                        if !graph.has_node(&target_rel_path) {
+                            issues.push(AnalysisIssue {
+                                file_path: file.relative_path.clone(),
+                                issue_kind: "UnresolvedInternalTarget".to_string(),
+                                message: format!(
+                                    "Import '{}' resolved to '{}', but target file is not indexed in repository",
+                                    imp.specifier, target_rel_path
+                                ),
+                                line: Some(imp.line),
+                                column: Some(imp.column),
+                            });
+                        } else {
+                            graph.add_evidence_or_edge(
+                                &file.relative_path,
+                                &target_rel_path,
+                                evidence,
+                                imp.relationship_kind,
+                                ResolutionStatus::ResolvedInternal,
+                            );
+                        }
                     }
                     ResolvedTarget::Unresolved(reason) => {
                         debug!("Unresolved import in {}: {reason}", file.relative_path);
+                        let issue_kind =
+                            if reason.contains("Workspace package") || reason.contains("target") {
+                                "UnresolvedInternalTarget".to_string()
+                            } else {
+                                "UnresolvedImport".to_string()
+                            };
+                        let issue_kind = if reason.contains("Workspace package") || reason.contains("target") {
+                            "UnresolvedInternalTarget".to_string()
+                        } else {
+                            "UnresolvedImport".to_string()
+                        };
                         issues.push(AnalysisIssue {
                             file_path: file.relative_path.clone(),
-                            issue_kind: "UnresolvedImport".to_string(),
+                            issue_kind,
                             message: reason,
                             line: Some(imp.line),
                             column: Some(imp.column),

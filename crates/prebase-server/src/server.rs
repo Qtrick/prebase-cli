@@ -37,6 +37,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/status", get(handle_status))
         .route("/repository", get(handle_repository))
         .route("/network", get(handle_network))
+        .route("/insights", get(handle_insights))
+        .route("/impact/*file_id", get(handle_file_impact))
         .route("/files", get(handle_search_files))
         .route("/files/*file_id", get(handle_inspect_file))
         .route("/edges/*edge_id", get(handle_inspect_edge))

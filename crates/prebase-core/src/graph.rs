@@ -171,6 +171,13 @@ impl CanonicalGraph {
         let mut edges: Vec<DependencyEdge> = self.edges.values().cloned().collect();
         edges.sort_by(|a, b| a.id.cmp(&b.id));
 
+        let insights = crate::insights::compute_architectural_insights(
+            &nodes,
+            &edges,
+            &coverage,
+            &self.issues,
+        );
+
         GraphSnapshot {
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             repository_id: repository_id.to_string(),
@@ -179,6 +186,7 @@ impl CanonicalGraph {
             edges,
             coverage,
             issues: self.issues.clone(),
+            insights: Some(insights),
         }
     }
 }

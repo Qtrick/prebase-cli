@@ -1,11 +1,17 @@
 pub mod graph;
 pub mod index;
+pub mod insights;
 pub mod model;
 pub mod safe_reader;
 pub mod scanner;
 
 pub use graph::CanonicalGraph;
 pub use index::{FileInspection, GraphIndex};
+pub use insights::{
+    analyze_file_impact, compute_architectural_insights, compute_area_couplings,
+    compute_diagnostics_summary, compute_highly_depended_files, detect_cycles,
+    get_area_id_for_path,
+};
 pub use model::*;
 #[cfg(unix)]
 pub use safe_reader::validate_descriptor_identity;

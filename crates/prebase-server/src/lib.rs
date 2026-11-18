@@ -363,6 +363,7 @@ mod tests {
             edges: vec![],
             coverage: AnalysisCoverage::default(),
             issues: vec![],
+            insights: None,
         };
         let index = GraphIndex::build(&snap);
         state.publish_network(snap, index, vec![], None).unwrap();
@@ -466,6 +467,7 @@ mod tests {
                 is_complete: true,
             },
             issues: vec![],
+            insights: None,
         };
         let index1 = GraphIndex::build(&snap1);
 
@@ -963,6 +965,7 @@ mod tests {
             edges: vec![],
             coverage: AnalysisCoverage::default(),
             issues: vec![],
+            insights: None,
         };
         let dummy_index = GraphIndex::build(&dummy_snapshot);
 
@@ -1073,6 +1076,7 @@ mod tests {
             edges: vec![],
             coverage: AnalysisCoverage::default(),
             issues: vec![],
+            insights: None,
         };
         let index = GraphIndex::build(&snap);
         state.publish_network(snap, index, vec![], None).unwrap();
@@ -1203,5 +1207,174 @@ mod tests {
             shutdown_recv.is_err(),
             "no events should be emitted during shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn test_insights_and_impact_endpoints() {
+        use prebase_core::model::{
+            AnalysisCoverage, DependencyEdge, DependencyEvidence, FileKind, FileNode,
+            GraphSnapshot, NodeAnalysisStatus, RelationshipKind, ResolutionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo_root = temp.path().canonicalize().unwrap();
+
+        let state = Arc::new(AppState::new(
+            repo_root.clone(),
+            "test-repo".into(),
+            "repo-123".into(),
+            "token-xyz".into(),
+            None,
+            8080,
+            false,
+        ));
+
+        let snap = GraphSnapshot {
+            schema_version: "1.0.0".into(),
+            repository_id: "repo-123".into(),
+            revision: 1,
+            nodes: vec![
+                FileNode {
+                    id: "src/a.ts".into(),
+                    relative_path: "src/a.ts".into(),
+                    filename: "a.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 1,
+                },
+                FileNode {
+                    id: "src/b.ts".into(),
+                    relative_path: "src/b.ts".into(),
+                    filename: "b.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 2,
+                },
+                FileNode {
+                    id: "src/c.ts".into(),
+                    relative_path: "src/c.ts".into(),
+                    filename: "c.ts".into(),
+                    language: "typescript".into(),
+                    size_bytes: 100,
+                    file_kind: FileKind::Source,
+                    analysis_status: NodeAnalysisStatus::Analyzed,
+                    direct_dependency_count: 1,
+                    direct_dependent_count: 0,
+                },
+            ],
+            edges: vec![
+                DependencyEdge {
+                    id: "edge-1".into(),
+                    source_file_id: "src/a.ts".into(),
+                    target_file_id: "src/b.ts".into(),
+                    relationship_kind: RelationshipKind::Import,
+                    resolution_status: ResolutionStatus::ResolvedInternal,
+                    evidence: vec![DependencyEvidence {
+                        source_file_id: "src/a.ts".into(),
+                        import_specifier: "./b".into(),
+                        line: 1,
+                        column: 1,
+                        relationship_kind: RelationshipKind::Import,
+                        is_type_only: false,
+                    }],
+                },
+                DependencyEdge {
+                    id: "edge-2".into(),
+                    source_file_id: "src/b.ts".into(),
+                    target_file_id: "src/a.ts".into(),
+                    relationship_kind: RelationshipKind::Import,
+                    resolution_status: ResolutionStatus::ResolvedInternal,
+                    evidence: vec![DependencyEvidence {
+                        source_file_id: "src/b.ts".into(),
+                        import_specifier: "./a".into(),
+                        line: 1,
+                        column: 1,
+                        relationship_kind: RelationshipKind::Import,
+                        is_type_only: false,
+                    }],
+                },
+                DependencyEdge {
+                    id: "edge-3".into(),
+                    source_file_id: "src/c.ts".into(),
+                    target_file_id: "src/b.ts".into(),
+                    relationship_kind: RelationshipKind::Import,
+                    resolution_status: ResolutionStatus::ResolvedInternal,
+                    evidence: vec![DependencyEvidence {
+                        source_file_id: "src/c.ts".into(),
+                        import_specifier: "./b".into(),
+                        line: 1,
+                        column: 1,
+                        relationship_kind: RelationshipKind::Import,
+                        is_type_only: false,
+                    }],
+                },
+            ],
+            coverage: AnalysisCoverage::default(),
+            issues: vec![],
+            insights: None,
+        };
+
+        let index = GraphIndex::build(&snap);
+        state.publish_network(snap, index, vec![], None).unwrap();
+
+        let app = create_router(state);
+
+        // 1. Insights endpoint returns cycle groups & summary
+        let insights_req = Request::builder()
+            .uri("/api/v1/insights")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let insights_resp = app.clone().oneshot(insights_req).await.unwrap();
+        assert_eq!(insights_resp.status(), StatusCode::OK);
+        let insights_bytes = axum::body::to_bytes(insights_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let insights_json: serde_json::Value = serde_json::from_slice(&insights_bytes).unwrap();
+        assert_eq!(insights_json["total_cycle_files"], 2);
+        assert_eq!(insights_json["cycle_groups"].as_array().unwrap().len(), 1);
+
+        // 2. Impact analysis for src/b.ts
+        let impact_req = Request::builder()
+            .uri("/api/v1/impact/src/b.ts?depth=3")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let impact_resp = app.clone().oneshot(impact_req).await.unwrap();
+        assert_eq!(impact_resp.status(), StatusCode::OK);
+        let impact_bytes = axum::body::to_bytes(impact_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let impact_json: serde_json::Value = serde_json::from_slice(&impact_bytes).unwrap();
+        assert_eq!(impact_json["file_id"], "src/b.ts");
+        assert_eq!(impact_json["is_part_of_cycle"], true);
+        assert!(impact_json["total_impact_count"].as_u64().unwrap() >= 2);
+
+        // 3. Impact analysis for non-existent file returns 404
+        let not_found_req = Request::builder()
+            .uri("/api/v1/impact/src/non_existent.ts")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header("x-prebase-session", "token-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let not_found_resp = app.clone().oneshot(not_found_req).await.unwrap();
+        assert_eq!(not_found_resp.status(), StatusCode::NOT_FOUND);
+
+        // 4. Unauthorized access to insights returns 401
+        let unauth_req = Request::builder()
+            .uri("/api/v1/insights")
+            .header(header::HOST, "127.0.0.1:8080")
+            .body(Body::empty())
+            .unwrap();
+        let unauth_resp = app.oneshot(unauth_req).await.unwrap();
+        assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
