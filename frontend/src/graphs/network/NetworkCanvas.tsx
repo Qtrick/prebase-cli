@@ -60,6 +60,8 @@ interface NetworkCanvasProps {
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   selectedAreaId?: string | null;
+  selectedAreaIds?: string[] | null;
+  languageFilter?: 'all' | 'typescript' | 'rust' | 'python';
   highlightedNodeIds?: Set<string> | null;
   highlightedEdgeIds?: Set<string> | null;
   onSelectNode: (node: FileNode | null) => void;
@@ -82,11 +84,36 @@ interface CameraAnimation {
   durationMs: number;
 }
 
+function matchesLanguageFilter(
+  node: FileNode,
+  filter?: 'all' | 'typescript' | 'rust' | 'python'
+): boolean {
+  if (!filter || filter === 'all') return true;
+  const lang = (node.language || '').toLowerCase();
+  const ext = (node.relative_path.split('.').pop() || '').toLowerCase();
+  if (filter === 'typescript') {
+    return (
+      lang === 'typescript' ||
+      lang === 'javascript' ||
+      ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'].includes(ext)
+    );
+  }
+  if (filter === 'rust') {
+    return lang === 'rust' || ext === 'rs';
+  }
+  if (filter === 'python') {
+    return lang === 'python' || ext === 'py' || ext === 'pyi';
+  }
+  return false;
+}
+
 export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   snapshot,
   selectedNodeId,
   selectedEdgeId,
   selectedAreaId = null,
+  selectedAreaIds = null,
+  languageFilter = 'all',
   highlightedNodeIds = null,
   highlightedEdgeIds = null,
   onSelectNode,
@@ -109,6 +136,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const [positions, setPositions] = useState<Map<string, Point3D>>(new Map());
   const positionsRef = useRef<Map<string, Point3D>>(positions);
   positionsRef.current = positions;
+
+  // Effective set of selected areas (supporting single or multi-area selection)
+  const effectiveAreaSet = useMemo(() => {
+    if (selectedAreaIds && selectedAreaIds.length > 0) {
+      return new Set(selectedAreaIds);
+    }
+    if (selectedAreaId) {
+      return new Set([selectedAreaId]);
+    }
+    return null;
+  }, [selectedAreaIds, selectedAreaId]);
 
   // Pointer capture target reference
   const pointerTargetRef = useRef<HTMLElement | null>(null);
@@ -560,17 +598,25 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           if (!desc) continue;
 
           // If highlighted edges are specified (e.g. active dependency path or cycle group),
-          // dim non-path edges. Otherwise if an architectural area is selected, dim cross-area edges.
+          // dim non-path edges. Otherwise if architectural areas are selected, dim cross-area edges.
           let areaAlphaMultiplier = 1.0;
           if (highlightedEdgeIds && highlightedEdgeIds.size > 0) {
             if (!highlightedEdgeIds.has(edge.id)) {
               areaAlphaMultiplier = 0.08;
             }
-          } else if (selectedAreaId && !activeHighlightId) {
+          } else if (effectiveAreaSet && !activeHighlightId) {
             const srcArea = getAreaIdForPath(p1.node.relative_path);
             const tgtArea = getAreaIdForPath(p2.node.relative_path);
-            if (srcArea !== selectedAreaId && tgtArea !== selectedAreaId) {
+            if (!effectiveAreaSet.has(srcArea) && !effectiveAreaSet.has(tgtArea)) {
               areaAlphaMultiplier = 0.08;
+            }
+          }
+
+          if (languageFilter && languageFilter !== 'all') {
+            const srcMatch = matchesLanguageFilter(p1.node, languageFilter);
+            const tgtMatch = matchesLanguageFilter(p2.node, languageFilter);
+            if (!srcMatch && !tgtMatch) {
+              areaAlphaMultiplier *= 0.1;
             }
           }
 
@@ -632,8 +678,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             isDimmed = !connectedNodes.has(pNode.id);
           } else if (highlightedNodeIds) {
             isDimmed = !highlightedNodeIds.has(pNode.id);
-          } else if (selectedAreaId) {
-            isDimmed = getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId;
+          } else if (effectiveAreaSet) {
+            isDimmed = !effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
+          }
+
+          if (!isDimmed && languageFilter && languageFilter !== 'all') {
+            isDimmed = !matchesLanguageFilter(pNode.node, languageFilter);
           }
 
           const screenR = pNode.radius * camera.zoom;
@@ -736,7 +786,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           };
 
           const isInFocusedArea =
-            selectedAreaId !== null && getAreaIdForPath(pNode.node.relative_path) === selectedAreaId;
+            effectiveAreaSet !== null && effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
 
           const priorityScore = computeLabelPriorityScore({
             isSelected,
@@ -810,6 +860,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       selectedEdgeId,
       hoveredNodeId,
       selectedAreaId,
+      effectiveAreaSet,
+      languageFilter,
       highlightedNodeIds,
       highlightedEdgeIds,
       entryCandidate,
@@ -829,7 +881,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, highlightedNodeIds, highlightedEdgeIds, isVisible, theme, requestRender]);
+  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, effectiveAreaSet, languageFilter, highlightedNodeIds, highlightedEdgeIds, isVisible, theme, requestRender]);
 
   // Clean up RAF and inertia on unmount
   useEffect(() => {

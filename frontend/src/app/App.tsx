@@ -49,6 +49,7 @@ import {
   Compass,
   Target,
   PanelRightOpen,
+  Download,
 } from 'lucide-react';
 import './App.css';
 
@@ -213,6 +214,8 @@ export const App: React.FC = () => {
   selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
   const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
+  const [selectedAreaIds, setSelectedAreaIds] = useState<string[]>([]);
+  const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<'all' | 'typescript' | 'rust' | 'python'>('all');
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
   const [keepGraphCentered, setKeepGraphCentered] = useState(true);
   const [announcement, setAnnouncement] = useState<string>('');
@@ -944,11 +947,53 @@ export const App: React.FC = () => {
 
   const handleSelectArea = useCallback((areaId: string | null) => {
     setSelectedAreaId(areaId);
+    setSelectedAreaIds(areaId ? [areaId] : []);
     if (areaId) {
       setSelectedNode(null);
       setSelectedEdge(null);
     }
   }, []);
+
+  const handleToggleArea = useCallback((areaId: string) => {
+    setSelectedAreaIds((prev) => {
+      const next = prev.includes(areaId)
+        ? prev.filter((id) => id !== areaId)
+        : [...prev, areaId];
+      setSelectedAreaId(next.length === 1 ? next[0] : null);
+      return next;
+    });
+    setSelectedNode(null);
+    setSelectedEdge(null);
+  }, []);
+
+  const handleClearAreas = useCallback(() => {
+    setSelectedAreaId(null);
+    setSelectedAreaIds([]);
+  }, []);
+
+  const handleExportCanvasImage = useCallback(() => {
+    const canvas = document.querySelector('main.main-content canvas') as HTMLCanvasElement | null;
+    if (!canvas) return;
+    try {
+      const dataUrl = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const mode =
+        activeTab === 'temporal'
+          ? 'git-temporal'
+          : networkViewMode === '2d'
+          ? 'relationship-2d'
+          : 'network-3d';
+      a.download = `prebase-${mode}-${timestamp}.png`;
+      a.href = dataUrl;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setAnnouncement('Graph image exported as PNG');
+    } catch (err) {
+      console.error('Failed to export canvas image:', err);
+    }
+  }, [activeTab, networkViewMode]);
 
   // Cross-Graph: Switch from Network Inspector to Temporal with file history filter
   const handleViewFileHistory = useCallback((filePath: string) => {
@@ -1152,6 +1197,47 @@ export const App: React.FC = () => {
             </div>
           )}
 
+          {activeTab === 'network' && (
+            <div className="language-filter-group" role="radiogroup" aria-label="Language Filter">
+              <button
+                className={`lang-btn ${selectedLanguageFilter === 'all' ? 'active' : ''}`}
+                onClick={() => setSelectedLanguageFilter('all')}
+                title="Show all files (Shortcut: none)"
+                role="radio"
+                aria-checked={selectedLanguageFilter === 'all'}
+              >
+                All
+              </button>
+              <button
+                className={`lang-btn ${selectedLanguageFilter === 'typescript' ? 'active' : ''}`}
+                onClick={() => setSelectedLanguageFilter('typescript')}
+                title="Filter to TypeScript & JavaScript files"
+                role="radio"
+                aria-checked={selectedLanguageFilter === 'typescript'}
+              >
+                TS / JS
+              </button>
+              <button
+                className={`lang-btn ${selectedLanguageFilter === 'rust' ? 'active' : ''}`}
+                onClick={() => setSelectedLanguageFilter('rust')}
+                title="Filter to Rust crates and modules"
+                role="radio"
+                aria-checked={selectedLanguageFilter === 'rust'}
+              >
+                Rust
+              </button>
+              <button
+                className={`lang-btn ${selectedLanguageFilter === 'python' ? 'active' : ''}`}
+                onClick={() => setSelectedLanguageFilter('python')}
+                title="Filter to Python modules and packages"
+                role="radio"
+                aria-checked={selectedLanguageFilter === 'python'}
+              >
+                Python
+              </button>
+            </div>
+          )}
+
           <div className="view-controls">
             {activeTab === 'network' && networkViewMode === '3d' && (
               <button
@@ -1190,6 +1276,15 @@ export const App: React.FC = () => {
             >
               <RotateCcw size={15} />
               <span>Reset</span>
+            </button>
+            <button
+              className="ctrl-btn"
+              onClick={handleExportCanvasImage}
+              title="Export active graph view as high-resolution PNG image"
+              aria-label="Export PNG"
+            >
+              <Download size={15} />
+              <span>Export PNG</span>
             </button>
           </div>
         </header>
@@ -1263,6 +1358,8 @@ export const App: React.FC = () => {
                       selectedNodeId={selectedNode?.id || null}
                       selectedEdgeId={selectedEdge?.id || null}
                       selectedAreaId={selectedAreaId}
+                      selectedAreaIds={selectedAreaIds}
+                      languageFilter={selectedLanguageFilter}
                       highlightedNodeIds={highlightedNodeIds}
                       highlightedEdgeIds={highlightedEdgeIds}
                       onSelectNode={handleSelectNode}
@@ -1417,13 +1514,17 @@ export const App: React.FC = () => {
           selectedNode={selectedNode}
           selectedEdge={selectedEdge}
           selectedAreaId={selectedAreaId}
+          selectedAreaIds={selectedAreaIds}
           onSelectArea={handleSelectArea}
+          onToggleArea={handleToggleArea}
+          onClearAreas={handleClearAreas}
           snapshot={snapshot}
           onSelectNode={handleSelectNode}
           onClose={() => {
             setSelectedNode(null);
             setSelectedEdge(null);
             setSelectedAreaId(null);
+            setSelectedAreaIds([]);
             setSelectedCycleGroup(null);
             setActiveDependencyPath(null);
           }}

@@ -12,17 +12,7 @@ for script in scripts/*.sh; do
     bash -n "$script"
 done
 
-# 2. Rust formatting & lints
-echo "--> Checking Rust code format..."
-cargo fmt --all -- --check
-
-echo "--> Checking Clippy lints across workspace..."
-cargo clippy --workspace --all-targets --locked -- -D warnings
-
-echo "--> Running Rust test suite..."
-cargo test --workspace --locked
-
-# 2. Frontend tests and build
+# 2. Frontend tests, typecheck, and build (populates embedded assets for prebase-server)
 echo "--> Running Frontend unit tests..."
 cd "$ROOT_DIR/frontend"
 npm test
@@ -33,6 +23,16 @@ npm run typecheck
 echo "--> Verifying Frontend TypeScript build..."
 npm run build
 cd "$ROOT_DIR"
+
+# 3. Rust formatting, lints, and tests
+echo "--> Checking Rust code format..."
+cargo fmt --all -- --check
+
+echo "--> Checking Clippy lints across workspace..."
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+echo "--> Running Rust test suite..."
+cargo test --workspace --locked
 
 echo "==> All verification checks PASSED!"
 

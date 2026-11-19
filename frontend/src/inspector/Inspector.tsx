@@ -42,13 +42,17 @@ import {
   Route,
   ChevronDown,
   ChevronUp,
+  Plus,
 } from 'lucide-react';
 
 interface InspectorProps {
   selectedNode: FileNode | null;
   selectedEdge: DependencyEdge | null;
   selectedAreaId?: string | null;
+  selectedAreaIds?: string[];
   onSelectArea?: (areaId: string | null) => void;
+  onToggleArea?: (areaId: string) => void;
+  onClearAreas?: () => void;
   selectedCycleGroup?: CycleGroup | null;
   onSelectCycleGroup?: (cg: CycleGroup | null) => void;
   isPathExplorerOpen?: boolean;
@@ -117,7 +121,10 @@ export const Inspector: React.FC<InspectorProps> = ({
   selectedNode,
   selectedEdge,
   selectedAreaId = null,
+  selectedAreaIds = [],
   onSelectArea,
+  onToggleArea,
+  onClearAreas,
   selectedCycleGroup = null,
   onSelectCycleGroup,
   isPathExplorerOpen = false,
@@ -170,17 +177,6 @@ export const Inspector: React.FC<InspectorProps> = ({
   const repoStructure = useMemo(() => {
     if (!snapshot) return null;
     return deriveRepositoryStructure(snapshot.nodes, snapshot.edges);
-  }, [snapshot]);
-
-  // Fast O(1) node lookup map by ID and relative path
-  const nodeMap = useMemo(() => {
-    const map = new Map<string, FileNode>();
-    if (!snapshot) return map;
-    for (const node of snapshot.nodes) {
-      map.set(node.id, node);
-      map.set(node.relative_path, node);
-    }
-    return map;
   }, [snapshot]);
 
   useEffect(() => {
@@ -357,8 +353,8 @@ export const Inspector: React.FC<InspectorProps> = ({
             </div>
             <ul className="relation-list">
               {focusedAreaEdge.contributingFilePairs.map((pair, idx) => {
-                const srcNode = nodeMap.get(pair.sourceFileId);
-                const tgtNode = nodeMap.get(pair.targetFileId);
+                const srcNode = snapshot?.nodes.find((n) => n.id === pair.sourceFileId);
+                const tgtNode = snapshot?.nodes.find((n) => n.id === pair.targetFileId);
                 return (
                   <li key={idx} className="area-relation-pair-card">
                     <div className="pair-endpoints">
@@ -397,6 +393,166 @@ export const Inspector: React.FC<InspectorProps> = ({
     );
   }
 
+  // 1C. MULTI-AREA COMPARISON VIEW (when multiple architectural areas are selected)
+  if (!selectedNode && !selectedEdge && selectedAreaIds && selectedAreaIds.length > 1) {
+    const selectedAreas = selectedAreaIds
+      .map((id) => repoStructure?.areaMap.get(id))
+      .filter((a): a is NonNullable<typeof a> => Boolean(a));
+    const selectedAreaSet = new Set(selectedAreaIds);
+
+    // Cross-area edges strictly between the selected areas
+    const crossAreaEdges = (repoStructure?.areaEdges || []).filter(
+      (e) => selectedAreaSet.has(e.sourceAreaId) && selectedAreaSet.has(e.targetAreaId)
+    );
+
+    const totalFiles = selectedAreas.reduce((sum, a) => sum + a.fileCount, 0);
+    const totalInternalEdges = selectedAreas.reduce((sum, a) => sum + a.internalConnections, 0);
+    const totalCrossEdges = crossAreaEdges.reduce((sum, e) => sum + e.edgeCount, 0);
+
+    return (
+      <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+        <div className="inspector-header">
+          <div className="node-title-group">
+            <Layers size={16} color="#38bdf8" />
+            <h3 className="file-name">Area Comparison ({selectedAreaIds.length})</h3>
+          </div>
+          <div className="header-action-group">
+            {onToggleCollapse && (
+              <button
+                className="icon-action-btn"
+                onClick={onToggleCollapse}
+                title="Collapse inspector"
+                aria-label="Collapse inspector"
+              >
+                <PanelRightClose size={15} />
+              </button>
+            )}
+            <button
+              className="close-btn"
+              onClick={() => onClearAreas?.()}
+              title="Clear area selection"
+              aria-label="Close comparison view"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div className="inspector-content animate-reveal">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span className="text-xs text-muted">Selected Areas</span>
+            <button
+              type="button"
+              className="btn-text text-xs"
+              onClick={() => onClearAreas?.()}
+              style={{ color: '#ef4444', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
+            >
+              Clear all
+            </button>
+          </div>
+
+          <div className="multi-area-chips">
+            {selectedAreas.map((area) => (
+              <span key={area.id} className="multi-area-chip">
+                <span>{area.name}</span>
+                <button
+                  type="button"
+                  className="multi-area-chip-remove"
+                  onClick={() => onToggleArea?.(area.id)}
+                  title={`Remove ${area.name}`}
+                  aria-label={`Remove ${area.name}`}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+
+          <div className="stats-grid" style={{ marginTop: '12px' }}>
+            <div className="stat-card">
+              <span className="stat-label">Combined Files</span>
+              <span className="stat-value">{totalFiles}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Cross-Connections</span>
+              <span className="stat-value">{totalCrossEdges}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Intra-Area Edges</span>
+              <span className="stat-value">{totalInternalEdges}</span>
+            </div>
+          </div>
+
+          {/* Cross-Area Relationships */}
+          <div className="relations-section" style={{ marginTop: '14px' }}>
+            <div className="section-title">
+              <ArrowUpRight size={14} color="#38bdf8" />
+              <h4>Cross-Area Dependencies ({crossAreaEdges.length})</h4>
+            </div>
+            {crossAreaEdges.length === 0 ? (
+              <p className="empty-hint">
+                No direct dependency relationships linking these {selectedAreaIds.length} areas.
+              </p>
+            ) : (
+              <div className="area-edges-list">
+                {crossAreaEdges.map((edge) => {
+                  const srcArea = repoStructure?.areaMap.get(edge.sourceAreaId);
+                  const tgtArea = repoStructure?.areaMap.get(edge.targetAreaId);
+                  return (
+                    <button
+                      key={edge.id}
+                      type="button"
+                      className="area-relation-btn"
+                      onClick={() => setFocusedAreaEdge(edge)}
+                      title={`Inspect ${srcArea?.name || edge.sourceAreaId} → ${tgtArea?.name || edge.targetAreaId}`}
+                    >
+                      <div className="area-rel-info">
+                        <span className="area-rel-target mono">
+                          {srcArea?.name || edge.sourceAreaId} → {tgtArea?.name || edge.targetAreaId}
+                        </span>
+                        <span className="area-rel-meta">
+                          {edge.edgeCount} connection{edge.edgeCount === 1 ? '' : 's'} across {edge.sourceFilesCount} file{edge.sourceFilesCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <ChevronRight size={13} className="link-icon" />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Add more areas toggle pills */}
+          {repoStructure && repoStructure.areas.length > selectedAreaIds.length && (
+            <div className="relations-section" style={{ marginTop: '14px' }}>
+              <div className="section-title">
+                <Folder size={14} color="#94a3b8" />
+                <h4>Add Area to Comparison</h4>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px' }}>
+                {repoStructure.areas
+                  .filter((a) => !selectedAreaSet.has(a.id))
+                  .slice(0, 8)
+                  .map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      className="lang-btn"
+                      style={{ border: '1px solid var(--border-subtle)', padding: '4px 8px', fontSize: '11px' }}
+                      onClick={() => onToggleArea?.(a.id)}
+                      title={`Add ${a.name} to comparison`}
+                    >
+                      + {a.name} ({a.fileCount})
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
+    );
+  }
+
   // 1B. AREA INSPECTOR VIEW (when an architectural area is focused)
   if (!selectedNode && !selectedEdge && selectedAreaId) {
     const currentArea = repoStructure?.areaMap.get(selectedAreaId);
@@ -430,14 +586,28 @@ export const Inspector: React.FC<InspectorProps> = ({
         </div>
 
         <div key={selectedAreaId} className="inspector-content animate-reveal">
-          <button
-            type="button"
-            className="area-back-btn"
-            onClick={() => onSelectArea?.(null)}
-          >
-            <ArrowLeft size={13} style={{ marginRight: '4px' }} />
-            Back to all areas
-          </button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <button
+              type="button"
+              className="area-back-btn"
+              onClick={() => onSelectArea?.(null)}
+              style={{ margin: 0 }}
+            >
+              <ArrowLeft size={13} style={{ marginRight: '4px' }} />
+              Back to all areas
+            </button>
+            {onToggleArea && (
+              <button
+                type="button"
+                className="btn-text text-xs"
+                onClick={() => onToggleArea(selectedAreaId)}
+                title="Add to multi-area comparison"
+                style={{ color: '#38bdf8', cursor: 'pointer', background: 'none', border: 'none', padding: '2px 6px' }}
+              >
+                + Compare
+              </button>
+            )}
+          </div>
 
           <div className="area-summary-card">
             <span className="area-path-mono mono">{currentArea?.displayPath || selectedAreaId}</span>
@@ -651,7 +821,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               </div>
               <div className="suggestion-cards-list">
                 {repoStructure.suggestions.slice(0, 4).map((sug) => {
-                  const node = nodeMap.get(sug.nodeId);
+                  const node = snapshot.nodes.find((n) => n.id === sug.nodeId);
                   return (
                     <button
                       key={sug.nodeId}
@@ -684,18 +854,54 @@ export const Inspector: React.FC<InspectorProps> = ({
               </div>
               <div className="areas-grid">
                 {repoStructure.areas.map((area) => (
-                  <button
-                    key={area.id}
-                    type="button"
-                    className="area-pill-card"
-                    onClick={() => onSelectArea?.(area.id)}
-                    title={`Focus on area: ${area.displayPath}`}
-                  >
-                    <span className="area-pill-name">{area.name}</span>
-                    <span className="area-pill-meta">
-                      {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} area links
-                    </span>
-                  </button>
+                  <div key={area.id} style={{ display: 'flex', gap: '3px', alignItems: 'stretch' }}>
+                    <button
+                      type="button"
+                      className={`area-pill-card ${selectedAreaIds?.includes(area.id) ? 'selected' : ''}`}
+                      onClick={() => onSelectArea?.(area.id)}
+                      title={`Focus on area: ${area.displayPath}`}
+                      style={{ flex: 1 }}
+                    >
+                      <span className="area-pill-name">{area.name}</span>
+                      <span className="area-pill-meta">
+                        {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} area links
+                      </span>
+                    </button>
+                    {onToggleArea && (
+                      <button
+                        type="button"
+                        className="icon-action-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleArea(area.id);
+                        }}
+                        title={
+                          selectedAreaIds?.includes(area.id)
+                            ? `Deselect ${area.name}`
+                            : `Add ${area.name} to comparison`
+                        }
+                        aria-label={
+                          selectedAreaIds?.includes(area.id)
+                            ? `Deselect ${area.name}`
+                            : `Add ${area.name} to comparison`
+                        }
+                        style={{
+                          borderRadius: '6px',
+                          border: '1px solid var(--border-subtle, #334155)',
+                          padding: '0 6px',
+                          background: selectedAreaIds?.includes(area.id)
+                            ? 'rgba(56, 189, 248, 0.2)'
+                            : 'transparent',
+                        }}
+                      >
+                        {selectedAreaIds?.includes(area.id) ? (
+                          <Check size={12} color="#38bdf8" />
+                        ) : (
+                          <Plus size={12} />
+                        )}
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -729,8 +935,8 @@ export const Inspector: React.FC<InspectorProps> = ({
                       classification === 'RuntimeRelevant'
                         ? 'runtime'
                         : classification === 'MixedStructural'
-                        ? 'mixed'
-                        : 'type-only';
+                          ? 'mixed'
+                          : 'type-only';
                     return (
                       <div
                         key={cg.id}
@@ -753,7 +959,9 @@ export const Inspector: React.FC<InspectorProps> = ({
                                 className="cycle-node-link clickable"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  const target = nodeMap.get(f);
+                                  const target = snapshot.nodes.find(
+                                    (n) => n.id === f || n.relative_path === f
+                                  );
                                   if (target) onSelectNode(target);
                                 }}
                                 title={`Inspect ${f}`}
@@ -783,7 +991,9 @@ export const Inspector: React.FC<InspectorProps> = ({
               </div>
               <div className="depended-files-list">
                 {snapshot.insights.highly_depended_files.slice(0, 5).map((f) => {
-                  const node = nodeMap.get(f.file_id);
+                  const node = snapshot.nodes.find(
+                    (n) => n.id === f.file_id || n.relative_path === f.relative_path
+                  );
                   return (
                     <button
                       key={f.file_id}
@@ -946,7 +1156,9 @@ export const Inspector: React.FC<InspectorProps> = ({
                                   cursor: 'pointer',
                                 }}
                                 onClick={() => {
-                                  const node = nodeMap.get(iss.file_path);
+                                  const node = snapshot.nodes.find(
+                                    (n) => n.id === iss.file_path || n.relative_path === iss.file_path
+                                  );
                                   if (node) onSelectNode(node);
                                 }}
                               >
@@ -1044,7 +1256,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               type="button"
               className="rel-endpoint clickable"
               onClick={() => {
-                const src = nodeMap.get(selectedEdge.source_file_id);
+                const src = snapshot?.nodes.find((n) => n.id === selectedEdge.source_file_id);
                 if (src) onSelectNode(src);
               }}
               title={`Inspect ${selectedEdge.source_file_id}`}
@@ -1060,7 +1272,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               type="button"
               className="rel-endpoint clickable"
               onClick={() => {
-                const tgt = nodeMap.get(selectedEdge.target_file_id);
+                const tgt = snapshot?.nodes.find((n) => n.id === selectedEdge.target_file_id);
                 if (tgt) onSelectNode(tgt);
               }}
               title={`Inspect ${selectedEdge.target_file_id}`}
@@ -1379,7 +1591,9 @@ export const Inspector: React.FC<InspectorProps> = ({
                     <div className="impact-files-list">
                       <span className="impact-list-heading">Cascade order:</span>
                       {(showAllImpact ? impactAnalysis.impacted_files : impactAnalysis.impacted_files.slice(0, 10)).map((imp) => {
-                        const impNode = nodeMap.get(imp.file_id) || nodeMap.get(imp.relative_path);
+                        const impNode = snapshot?.nodes.find(
+                          (n) => n.id === imp.file_id || n.relative_path === imp.relative_path
+                        );
                         return (
                           <button
                             key={imp.file_id}

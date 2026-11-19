@@ -737,5 +737,85 @@ describe('Inspector Unit & Behavioral Tests', () => {
         expect(html).toContain('type-only');
       });
     });
+
+    describe('Area Exploration and Multi-Area Selection', () => {
+      it('renders Multi-Area Comparison view when multiple area IDs are selected', () => {
+        const edge = makeEdge({
+          id: 'crates/cli/src/main.rs->crates/core/src/lib.rs',
+          source_file_id: 'crates/cli/src/main.rs',
+          target_file_id: 'crates/core/src/lib.rs',
+          relationship_kind: 'Import',
+        });
+
+        const snapshot = makeSnapshot({
+          nodes: [
+            makeNode({
+              id: 'crates/cli/src/main.rs',
+              relative_path: 'crates/cli/src/main.rs',
+              filename: 'main.rs',
+              language: 'rust',
+            }),
+            makeNode({
+              id: 'crates/core/src/lib.rs',
+              relative_path: 'crates/core/src/lib.rs',
+              filename: 'lib.rs',
+              language: 'rust',
+            }),
+          ],
+          edges: [edge],
+        });
+
+        const html = renderToStaticMarkup(
+          <Inspector
+            selectedNode={null}
+            selectedEdge={null}
+            selectedAreaIds={['crates/cli', 'crates/core']}
+            snapshot={snapshot}
+            onSelectNode={vi.fn()}
+            onClose={vi.fn()}
+            onToggleArea={vi.fn()}
+            onClearAreas={vi.fn()}
+          />
+        );
+
+        expect(html).toContain('Area Comparison (2)');
+        expect(html).toContain('cli');
+        expect(html).toContain('core');
+        expect(html).toContain('Cross-Area Dependencies (1)');
+        expect(html).toContain('cli → core');
+        expect(html).toContain('Clear all');
+      });
+
+      it('renders single area inspector view with comparison action', () => {
+        const snapshot = makeSnapshot({
+          nodes: [
+            makeNode({
+              id: 'crates/core/src/lib.rs',
+              relative_path: 'crates/core/src/lib.rs',
+              filename: 'lib.rs',
+              language: 'rust',
+            }),
+          ],
+          edges: [],
+        });
+
+        const html = renderToStaticMarkup(
+          <Inspector
+            selectedNode={null}
+            selectedEdge={null}
+            selectedAreaId="crates/core"
+            selectedAreaIds={['crates/core']}
+            snapshot={snapshot}
+            onSelectNode={vi.fn()}
+            onClose={vi.fn()}
+            onToggleArea={vi.fn()}
+          />
+        );
+
+        expect(html).toContain('crates/core');
+        expect(html).toContain('Back to all areas');
+        expect(html).toContain('+ Compare');
+      });
+    });
   });
 });

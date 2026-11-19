@@ -28,14 +28,14 @@ fn test_defect_r1_escaping_parent_directory_traversal() {
     // Even though `util.ts` exists in the repo root, this MUST NOT resolve to `util.ts`!
     let escaped_result = resolver.resolve("src/main.ts", "../../util");
     assert!(
-        matches!(escaped_result, ResolvedTarget::Unresolved(_)),
+        matches!(escaped_result, ResolvedTarget::Unresolved(..)),
         "Escaping traversal '../../util' from 'src/main.ts' must be Unresolved, got {escaped_result:?}"
     );
 
     // Also root-level file attempting parent traversal
     let root_escaped = resolver.resolve("main.ts", "../util");
     assert!(
-        matches!(root_escaped, ResolvedTarget::Unresolved(_)),
+        matches!(root_escaped, ResolvedTarget::Unresolved(..)),
         "Escaping traversal '../util' from 'main.ts' must be Unresolved, got {root_escaped:?}"
     );
 
@@ -60,32 +60,32 @@ fn test_defect_r1_escaping_parent_directory_traversal() {
     // `../../../util` navigates up 3 levels (escapes repo root)
     let legit_parent_3_escaped = resolver.resolve("src/sub/main.ts", "../../../util");
     assert!(
-        matches!(legit_parent_3_escaped, ResolvedTarget::Unresolved(_)),
+        matches!(legit_parent_3_escaped, ResolvedTarget::Unresolved(..)),
         "Escaping traversal '../../../util' from 'src/sub/main.ts' must be Unresolved, got {legit_parent_3_escaped:?}"
     );
 
     // 3. Absolute paths must be rejected as Unresolved, never External or Internal
     let abs_unix = resolver.resolve("src/main.ts", "/etc/passwd");
     assert!(
-        matches!(abs_unix, ResolvedTarget::Unresolved(_)),
+        matches!(abs_unix, ResolvedTarget::Unresolved(..)),
         "Unix absolute path '/etc/passwd' must be Unresolved, got {abs_unix:?}"
     );
 
     let abs_win_backslash = resolver.resolve("src/main.ts", "C:\\file");
     assert!(
-        matches!(abs_win_backslash, ResolvedTarget::Unresolved(_)),
+        matches!(abs_win_backslash, ResolvedTarget::Unresolved(..)),
         "Windows absolute path 'C:\\file' must be Unresolved, got {abs_win_backslash:?}"
     );
 
     let abs_win_forward = resolver.resolve("src/main.ts", "C:/file");
     assert!(
-        matches!(abs_win_forward, ResolvedTarget::Unresolved(_)),
+        matches!(abs_win_forward, ResolvedTarget::Unresolved(..)),
         "Windows absolute path 'C:/file' must be Unresolved, got {abs_win_forward:?}"
     );
 
     let abs_win_drive_d = resolver.resolve("src/main.ts", "D:/project/util");
     assert!(
-        matches!(abs_win_drive_d, ResolvedTarget::Unresolved(_)),
+        matches!(abs_win_drive_d, ResolvedTarget::Unresolved(..)),
         "Windows drive path 'D:/project/util' must be Unresolved, got {abs_win_drive_d:?}"
     );
 }

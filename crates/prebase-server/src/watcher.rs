@@ -372,12 +372,32 @@ fn should_ignore_path(rel_path: &Path, state: Option<&AppState>) -> bool {
 
 fn is_supported_source_file(path: &Path) -> bool {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if file_name == "tsconfig.json" || file_name == "jsconfig.json" || file_name == "package.json" {
+    if file_name == "tsconfig.json"
+        || file_name == "jsconfig.json"
+        || file_name == "package.json"
+        || file_name == "Cargo.toml"
+        || file_name == "Cargo.lock"
+        || file_name == "pyproject.toml"
+        || file_name == "setup.py"
+        || file_name == "setup.cfg"
+    {
         return true;
     }
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts" | "json")
+        Some(
+            "js" | "jsx"
+                | "ts"
+                | "tsx"
+                | "mjs"
+                | "cjs"
+                | "mts"
+                | "cts"
+                | "rs"
+                | "py"
+                | "json"
+                | "toml"
+        )
     )
 }
 
@@ -526,6 +546,10 @@ mod tests {
         assert!(is_supported_source_file(Path::new("types.mts")));
         assert!(is_supported_source_file(Path::new("package.json")));
         assert!(is_supported_source_file(Path::new("tsconfig.json")));
+        assert!(is_supported_source_file(Path::new("lib.rs")));
+        assert!(is_supported_source_file(Path::new("main.py")));
+        assert!(is_supported_source_file(Path::new("Cargo.toml")));
+        assert!(is_supported_source_file(Path::new("pyproject.toml")));
 
         assert!(!is_supported_source_file(Path::new("image.png")));
         assert!(!is_supported_source_file(Path::new("binary.exe")));

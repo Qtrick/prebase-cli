@@ -5,7 +5,7 @@ pub mod tsconfig;
 
 pub use analyzer::{AnalysisResult, RepositoryAnalyzer};
 pub use ast::{ParsedImport, SourceParser};
-pub use resolver::{ImportResolver, ResolvedTarget};
+pub use resolver::{ImportResolver, ResolvedTarget, RustCrateInfo, UnresolvedReasonKind};
 pub use tsconfig::{clean_jsonc, TsConfig};
 
 #[cfg(test)]
@@ -115,6 +115,110 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_ast_import_extractions() {
+        let mut parser = SourceParser::new();
+
+        let rust_code = r#"
+            // Representative forms from campaign specification
+            mod graph;
+            pub mod model;
+            #[path = "custom_path.rs"]
+            mod custom;
+
+            // Inline module definition must NOT produce an external dependency
+            mod tests {
+                fn local_helper() {}
+            }
+
+            use crate::graph::Graph;
+            use super::model::Node;
+            use self::resolver::Resolver;
+            use crate::model::{Node, Edge};
+            pub use crate::graph::Graph;
+            use crate::graph::Graph as DependencyGraph;
+        "#;
+
+        let (imports, has_errors) = parser
+            .parse_file_with_diagnostics(".rs", rust_code)
+            .unwrap();
+        assert!(!has_errors);
+
+        // 1. External module declarations
+        let mod_graph = imports.iter().find(|i| i.specifier == "mod graph").unwrap();
+        assert_eq!(mod_graph.relationship_kind, RelationshipKind::Import);
+
+        let mod_model = imports.iter().find(|i| i.specifier == "mod model").unwrap();
+        assert_eq!(mod_model.relationship_kind, RelationshipKind::Export);
+
+        let mod_custom = imports
+            .iter()
+            .find(|i| i.specifier == "mod custom#[path=custom_path.rs]")
+            .unwrap();
+        assert_eq!(mod_custom.relationship_kind, RelationshipKind::Import);
+
+        // Inline module 'tests' must NOT be extracted
+        assert!(!imports.iter().any(|i| i.specifier.contains("tests")));
+
+        // 2. Use statements
+        assert!(imports.iter().any(|i| i.specifier == "crate::graph::Graph"
+            && i.relationship_kind == RelationshipKind::Import));
+        assert!(imports.iter().any(|i| i.specifier == "super::model::Node"));
+        assert!(imports
+            .iter()
+            .any(|i| i.specifier == "self::resolver::Resolver"));
+        assert!(imports.iter().any(|i| i.specifier == "crate::model::Node"));
+        assert!(imports.iter().any(|i| i.specifier == "crate::model::Edge"));
+
+        // Re-export: pub use crate::graph::Graph
+        assert!(imports.iter().any(|i| i.specifier == "crate::graph::Graph"
+            && i.relationship_kind == RelationshipKind::Export));
+    }
+
+    #[test]
+    fn test_python_ast_import_extractions() {
+        let mut parser = SourceParser::new();
+
+        let py_code = r#"
+            import utils
+            import app.services
+            import os as operating_system
+            import json, sys
+
+            from app.models import User, Item
+            from . import helpers
+            from .models import User
+            from ..services import client
+
+            if TYPE_CHECKING:
+                from typing_heavy import ComplexType
+        "#;
+
+        let (imports, has_errors) = parser.parse_file_with_diagnostics(".py", py_code).unwrap();
+        assert!(!has_errors);
+
+        assert!(imports.iter().any(|i| i.specifier == "utils"));
+        assert!(imports.iter().any(|i| i.specifier == "app.services"));
+        // Alias is preserved as evidence without confusing specifier
+        assert!(imports.iter().any(|i| i.specifier == "os"));
+        assert!(imports.iter().any(|i| i.specifier == "json"));
+        assert!(imports.iter().any(|i| i.specifier == "sys"));
+
+        assert!(imports.iter().any(|i| i.specifier == "app.models:User"));
+        assert!(imports.iter().any(|i| i.specifier == "app.models:Item"));
+        assert!(imports.iter().any(|i| i.specifier == ".helpers"));
+        assert!(imports.iter().any(|i| i.specifier == ".models:User"));
+        assert!(imports.iter().any(|i| i.specifier == "..services:client"));
+
+        // TYPE_CHECKING guard
+        let tc_imp = imports
+            .iter()
+            .find(|i| i.specifier.contains("typing_heavy"))
+            .expect("TYPE_CHECKING import must be parsed");
+        assert!(tc_imp.is_type_only);
+        assert_eq!(tc_imp.relationship_kind, RelationshipKind::TypeOnly);
+    }
+
+    #[test]
     fn test_import_resolver_relative_and_extensionless() {
         let mut known = HashSet::new();
         known.insert("src/index.ts".to_string());
@@ -170,7 +274,7 @@ mod tests {
 
         // 5. Unresolved missing file
         let res5 = resolver.resolve("src/index.ts", "./nonexistent");
-        assert!(matches!(res5, ResolvedTarget::Unresolved(_)));
+        assert!(matches!(res5, ResolvedTarget::Unresolved(..)));
     }
 
     #[test]

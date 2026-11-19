@@ -5,11 +5,20 @@ use prebase_core::model::ResolutionStatus;
 
 use crate::tsconfig::TsConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnresolvedReasonKind {
+    MissingInternalTarget,
+    MissingWorkspaceTarget,
+    MissingAliasTarget,
+    InvalidSpecifier,
+    General,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedTarget {
     Internal(String),
     External(String),
-    Unresolved(String),
+    Unresolved(UnresolvedReasonKind, String),
     Unsupported(String),
 }
 
@@ -18,16 +27,27 @@ impl ResolvedTarget {
         match self {
             Self::Internal(_) => ResolutionStatus::ResolvedInternal,
             Self::External(_) => ResolutionStatus::ExternalPackage,
-            Self::Unresolved(_) => ResolutionStatus::Unresolved,
+            Self::Unresolved(_, _) => ResolutionStatus::Unresolved,
             Self::Unsupported(_) => ResolutionStatus::Unsupported,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RustCrateInfo {
+    pub name: String,
+    pub normalized_name: String,
+    pub crate_dir: String,
+    pub src_dir: String,
+    pub lib_entry: Option<String>,
+    pub main_entry: Option<String>,
 }
 
 pub struct ImportResolver {
     known_files: HashSet<String>,
     configs: Vec<TsConfig>,
     workspace_packages: HashMap<String, String>,
+    rust_crates: HashMap<String, RustCrateInfo>,
 }
 
 impl ImportResolver {
@@ -40,6 +60,7 @@ impl ImportResolver {
             known_files,
             configs,
             workspace_packages: HashMap::new(),
+            rust_crates: HashMap::new(),
         }
     }
 
@@ -48,6 +69,7 @@ impl ImportResolver {
             known_files,
             configs,
             workspace_packages: HashMap::new(),
+            rust_crates: HashMap::new(),
         }
     }
 
@@ -60,6 +82,21 @@ impl ImportResolver {
             known_files,
             configs,
             workspace_packages,
+            rust_crates: HashMap::new(),
+        }
+    }
+
+    pub fn with_all(
+        known_files: HashSet<String>,
+        configs: Vec<TsConfig>,
+        workspace_packages: HashMap<String, String>,
+        rust_crates: HashMap<String, RustCrateInfo>,
+    ) -> Self {
+        Self {
+            known_files,
+            configs,
+            workspace_packages,
+            rust_crates,
         }
     }
 
@@ -101,6 +138,13 @@ impl ImportResolver {
     }
 
     pub fn resolve(&self, from_file: &str, specifier: &str) -> ResolvedTarget {
+        if from_file.ends_with(".rs") {
+            return self.resolve_rust(from_file, specifier);
+        }
+        if from_file.ends_with(".py") || from_file.ends_with(".pyi") {
+            return self.resolve_python(from_file, specifier);
+        }
+
         let clean_spec = specifier.split('?').next().unwrap_or(specifier).trim();
         if clean_spec.is_empty() {
             return ResolvedTarget::Unsupported("Empty import specifier".to_string());
@@ -121,9 +165,10 @@ impl ImportResolver {
                     return ResolvedTarget::Internal(target);
                 }
             }
-            return ResolvedTarget::Unresolved(format!(
-                "Cannot resolve relative import '{clean_spec}' from '{from_file}'"
-            ));
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve relative import '{clean_spec}' from '{from_file}'"),
+            );
         }
 
         // 2. TypeScript path alias and baseUrl resolution
@@ -178,9 +223,12 @@ impl ImportResolver {
                     }
                 }
                 // Do NOT fall through to other patterns in paths or baseUrl if an explicit alias pattern matched
-                return ResolvedTarget::Unresolved(format!(
-                    "Cannot resolve target for path alias in '{clean_spec}' from '{from_file}'"
-                ));
+                return ResolvedTarget::Unresolved(
+                    UnresolvedReasonKind::MissingAliasTarget,
+                    format!(
+                        "Cannot resolve target for path alias in '{clean_spec}' from '{from_file}'"
+                    ),
+                );
             }
 
             // Fallback: baseUrl alone for non-relative non-alias imports
@@ -198,15 +246,19 @@ impl ImportResolver {
 
         // 3. Absolute path and Windows drive path rejection
         if clean_spec.starts_with('/') || clean_spec.starts_with('\\') {
-            return ResolvedTarget::Unresolved(format!("Invalid absolute import '{clean_spec}'"));
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::InvalidSpecifier,
+                format!("Invalid absolute import '{clean_spec}'"),
+            );
         }
         if clean_spec.len() >= 2
             && clean_spec.as_bytes()[0].is_ascii_alphabetic()
             && clean_spec.as_bytes()[1] == b':'
         {
-            return ResolvedTarget::Unresolved(format!(
-                "Invalid Windows drive import '{clean_spec}'"
-            ));
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::InvalidSpecifier,
+                format!("Invalid Windows drive import '{clean_spec}'"),
+            );
         }
 
         // 4. Workspace package imports resolution (e.g. "@myorg/core" or "@myorg/core/utils")
@@ -244,9 +296,12 @@ impl ImportResolver {
                     return ResolvedTarget::Internal(src);
                 }
 
-                return ResolvedTarget::Unresolved(format!(
-                    "Workspace package '{clean_spec}' target '{target}' does not exist in indexed files"
-                ));
+                return ResolvedTarget::Unresolved(
+                    UnresolvedReasonKind::MissingWorkspaceTarget,
+                    format!(
+                        "Workspace package '{clean_spec}' target '{target}' does not exist in indexed files"
+                    ),
+                );
             }
         }
         for (pkg_name, entry_path) in &self.workspace_packages {
@@ -276,7 +331,10 @@ impl ImportResolver {
             return ResolvedTarget::External(clean_spec.to_string());
         }
 
-        ResolvedTarget::Unresolved(format!("Unable to resolve import '{clean_spec}'"))
+        ResolvedTarget::Unresolved(
+            UnresolvedReasonKind::General,
+            format!("Unable to resolve import '{clean_spec}'"),
+        )
     }
 
     fn has_script_extension(path: &str) -> bool {
@@ -353,6 +411,490 @@ impl ImportResolver {
         }
 
         None
+    }
+
+    pub fn resolve_rust(&self, from_file: &str, specifier: &str) -> ResolvedTarget {
+        let clean_spec = specifier.trim();
+        if clean_spec.is_empty() {
+            return ResolvedTarget::Unsupported("Empty Rust import specifier".to_string());
+        }
+
+        // 1. External module declaration: "mod foo", "mod:foo", or "mod foo#[path=...]"
+        let mod_decl_opt = if let Some(decl) = clean_spec.strip_prefix("mod ") {
+            Some(decl)
+        } else {
+            clean_spec.strip_prefix("mod:")
+        };
+
+        if let Some(mod_decl) = mod_decl_opt {
+            let (mod_name, path_override) = if let Some(idx) = mod_decl.find("#[path=") {
+                let name = &mod_decl[..idx];
+                let path_val = mod_decl[idx + 7..].trim_end_matches(']');
+                (name.trim(), Some(path_val.trim()))
+            } else {
+                (mod_decl.trim(), None)
+            };
+
+            let from_dir = Path::new(from_file)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+
+            if let Some(override_path) = path_override {
+                let candidate = from_dir.join(override_path);
+                if let Some(norm) = Self::normalize_path(&candidate) {
+                    if self.known_files.contains(&norm) {
+                        return ResolvedTarget::Internal(norm);
+                    }
+                }
+                return ResolvedTarget::Unresolved(
+                    UnresolvedReasonKind::MissingInternalTarget,
+                    format!(
+                        "Cannot resolve module '{mod_name}' at explicit path '{override_path}' from '{from_file}'"
+                    ),
+                );
+            }
+
+            // Normal Rust module lookup:
+            // If from_file is lib.rs, main.rs, or mod.rs:
+            // Submodule is in from_dir/mod_name.rs or from_dir/mod_name/mod.rs
+            let from_filename = Path::new(from_file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let is_module_root = from_filename == "lib.rs"
+                || from_filename == "main.rs"
+                || from_filename == "mod.rs";
+
+            let target_stem = if is_module_root {
+                from_dir.join(mod_name)
+            } else {
+                let stem = from_filename.strip_suffix(".rs").unwrap_or(from_filename);
+                from_dir.join(stem).join(mod_name)
+            };
+
+            let candidate1 = format!("{}.rs", target_stem.to_string_lossy().replace('\\', "/"));
+            if self.known_files.contains(&candidate1) {
+                return ResolvedTarget::Internal(candidate1);
+            }
+            let candidate2 = format!(
+                "{}/mod.rs",
+                target_stem.to_string_lossy().replace('\\', "/")
+            );
+            if self.known_files.contains(&candidate2) {
+                return ResolvedTarget::Internal(candidate2);
+            }
+
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve module declaration '{mod_name}' from '{from_file}'"),
+            );
+        }
+
+        // 2. Relative or local crate references: crate::, super::, self::
+        if let Some(crate_sub) = clean_spec.strip_prefix("crate::") {
+            let crate_info = self.find_enclosing_crate(from_file);
+            let src_dir = crate_info
+                .as_ref()
+                .map(|c| c.src_dir.as_str())
+                .unwrap_or_else(|| {
+                    Path::new(from_file)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("")
+                });
+
+            if let Some(target) = self.resolve_rust_module_path(src_dir, crate_sub) {
+                return ResolvedTarget::Internal(target);
+            }
+
+            if let Some(ci) = &crate_info {
+                if let Some(entry) = ci.lib_entry.as_ref().or(ci.main_entry.as_ref()) {
+                    if self.known_files.contains(entry) {
+                        return ResolvedTarget::Internal(entry.clone());
+                    }
+                }
+            }
+
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve 'crate::{crate_sub}' from '{from_file}'"),
+            );
+        }
+
+        if let Some(super_sub) = clean_spec.strip_prefix("super::") {
+            let from_dir = Path::new(from_file)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            let from_filename = Path::new(from_file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            // If from_file is a file inside a module directory (e.g. src/foo/bar.rs),
+            // super can refer to sibling submodules inside src/foo as well as parent items in src/
+            let from_dir_str = from_dir.to_string_lossy().replace('\\', "/");
+            if from_filename != "mod.rs" && !from_dir_str.is_empty() {
+                if let Some(target) = self.resolve_rust_module_path(&from_dir_str, super_sub) {
+                    return ResolvedTarget::Internal(target);
+                }
+            }
+
+            let parent_dir = from_dir.parent().unwrap_or_else(|| Path::new(""));
+            let parent_dir_str = parent_dir.to_string_lossy().replace('\\', "/");
+
+            if let Some(target) = self.resolve_rust_module_path(&parent_dir_str, super_sub) {
+                return ResolvedTarget::Internal(target);
+            }
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve 'super::{super_sub}' from '{from_file}'"),
+            );
+        }
+
+        if let Some(self_sub) = clean_spec.strip_prefix("self::") {
+            let from_filename = Path::new(from_file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let from_dir = Path::new(from_file)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+
+            let is_module_root = from_filename == "lib.rs"
+                || from_filename == "main.rs"
+                || from_filename == "mod.rs";
+
+            // If not a module root (e.g. src/foo.rs), self's submodules live in src/foo/<sub_module>
+            if !is_module_root {
+                let stem = from_filename.strip_suffix(".rs").unwrap_or(from_filename);
+                let sub_dir = from_dir.join(stem).to_string_lossy().replace('\\', "/");
+                if let Some(target) = self.resolve_rust_module_path(&sub_dir, self_sub) {
+                    return ResolvedTarget::Internal(target);
+                }
+            }
+
+            let from_dir_str = from_dir.to_string_lossy().replace('\\', "/");
+            if let Some(target) = self.resolve_rust_module_path(&from_dir_str, self_sub) {
+                return ResolvedTarget::Internal(target);
+            }
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve 'self::{self_sub}' from '{from_file}'"),
+            );
+        }
+
+        // 3. Workspace member crate imports
+        let first_seg = clean_spec.split("::").next().unwrap_or(clean_spec);
+        if let Some(target_crate) = self.rust_crates.get(first_seg) {
+            let remainder = clean_spec
+                .strip_prefix(first_seg)
+                .unwrap_or("")
+                .trim_start_matches("::");
+            if !remainder.is_empty() {
+                if let Some(sub_target) =
+                    self.resolve_rust_module_path(&target_crate.src_dir, remainder)
+                {
+                    return ResolvedTarget::Internal(sub_target);
+                }
+            }
+            if let Some(entry) = target_crate
+                .lib_entry
+                .as_ref()
+                .or(target_crate.main_entry.as_ref())
+            {
+                if self.known_files.contains(entry) {
+                    return ResolvedTarget::Internal(entry.clone());
+                }
+            }
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingWorkspaceTarget,
+                format!("Workspace crate '{first_seg}' entry file not found for '{clean_spec}'"),
+            );
+        }
+
+        // 4. Standard library imports
+        if first_seg == "std" || first_seg == "core" || first_seg == "alloc" {
+            return ResolvedTarget::External(first_seg.to_string());
+        }
+
+        // 5. External third-party crates
+        ResolvedTarget::External(first_seg.to_string())
+    }
+
+    fn find_enclosing_crate(&self, from_file: &str) -> Option<&RustCrateInfo> {
+        let from_path = Path::new(from_file);
+        let mut best: Option<&RustCrateInfo> = None;
+        let mut best_len = 0;
+
+        for crate_info in self.rust_crates.values() {
+            if crate_info.crate_dir.is_empty() {
+                if best.is_none() {
+                    best = Some(crate_info);
+                }
+            } else if from_path.starts_with(&crate_info.crate_dir)
+                && crate_info.crate_dir.len() > best_len
+            {
+                best_len = crate_info.crate_dir.len();
+                best = Some(crate_info);
+            }
+        }
+        best
+    }
+
+    fn resolve_rust_module_path(&self, base_dir: &str, path_spec: &str) -> Option<String> {
+        let segments: Vec<&str> = path_spec.split("::").collect();
+        for len in (1..=segments.len()).rev() {
+            let sub_path = segments[..len].join("/");
+            let candidate1 = if base_dir.is_empty() {
+                format!("{sub_path}.rs")
+            } else {
+                format!("{base_dir}/{sub_path}.rs")
+            };
+            if self.known_files.contains(&candidate1) {
+                return Some(candidate1);
+            }
+
+            let candidate2 = if base_dir.is_empty() {
+                format!("{sub_path}/mod.rs")
+            } else {
+                format!("{base_dir}/{sub_path}/mod.rs")
+            };
+            if self.known_files.contains(&candidate2) {
+                return Some(candidate2);
+            }
+        }
+        None
+    }
+
+    pub fn resolve_python(&self, from_file: &str, specifier: &str) -> ResolvedTarget {
+        let clean_spec = specifier.trim();
+        if clean_spec.is_empty() {
+            return ResolvedTarget::Unsupported("Empty Python import specifier".to_string());
+        }
+
+        let (mod_part, symbol_part) = if let Some(idx) = clean_spec.find(':') {
+            (&clean_spec[..idx], Some(&clean_spec[idx + 1..]))
+        } else {
+            (clean_spec, None)
+        };
+
+        let from_dir = Path::new(from_file)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+
+        // 1. Relative imports: .foo, ..bar, .
+        if mod_part.starts_with('.') {
+            let dot_count = mod_part.chars().take_while(|c| *c == '.').count();
+            let remainder = &mod_part[dot_count..];
+
+            let mut target_dir = from_dir.to_path_buf();
+            for _ in 1..dot_count {
+                if let Some(p) = target_dir.parent() {
+                    target_dir = p.to_path_buf();
+                } else {
+                    return ResolvedTarget::Unresolved(
+                        UnresolvedReasonKind::MissingInternalTarget,
+                        format!(
+                            "Relative import '{clean_spec}' escapes repository root from '{from_file}'"
+                        ),
+                    );
+                }
+            }
+
+            let base_str = target_dir.to_string_lossy().replace('\\', "/");
+
+            if remainder.is_empty() {
+                if let Some(sym) = symbol_part {
+                    if let Some(target) = self.resolve_python_module_file(&base_str, sym) {
+                        return ResolvedTarget::Internal(target);
+                    }
+                }
+                let init_cand = if base_str.is_empty() {
+                    "__init__.py".to_string()
+                } else {
+                    format!("{base_str}/__init__.py")
+                };
+                if self.known_files.contains(&init_cand) {
+                    return ResolvedTarget::Internal(init_cand);
+                }
+                return ResolvedTarget::Unresolved(
+                    UnresolvedReasonKind::MissingInternalTarget,
+                    format!("Cannot resolve relative import '{clean_spec}' from '{from_file}'"),
+                );
+            }
+
+            let rel_module_path = remainder.replace('.', "/");
+            let target_sub = if base_str.is_empty() {
+                rel_module_path
+            } else {
+                format!("{base_str}/{rel_module_path}")
+            };
+
+            if let Some(target) = self.resolve_python_module_file(&target_sub, "") {
+                return ResolvedTarget::Internal(target);
+            }
+            if let Some(sym) = symbol_part {
+                if let Some(target) = self.resolve_python_module_file(&target_sub, sym) {
+                    return ResolvedTarget::Internal(target);
+                }
+            }
+
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve relative import '{clean_spec}' from '{from_file}'"),
+            );
+        }
+
+        // 2. Absolute / project-level imports
+        let mod_path = mod_part.replace('.', "/");
+        let mut candidate_roots = vec!["".to_string(), "src".to_string()];
+        let from_dir_str = from_dir.to_string_lossy().replace('\\', "/");
+        if !from_dir_str.is_empty() && !candidate_roots.contains(&from_dir_str) {
+            candidate_roots.push(from_dir_str);
+        }
+
+        for root in &candidate_roots {
+            let base = if root.is_empty() {
+                mod_path.clone()
+            } else {
+                format!("{root}/{mod_path}")
+            };
+
+            if let Some(sym) = symbol_part {
+                if let Some(target) = self.resolve_python_module_file(&base, sym) {
+                    return ResolvedTarget::Internal(target);
+                }
+            }
+            if let Some(target) = self.resolve_python_module_file(&base, "") {
+                return ResolvedTarget::Internal(target);
+            }
+        }
+
+        // 3. Python standard library check
+        let top_level = mod_part.split('.').next().unwrap_or(mod_part);
+        if Self::is_python_stdlib(top_level) {
+            return ResolvedTarget::External(top_level.to_string());
+        }
+
+        // 4. External third-party package
+        ResolvedTarget::External(top_level.to_string())
+    }
+
+    fn resolve_python_module_file(&self, base_path: &str, symbol: &str) -> Option<String> {
+        let clean_base = base_path.trim_matches('/');
+
+        // If a symbol is specified (e.g. `from .models import User` or `from . import models`),
+        // check whether symbol itself is a module file or package submodule directory first!
+        if !symbol.is_empty() {
+            let cand_sym_file = format!("{clean_base}/{symbol}.py");
+            if self.known_files.contains(&cand_sym_file) {
+                return Some(cand_sym_file);
+            }
+            let cand_sym_pkg = format!("{clean_base}/{symbol}/__init__.py");
+            if self.known_files.contains(&cand_sym_pkg) {
+                return Some(cand_sym_pkg);
+            }
+        }
+
+        let cand1 = format!("{clean_base}.py");
+        if self.known_files.contains(&cand1) {
+            return Some(cand1);
+        }
+
+        let cand2 = format!("{clean_base}/__init__.py");
+        if self.known_files.contains(&cand2) {
+            return Some(cand2);
+        }
+
+        None
+    }
+
+    pub fn is_python_stdlib(name: &str) -> bool {
+        matches!(
+            name,
+            "abc"
+                | "argparse"
+                | "array"
+                | "asyncio"
+                | "base64"
+                | "builtins"
+                | "collections"
+                | "contextlib"
+                | "copy"
+                | "csv"
+                | "dataclasses"
+                | "datetime"
+                | "decimal"
+                | "difflib"
+                | "dis"
+                | "enum"
+                | "errno"
+                | "fcntl"
+                | "fnmatch"
+                | "fractions"
+                | "functools"
+                | "gc"
+                | "glob"
+                | "gzip"
+                | "hashlib"
+                | "heapq"
+                | "hmac"
+                | "html"
+                | "http"
+                | "importlib"
+                | "inspect"
+                | "io"
+                | "itertools"
+                | "json"
+                | "logging"
+                | "lzma"
+                | "math"
+                | "mimetypes"
+                | "multiprocessing"
+                | "numbers"
+                | "operator"
+                | "os"
+                | "pathlib"
+                | "pickle"
+                | "platform"
+                | "pprint"
+                | "queue"
+                | "random"
+                | "re"
+                | "secrets"
+                | "select"
+                | "shlex"
+                | "shutil"
+                | "signal"
+                | "socket"
+                | "sqlite3"
+                | "ssl"
+                | "stat"
+                | "string"
+                | "struct"
+                | "subprocess"
+                | "sys"
+                | "tarfile"
+                | "tempfile"
+                | "textwrap"
+                | "threading"
+                | "time"
+                | "timeit"
+                | "token"
+                | "tokenize"
+                | "traceback"
+                | "types"
+                | "typing"
+                | "unicodedata"
+                | "unittest"
+                | "urllib"
+                | "uuid"
+                | "warnings"
+                | "weakref"
+                | "xml"
+                | "zipfile"
+                | "zlib"
+        )
     }
 
     pub fn normalize_path(path: &Path) -> Option<String> {

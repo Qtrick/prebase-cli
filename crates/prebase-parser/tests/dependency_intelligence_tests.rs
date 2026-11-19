@@ -52,7 +52,7 @@ fn test_package_configuration_leakage_isolated_resolver() {
         "Package B must NOT resolve '@a/utils' to Package A's internal file (configuration leakage defect)"
     );
     assert!(
-        matches!(res_b, ResolvedTarget::External(_) | ResolvedTarget::Unresolved(_)),
+        matches!(res_b, ResolvedTarget::External(_) | ResolvedTarget::Unresolved(..)),
         "Package B importing '@a/utils' without tsconfig must be External or Unresolved, got {res_b:?}"
     );
 
@@ -350,7 +350,7 @@ fn test_precedence_and_non_fallthrough_in_paths() {
         "Defect: Resolution fell through from best-matching pattern '@/components/*' to broader pattern '@/*'"
     );
     assert!(
-        matches!(res_missing, ResolvedTarget::Unresolved(_)),
+        matches!(res_missing, ResolvedTarget::Unresolved(..)),
         "When best-matching pattern's targets miss, result must be Unresolved without fallthrough, got {res_missing:?}"
     );
 
@@ -374,7 +374,7 @@ fn test_precedence_and_non_fallthrough_in_paths() {
         "Defect: Resolution fell through multi-target pattern '@/ui/*' to broader pattern '@/*'"
     );
     assert!(
-        matches!(res_dialog, ResolvedTarget::Unresolved(_)),
+        matches!(res_dialog, ResolvedTarget::Unresolved(..)),
         "When all targets of best-matching pattern fail, result must be Unresolved, got {res_dialog:?}"
     );
 }
@@ -411,7 +411,7 @@ fn test_extension_substitution_no_double_appending() {
             "Defect: Importing './util.js' double-appended '.ts' to resolve to 'src/util.js.ts'!"
         );
         assert!(
-            matches!(resolved, ResolvedTarget::Unresolved(_)),
+            matches!(resolved, ResolvedTarget::Unresolved(..)),
             "Importing './util.js' when only 'src/util.js.ts' exists must be Unresolved, got {resolved:?}"
         );
     }
@@ -431,7 +431,7 @@ fn test_extension_substitution_no_double_appending() {
             "Defect: Importing './component.jsx' double-appended '.tsx' to resolve to 'src/component.jsx.tsx'!"
         );
         assert!(
-            matches!(resolved, ResolvedTarget::Unresolved(_)),
+            matches!(resolved, ResolvedTarget::Unresolved(..)),
             "Importing './component.jsx' when only 'src/component.jsx.tsx' exists must be Unresolved, got {resolved:?}"
         );
     }
@@ -451,7 +451,7 @@ fn test_extension_substitution_no_double_appending() {
             "Defect: Importing './foo.mjs' double-appended '.mts' to resolve to 'src/foo.mjs.mts'!"
         );
         assert!(
-            matches!(resolved, ResolvedTarget::Unresolved(_)),
+            matches!(resolved, ResolvedTarget::Unresolved(..)),
             "Importing './foo.mjs' when only 'src/foo.mjs.mts' exists must be Unresolved, got {resolved:?}"
         );
     }
@@ -471,7 +471,7 @@ fn test_extension_substitution_no_double_appending() {
             "Defect: Importing './bar.cjs' double-appended '.cts' to resolve to 'src/bar.cjs.cts'!"
         );
         assert!(
-            matches!(resolved, ResolvedTarget::Unresolved(_)),
+            matches!(resolved, ResolvedTarget::Unresolved(..)),
             "Importing './bar.cjs' when only 'src/bar.cjs.cts' exists must be Unresolved, got {resolved:?}"
         );
     }
@@ -1130,5 +1130,70 @@ fn test_partially_analyzed_node_status() {
         syntax_warning.is_some(),
         "Expected SyntaxWarning issue for 'src/broken.ts', found: {:?}",
         snapshot.issues
+    );
+}
+
+#[test]
+fn test_typed_unresolved_issue_classification() {
+    use std::fs;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("tsconfig.json"),
+        r#"{
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                    "@custom/*": ["src/custom/*"]
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("src/main.ts"),
+        r#"
+        import { foo } from "./missing_local";
+        import { bar } from "@custom/missing_alias";
+        import { baz } from "@/unconfigured/path";
+        "#,
+    )
+    .unwrap();
+
+    let analyzer = RepositoryAnalyzer::default();
+    let res = analyzer.analyze_path(root).expect("Analysis must succeed");
+    let snapshot = res.snapshot;
+
+    let missing_local = snapshot
+        .issues
+        .iter()
+        .find(|i| i.message.contains("missing_local"))
+        .expect("Must have issue for missing_local");
+    assert_eq!(
+        missing_local.issue_kind, "UnresolvedInternalTarget",
+        "Missing relative file must be classified as UnresolvedInternalTarget"
+    );
+
+    let missing_alias = snapshot
+        .issues
+        .iter()
+        .find(|i| i.message.contains("missing_alias"))
+        .expect("Must have issue for missing_alias");
+    assert_eq!(
+        missing_alias.issue_kind, "UnresolvedInternalTarget",
+        "Missing path alias target must be classified as UnresolvedInternalTarget"
+    );
+
+    let missing_unknown = snapshot
+        .issues
+        .iter()
+        .find(|i| i.message.contains("unconfigured"))
+        .expect("Must have issue for unresolved unknown path");
+    assert_eq!(
+        missing_unknown.issue_kind, "UnresolvedImport",
+        "Unconfigured non-package import must be classified as UnresolvedImport"
     );
 }

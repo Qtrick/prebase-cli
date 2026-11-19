@@ -12,7 +12,7 @@ use prebase_core::model::{
 use prebase_core::scanner::{DiscoveredFile, RepositoryScanner, ScanOutput, ScannerConfig};
 
 use crate::ast::SourceParser;
-use crate::resolver::{ImportResolver, ResolvedTarget};
+use crate::resolver::{ImportResolver, ResolvedTarget, RustCrateInfo, UnresolvedReasonKind};
 use crate::tsconfig::TsConfig;
 
 #[derive(Debug)]
@@ -209,8 +209,63 @@ impl RepositoryAnalyzer {
             }
         }
 
+        // Discover Cargo.toml manifests and index Rust crate names and source directories
+        let mut rust_crates = std::collections::HashMap::new();
+        for file in &discovered_files {
+            if file.filename == "Cargo.toml" {
+                if let Ok(content) =
+                    prebase_core::safe_read_file_to_string(root, &file.relative_path, 256 * 1024)
+                {
+                    if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+                        let crate_dir = Path::new(&file.relative_path)
+                            .parent()
+                            .unwrap_or_else(|| Path::new(""))
+                            .to_string_lossy()
+                            .replace('\\', "/");
+
+                        if let Some(pkg) = toml_val.get("package") {
+                            if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
+                                let norm_name = name.replace('-', "_");
+                                let src_dir = if crate_dir.is_empty() {
+                                    "src".to_string()
+                                } else {
+                                    format!("{crate_dir}/src")
+                                };
+
+                                let lib_cand = format!("{src_dir}/lib.rs");
+                                let lib_entry = if known_files.contains(&lib_cand) {
+                                    Some(lib_cand)
+                                } else {
+                                    None
+                                };
+
+                                let main_cand = format!("{src_dir}/main.rs");
+                                let main_entry = if known_files.contains(&main_cand) {
+                                    Some(main_cand)
+                                } else {
+                                    None
+                                };
+
+                                rust_crates.insert(
+                                    norm_name.clone(),
+                                    RustCrateInfo {
+                                        name: name.to_string(),
+                                        normalized_name: norm_name,
+                                        crate_dir,
+                                        src_dir,
+                                        lib_entry,
+                                        main_entry,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let resolver =
-            ImportResolver::with_configs_and_packages(known_files, configs, workspace_packages);
+            ImportResolver::with_all(known_files, configs, workspace_packages, rust_crates);
         let mut parser = SourceParser::new();
 
         let analyzed_counter = AtomicUsize::new(0);
@@ -325,14 +380,16 @@ impl RepositoryAnalyzer {
                             );
                         }
                     }
-                    ResolvedTarget::Unresolved(reason) => {
+                    ResolvedTarget::Unresolved(unresolved_kind, reason) => {
                         debug!("Unresolved import in {}: {reason}", file.relative_path);
-                        let issue_kind =
-                            if reason.contains("Workspace package") || reason.contains("target") {
+                        let issue_kind = match unresolved_kind {
+                            UnresolvedReasonKind::MissingInternalTarget
+                            | UnresolvedReasonKind::MissingWorkspaceTarget
+                            | UnresolvedReasonKind::MissingAliasTarget => {
                                 "UnresolvedInternalTarget".to_string()
-                            } else {
-                                "UnresolvedImport".to_string()
-                            };
+                            }
+                            _ => "UnresolvedImport".to_string(),
+                        };
                         issues.push(AnalysisIssue {
                             file_path: file.relative_path.clone(),
                             issue_kind,
@@ -387,7 +444,10 @@ impl RepositoryAnalyzer {
             ".tsx" => "tsx".to_string(),
             ".js" | ".mjs" | ".cjs" => "javascript".to_string(),
             ".jsx" => "jsx".to_string(),
+            ".rs" => "rust".to_string(),
+            ".py" | ".pyi" => "python".to_string(),
             ".json" => "json".to_string(),
+            ".toml" => "toml".to_string(),
             ".css" | ".scss" | ".less" => "css".to_string(),
             ".html" => "html".to_string(),
             ".md" | ".mdx" => "markdown".to_string(),

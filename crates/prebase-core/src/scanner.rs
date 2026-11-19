@@ -128,9 +128,9 @@ impl RepositoryScanner {
             match part_lower.trim() {
                 ".git" | "node_modules" | "dist" | "build" | ".build" | ".next" | ".nuxt"
                 | "coverage" | "target" | ".reference" | ".cache" | ".turbo" | ".vscode"
-                | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws" | ".gnupg" => {
-                    return true
-                }
+                | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws" | ".gnupg"
+                | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache" | "venv"
+                | ".venv" => return true,
                 _ => {}
             }
         }
@@ -305,21 +305,28 @@ impl RepositoryScanner {
 
             let is_supported = matches!(
                 ext.as_str(),
-                ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
+                ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts" | ".rs" | ".py"
             );
 
-            let file_kind =
-                if rel.contains(".test.") || rel.contains(".spec.") || rel.contains("__tests__") {
-                    FileKind::Test
-                } else if matches!(ext.as_str(), ".json" | ".yaml" | ".yml" | ".toml") {
-                    FileKind::Config
-                } else if matches!(ext.as_str(), ".md" | ".txt") {
-                    FileKind::Doc
-                } else if is_supported {
-                    FileKind::Source
-                } else {
-                    FileKind::Other
-                };
+            let is_test_file = rel.contains(".test.")
+                || rel.contains(".spec.")
+                || rel.contains("__tests__")
+                || filename.starts_with("test_")
+                || filename.ends_with("_test.py")
+                || rel.starts_with("tests/")
+                || rel.contains("/tests/");
+
+            let file_kind = if is_test_file {
+                FileKind::Test
+            } else if matches!(ext.as_str(), ".json" | ".yaml" | ".yml" | ".toml") {
+                FileKind::Config
+            } else if matches!(ext.as_str(), ".md" | ".txt") {
+                FileKind::Doc
+            } else if is_supported {
+                FileKind::Source
+            } else {
+                FileKind::Other
+            };
 
             discovered.push(DiscoveredFile {
                 absolute_path: path.to_path_buf(),

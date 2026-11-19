@@ -589,3 +589,58 @@ fn test_imp_03_diamond_graph_all_type_paths_is_type_only() {
         "c.ts must have is_type_only = true when all paths from Target are type-only"
     );
 }
+
+#[test]
+fn test_multi_language_area_categorization_and_coupling() {
+    use prebase_core::insights::{compute_area_couplings, get_area_id_for_path};
+
+    // 1. Check path-to-area mapping across language conventions
+    assert_eq!(
+        get_area_id_for_path("crates/prebase-core/src/lib.rs"),
+        "crates/prebase-core"
+    );
+    assert_eq!(
+        get_area_id_for_path("crates/prebase-cli/src/main.rs"),
+        "crates/prebase-cli"
+    );
+    assert_eq!(
+        get_area_id_for_path("frontend/src/app/App.tsx"),
+        "frontend/src/app"
+    );
+    assert_eq!(get_area_id_for_path("src/models/user.py"), "src/models");
+    assert_eq!(
+        get_area_id_for_path("services/auth/src/main.py"),
+        "services/auth"
+    );
+    assert_eq!(get_area_id_for_path("main.py"), "(root)");
+    assert_eq!(get_area_id_for_path("Cargo.toml"), "(root)");
+
+    // 2. Check area coupling computation
+    let mut n1 = make_node("crates/cli/src/main.rs");
+    n1.language = "rust".to_string();
+    let mut n2 = make_node("crates/core/src/lib.rs");
+    n2.language = "rust".to_string();
+    let mut n3 = make_node("py_app/src/main.py");
+    n3.language = "python".to_string();
+
+    let nodes = vec![n1, n2, n3];
+    let edges = vec![make_edge(
+        "crates/cli/src/main.rs",
+        "crates/core/src/lib.rs",
+        false,
+    )];
+
+    let couplings = compute_area_couplings(&nodes, &edges);
+    assert!(couplings.iter().any(|c| c.area_id == "crates/cli"));
+    assert!(couplings.iter().any(|c| c.area_id == "crates/core"));
+
+    let cli_coupling = couplings
+        .iter()
+        .find(|c| c.area_id == "crates/cli")
+        .unwrap();
+    assert_eq!(cli_coupling.outbound_edge_count, 1);
+    assert!(cli_coupling
+        .connected_areas
+        .iter()
+        .any(|ca| ca.area_id == "crates/core" && ca.outbound_count == 1));
+}
