@@ -10,6 +10,7 @@ import {
   ROW_HEIGHT,
 } from './temporalLayout';
 import { computeTemporalTextLayout } from './temporalTextLayout';
+import { applyTemporalWheelScroll, computeCommitScrollIntoView } from './temporalScroll';
 
 interface TemporalCanvasProps {
   commits: CommitSummary[];
@@ -373,48 +374,24 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     }
   };
 
-  // Zoom on wheel
+  // Native vertical scrolling (preserves transform.k, zero wheel-based zoom scaling)
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const zoomFactor = e.deltaY < 0 ? 1.12 : 0.88;
-    const newK = Math.max(0.2, Math.min(3.0, transform.k * zoomFactor));
-
-    const worldX = (mouseX - transform.x) / transform.k;
-    const worldY = (mouseY - transform.y) / transform.k;
-
-    setTransform({
-      x: mouseX - worldX * newK,
-      y: mouseY - worldY * newK,
-      k: newK,
-    });
+    const height = canvas.clientHeight || 600;
+    const contentHeight = Math.max(height, layout.bounds.height);
+    setTransform((prev) =>
+      applyTemporalWheelScroll(prev, e.deltaY, contentHeight, height)
+    );
   };
 
   const scrollCommitIntoView = (targetNode: LayoutCommit) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const height = canvas.clientHeight || 600;
-    setTransform((prev) => {
-      const screenY = prev.y + targetNode.y * prev.k;
-      if (screenY < 60) {
-        return {
-          ...prev,
-          y: 80 - targetNode.y * prev.k,
-        };
-      } else if (screenY > height - 80) {
-        return {
-          ...prev,
-          y: height - 100 - targetNode.y * prev.k,
-        };
-      }
-      return prev;
-    });
+    setTransform((prev) => computeCommitScrollIntoView(prev, targetNode, height));
   };
 
   // Keyboard navigation for accessible commit selection

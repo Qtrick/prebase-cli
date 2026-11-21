@@ -48,6 +48,8 @@ import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
 import { findEntryPointCandidate } from '../../utils/entryPointDetection';
 import { getAreaIdForPath } from '../../utils/repositoryAreas';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
+import { matchesLanguageFilter } from '../../utils/languageFilter';
+import { createHoverHysteresisController, HoverHysteresisController } from './hoverHysteresis';
 
 export interface RevealRequest {
   nodeId: string;
@@ -82,29 +84,6 @@ interface CameraAnimation {
   targetCamera: NetworkCamera;
   startTime: number;
   durationMs: number;
-}
-
-function matchesLanguageFilter(
-  node: FileNode,
-  filter?: 'all' | 'typescript' | 'rust' | 'python'
-): boolean {
-  if (!filter || filter === 'all') return true;
-  const lang = (node.language || '').toLowerCase();
-  const ext = (node.relative_path.split('.').pop() || '').toLowerCase();
-  if (filter === 'typescript') {
-    return (
-      lang === 'typescript' ||
-      lang === 'javascript' ||
-      ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'].includes(ext)
-    );
-  }
-  if (filter === 'rust') {
-    return lang === 'rust' || ext === 'rs';
-  }
-  if (filter === 'python') {
-    return lang === 'python' || ext === 'py' || ext === 'pyi';
-  }
-  return false;
 }
 
 export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
@@ -188,6 +167,23 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   // Cache for projection output
   const projectedDataRef = useRef<ProjectedGraph | null>(null);
   const centroidRef = useRef<Point3D>({ x: 0, y: 0, z: 0 });
+
+  // Hover hysteresis controller to eliminate visual hover strobing on fast cursor traversal
+  const hoverControllerRef = useRef<HoverHysteresisController | null>(null);
+  useEffect(() => {
+    const ctrl = createHoverHysteresisController({
+      thresholdMs: 100,
+      onCommitHover: (id) => {
+        setHoveredNodeId(id);
+        requestRender();
+      },
+    });
+    hoverControllerRef.current = ctrl;
+    return () => {
+      ctrl.dispose();
+      hoverControllerRef.current = null;
+    };
+  }, [requestRender]);
 
   // Pointer gesture tracking
   const gestureRef = useRef<{
@@ -762,6 +758,19 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const totalDegree =
             pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
 
+          // Suppress label if language filter is active and node does not match
+          if (languageFilter && languageFilter !== 'all') {
+            if (!matchesLanguageFilter(pNode.node, languageFilter)) {
+              continue;
+            }
+          }
+
+          // When a node is actively selected: suppress labels for background (unrelated) nodes
+          // unless it is selected, connected to selected, or hovered.
+          if (selectedNodeId !== null && !isSelected && !isHovered && !isConnectedToSelected) {
+            continue;
+          }
+
           const shouldDraw = shouldDrawNodeLabel({
             isSelected,
             isHovered,
@@ -1014,6 +1023,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     const target = e.target as HTMLElement;
     pointerTargetRef.current = target;
+    hoverControllerRef.current?.handleGestureStart();
     try {
       target.setPointerCapture(e.pointerId);
     } catch {
@@ -1078,12 +1088,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return;
     }
 
-    // Hover hit test
+    // Hover hit test with hysteresis (lingering commits after 100ms, fast traverse does not strobe)
     const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-    const newHoverId = hitNode?.id || null;
-    if (newHoverId !== hoveredNodeId) {
-      setHoveredNodeId(newHoverId);
-      requestRender();
+    if (hitNode) {
+      hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
+    } else {
+      hoverControllerRef.current?.handlePointerMoveOverEmpty();
     }
   };
 
@@ -1104,6 +1114,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       gesture.active = false;
       gesture.pointerId = null;
       gesture.mode = 'idle';
+      hoverControllerRef.current?.handleGestureEnd();
       if (canvasRef.current) {
         canvasRef.current.style.cursor = '';
       }
@@ -1121,6 +1132,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     if (!wasDragging) {
       const hitNode = findNodeAtPoint(e.clientX, e.clientY);
       if (hitNode) {
+        hoverControllerRef.current?.handleClickNode(hitNode.id);
         onSelectNode(hitNode);
         onSelectEdge(null);
         onAnnounce?.(`Selected file ${hitNode.filename}`);
@@ -1386,6 +1398,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
+        onPointerLeave={() => hoverControllerRef.current?.handlePointerLeaveCanvas()}
         onLostPointerCapture={handleLostPointerCapture}
         onWheel={handleWheel}
         onKeyDown={handleKeyDown}

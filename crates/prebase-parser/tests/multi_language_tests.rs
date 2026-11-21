@@ -3,7 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use prebase_core::model::{NodeAnalysisStatus, ResolutionStatus};
-use prebase_parser::resolver::{ImportResolver, ResolvedTarget, RustCrateInfo};
+use prebase_parser::resolver::{
+    ImportResolver, ResolvedTarget, RustCrateInfo, UnresolvedReasonKind,
+};
 use prebase_parser::RepositoryAnalyzer;
 
 // ============================================================================
@@ -220,6 +222,14 @@ fn test_python_relative_and_package_resolution() {
         res,
         ResolvedTarget::Internal("pkg/models.py".to_string()),
         "from pkg import models in main.py must resolve to pkg/models.py"
+    );
+
+    // 6. from pkg.missing import something in main.py -> Unresolved (Finding F12: must not be External)
+    let res = resolver.resolve("main.py", "pkg.missing:something");
+    assert!(
+        matches!(res, ResolvedTarget::Unresolved(UnresolvedReasonKind::MissingInternalTarget, _)),
+        "from pkg.missing in main.py where pkg is internal must be MissingInternalTarget, got: {:?}",
+        res
     );
 }
 

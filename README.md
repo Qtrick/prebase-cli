@@ -244,7 +244,7 @@ PreBase is engineered with strict local security boundaries:
 
 ## Known Limitations
 
-- **Language Scope**: The initial MVP focuses specifically on JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts`). Support for Python, Go, and Rust is scheduled for post-MVP.
+- **Language Scope**: PreBase extracts internal dependencies from JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts`), Rust (`.rs`, `Cargo.toml` crates/modules), and Python (`.py`, `.pyi` packages, modules, and relative imports). Non-source assets and other languages are discovered in the file tree and indexed as unsupported formats.
 - **Subprocess Timeout**: Massive repositories with hundreds of thousands of commits may encounter the 10-second subprocess limit on initial root discovery if unindexed.
 - **Submodules**: Git submodules are treated as directory boundaries rather than recursively unpacked repositories.
 

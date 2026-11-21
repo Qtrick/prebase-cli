@@ -152,6 +152,9 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [impactAnalysis, setImpactAnalysis] = useState<FileImpactAnalysis | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
   const [showAllImpact, setShowAllImpact] = useState<boolean>(false);
+  const [showAllDeps, setShowAllDeps] = useState<boolean>(false);
+  const [showAllDependents, setShowAllDependents] = useState<boolean>(false);
+  const [isImpactExpanded, setIsImpactExpanded] = useState<boolean>(true);
   const [diagnosticsFilterCategory, setDiagnosticsFilterCategory] = useState<string>('all');
   const [isDiagnosticsExpanded, setIsDiagnosticsExpanded] = useState<boolean>(false);
   const { copied: copiedPath, copy: copyPath } = useCopyFeedback();
@@ -189,6 +192,8 @@ export const Inspector: React.FC<InspectorProps> = ({
       setSourcePreview(null);
       setImpactAnalysis(null);
       setShowAllImpact(false);
+      setShowAllDeps(false);
+      setShowAllDependents(false);
       setLoading(true);
       setImpactLoading(true);
 
@@ -1486,7 +1491,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               <span>Non-analyzed File Format</span>
             </div>
             <p className="limitations-desc">
-              PreBase tracks this file in the repository index, but only TypeScript and JavaScript files currently undergo AST-level dependency extraction.
+              PreBase tracks this file in the repository index. Internal dependency extraction is supported for TypeScript/JavaScript, Rust, and Python source files.
             </p>
           </div>
         ) : (
@@ -1500,25 +1505,49 @@ export const Inspector: React.FC<InspectorProps> = ({
               {inspection?.dependencies.length === 0 ? (
                 <p className="empty-hint">No internal dependencies imported.</p>
               ) : (
-                <ul className="relation-list">
-                  {inspection?.dependencies.map((dep) => (
-                    <li key={dep.id} className="relation-item-wrap">
-                      <button
-                        type="button"
-                        className="relation-item-btn"
-                        onClick={() => onSelectNode(dep)}
-                        title={`Inspect ${dep.relative_path}`}
-                      >
-                        <div
-                          className="color-dot-small"
-                          style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
-                        />
-                        <span className="rel-path mono">{dep.relative_path}</span>
-                        <ExternalLink size={12} className="link-icon" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="relation-list">
+                    {(showAllDeps ? inspection?.dependencies : inspection?.dependencies.slice(0, 20))?.map((dep) => (
+                      <li key={dep.id} className="relation-item-wrap">
+                        <button
+                          type="button"
+                          className="relation-item-btn"
+                          onClick={() => onSelectNode(dep)}
+                          title={`Inspect ${dep.relative_path}`}
+                        >
+                          <div
+                            className="color-dot-small"
+                            style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                          />
+                          <span className="rel-path mono">{dep.relative_path}</span>
+                          <ExternalLink size={12} className="link-icon" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {inspection && inspection.dependencies.length > 20 && (
+                    <button
+                      type="button"
+                      className="toggle-all-impact-btn"
+                      onClick={() => setShowAllDeps(!showAllDeps)}
+                      style={{
+                        background: 'transparent',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: '4px',
+                        color: 'var(--text-secondary)',
+                        fontSize: '11px',
+                        padding: '4px 8px',
+                        marginTop: '4px',
+                        cursor: 'pointer',
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'center',
+                      }}
+                    >
+                      {showAllDeps ? 'Show first 20' : `Show remaining ${inspection.dependencies.length - 20} files`}
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
@@ -1531,25 +1560,49 @@ export const Inspector: React.FC<InspectorProps> = ({
               {inspection?.dependents.length === 0 ? (
                 <p className="empty-hint">Not imported by any internal files.</p>
               ) : (
-                <ul className="relation-list">
-                  {inspection?.dependents.map((dep) => (
-                    <li key={dep.id} className="relation-item-wrap">
-                      <button
-                        type="button"
-                        className="relation-item-btn"
-                        onClick={() => onSelectNode(dep)}
-                        title={`Inspect ${dep.relative_path}`}
-                      >
-                        <div
-                          className="color-dot-small"
-                          style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
-                        />
-                        <span className="rel-path mono">{dep.relative_path}</span>
-                        <ExternalLink size={12} className="link-icon" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="relation-list">
+                    {(showAllDependents ? inspection?.dependents : inspection?.dependents.slice(0, 20))?.map((dep) => (
+                      <li key={dep.id} className="relation-item-wrap">
+                        <button
+                          type="button"
+                          className="relation-item-btn"
+                          onClick={() => onSelectNode(dep)}
+                          title={`Inspect ${dep.relative_path}`}
+                        >
+                          <div
+                            className="color-dot-small"
+                            style={{ backgroundColor: getFileTypeColor(dep.relative_path) }}
+                          />
+                          <span className="rel-path mono">{dep.relative_path}</span>
+                          <ExternalLink size={12} className="link-icon" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {inspection && inspection.dependents.length > 20 && (
+                    <button
+                      type="button"
+                      className="toggle-all-impact-btn"
+                      onClick={() => setShowAllDependents(!showAllDependents)}
+                      style={{
+                        background: 'transparent',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: '4px',
+                        color: 'var(--text-secondary)',
+                        fontSize: '11px',
+                        padding: '4px 8px',
+                        marginTop: '4px',
+                        cursor: 'pointer',
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'center',
+                      }}
+                    >
+                      {showAllDependents ? 'Show first 20' : `Show remaining ${inspection.dependents.length - 20} files`}
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
@@ -1567,74 +1620,86 @@ export const Inspector: React.FC<InspectorProps> = ({
             ) : (
               impactAnalysis && (
                 <div className="relations-section impact-section">
-                  <div className="section-title">
-                    <ArrowDownLeft size={14} color="#f59e0b" />
-                    <h4>Downstream Impact ({impactAnalysis.total_impact_count} files)</h4>
+                  <div
+                    className="section-title"
+                    onClick={() => setIsImpactExpanded(!isImpactExpanded)}
+                    style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    title={isImpactExpanded ? 'Collapse impact cascade' : 'Expand impact cascade'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <ArrowDownLeft size={14} color="#f59e0b" />
+                      <h4>Downstream Impact ({impactAnalysis.total_impact_count} files)</h4>
+                    </div>
+                    {isImpactExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                   </div>
-                  {impactAnalysis.is_part_of_cycle && (
-                    <div className="impact-cycle-alert">
-                      <Repeat size={12} color="#f59e0b" />
-                      <span>Part of a circular dependency group</span>
-                    </div>
-                  )}
-                  <div className="impact-stats-row">
-                    <div className="impact-stat">
-                      <span className="impact-stat-num">{impactAnalysis.direct_dependents_count}</span>
-                      <span className="impact-stat-text">Direct dependents</span>
-                    </div>
-                    <div className="impact-stat">
-                      <span className="impact-stat-num">{impactAnalysis.transitive_dependents_count}</span>
-                      <span className="impact-stat-text">Transitive cascade</span>
-                    </div>
-                  </div>
-                  {impactAnalysis.impacted_files.length > 0 && (
-                    <div className="impact-files-list">
-                      <span className="impact-list-heading">Cascade order:</span>
-                      {(showAllImpact ? impactAnalysis.impacted_files : impactAnalysis.impacted_files.slice(0, 10)).map((imp) => {
-                        const impNode = snapshot?.nodes.find(
-                          (n) => n.id === imp.file_id || n.relative_path === imp.relative_path
-                        );
-                        return (
-                          <button
-                            key={imp.file_id}
-                            type="button"
-                            className="impact-item-btn clickable"
-                            onClick={() => {
-                              if (impNode) onSelectNode(impNode);
-                            }}
-                            title={`Inspect ${imp.relative_path}`}
-                          >
-                            <span className="depth-badge">d{imp.depth}</span>
-                            <span className="impact-path mono">{imp.relative_path}</span>
-                            {imp.is_type_only && <span className="type-badge small">type</span>}
-                          </button>
-                        );
-                      })}
-                      {impactAnalysis.impacted_files.length > 10 && (
-                        <button
-                          type="button"
-                          className="toggle-all-impact-btn"
-                          onClick={() => setShowAllImpact(!showAllImpact)}
-                          style={{
-                            background: 'transparent',
-                            border: '1px solid var(--border)',
-                            borderRadius: '4px',
-                            color: 'var(--text-secondary)',
-                            fontSize: '11px',
-                            padding: '4px 8px',
-                            marginTop: '6px',
-                            cursor: 'pointer',
-                            display: 'block',
-                            width: '100%',
-                            textAlign: 'center',
-                          }}
-                        >
-                          {showAllImpact
-                            ? 'Show top 10 files'
-                            : `Show all ${impactAnalysis.impacted_files.length} cascade files`}
-                        </button>
+                  {isImpactExpanded && (
+                    <>
+                      {impactAnalysis.is_part_of_cycle && (
+                        <div className="impact-cycle-alert">
+                          <Repeat size={12} color="#f59e0b" />
+                          <span>Part of a circular dependency group</span>
+                        </div>
                       )}
-                    </div>
+                      <div className="impact-stats-row">
+                        <div className="impact-stat">
+                          <span className="impact-stat-num">{impactAnalysis.direct_dependents_count}</span>
+                          <span className="impact-stat-text">Direct dependents</span>
+                        </div>
+                        <div className="impact-stat">
+                          <span className="impact-stat-num">{impactAnalysis.transitive_dependents_count}</span>
+                          <span className="impact-stat-text">Transitive cascade</span>
+                        </div>
+                      </div>
+                      {impactAnalysis.impacted_files.length > 0 && (
+                        <div className="impact-files-list">
+                          <span className="impact-list-heading">Cascade order:</span>
+                          {(showAllImpact ? impactAnalysis.impacted_files : impactAnalysis.impacted_files.slice(0, 10)).map((imp) => {
+                            const impNode = snapshot?.nodes.find(
+                              (n) => n.id === imp.file_id || n.relative_path === imp.relative_path
+                            );
+                            return (
+                              <button
+                                key={imp.file_id}
+                                type="button"
+                                className="impact-item-btn clickable"
+                                onClick={() => {
+                                  if (impNode) onSelectNode(impNode);
+                                }}
+                                title={`Inspect ${imp.relative_path}`}
+                              >
+                                <span className="depth-badge">d{imp.depth}</span>
+                                <span className="impact-path mono">{imp.relative_path}</span>
+                                {imp.is_type_only && <span className="type-badge small">type</span>}
+                              </button>
+                            );
+                          })}
+                          {impactAnalysis.impacted_files.length > 10 && (
+                            <button
+                              type="button"
+                              className="toggle-all-impact-btn"
+                              onClick={() => setShowAllImpact(!showAllImpact)}
+                              style={{
+                                background: 'transparent',
+                                border: '1px solid var(--border)',
+                                borderRadius: '4px',
+                                color: 'var(--text-secondary)',
+                                fontSize: '11px',
+                                padding: '4px 8px',
+                                marginTop: '6px',
+                                cursor: 'pointer',
+                                display: 'block',
+                                width: '100%',
+                                textAlign: 'center',
+                              }}
+                            >
+                              {showAllImpact
+                                ? 'Show top 10 files'
+                                : `Show all ${impactAnalysis.impacted_files.length} cascade files`}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )

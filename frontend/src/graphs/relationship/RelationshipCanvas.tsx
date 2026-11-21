@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DependencyEdge, FileNode, GraphSnapshot } from '../../types/graph';
 import { getFileTypeInfo } from '../network/fileTypeColors';
+import { getLanguageFilterOpacity, matchesLanguageFilter, LanguageFilterType } from '../../utils/languageFilter';
 import { deriveRelationshipGraph } from './deriveRelationshipGraph';
 import {
   computeRelationshipLayout,
@@ -20,6 +21,7 @@ import {
   type Viewport2D,
 } from './relationshipViewport';
 import { computeRelationshipLayoutKey } from './relationshipLayoutKey';
+import { createHoverHysteresisController, HoverHysteresisController } from '../network/hoverHysteresis';
 import {
   ArrowLeft,
   Search,
@@ -66,6 +68,7 @@ interface RelationshipCanvasProps {
   focusNodeId: string | null;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
+  languageFilter?: LanguageFilterType;
   onSelectNode: (node: FileNode | null) => void;
   onSelectEdge: (edge: DependencyEdge | null) => void;
   onRefocusNode: (nodeId: string) => void;
@@ -128,6 +131,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   focusNodeId,
   selectedNodeId,
   selectedEdgeId,
+  languageFilter = 'all',
   onSelectNode,
   onSelectEdge,
   onRefocusNode,
@@ -478,6 +482,18 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         ctx.lineWidth = 1.4;
       }
 
+      if (languageFilter && languageFilter !== 'all') {
+        const srcRelNode = graphData.nodesById.get(edge.sourceId);
+        const tgtRelNode = graphData.nodesById.get(edge.targetId);
+        if (srcRelNode && tgtRelNode) {
+          const srcMatch = matchesLanguageFilter(srcRelNode.node, languageFilter);
+          const tgtMatch = matchesLanguageFilter(tgtRelNode.node, languageFilter);
+          if (!srcMatch && !tgtMatch) {
+            ctx.globalAlpha = 0.15;
+          }
+        }
+      }
+
       ctx.stroke();
 
       // Arrowhead at target
@@ -510,6 +526,10 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const left = node.x - node.width / 2;
       const top = node.y - node.height / 2;
       const radius = 6;
+
+      ctx.save();
+      const langOpacity = getLanguageFilterOpacity(node.node, languageFilter);
+      ctx.globalAlpha = langOpacity;
 
       ctx.save();
 
@@ -610,6 +630,8 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         ctx.fillStyle = isLight ? '#0d9488' : '#2dd4bf';
         ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 12, top + 40);
       }
+
+      ctx.restore();
     }
 
     if (typeof window !== 'undefined') {
@@ -652,6 +674,23 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       renderFrame();
     });
   }, [isVisible, renderFrame]);
+
+  // Hover hysteresis controller to eliminate visual hover strobing on fast cursor traversal
+  const hoverControllerRef = useRef<HoverHysteresisController | null>(null);
+  useEffect(() => {
+    const ctrl = createHoverHysteresisController({
+      thresholdMs: 100,
+      onCommitHover: (id) => {
+        setHoveredNodeId(id);
+        requestRender();
+      },
+    });
+    hoverControllerRef.current = ctrl;
+    return () => {
+      ctrl.dispose();
+      hoverControllerRef.current = null;
+    };
+  }, [requestRender]);
 
   useEffect(() => {
     if (isVisible && containerRef.current) {
@@ -763,6 +802,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     }
     isDraggingRef.current = false;
     activePointerIdRef.current = null;
+    hoverControllerRef.current?.handleGestureEnd();
   }, []);
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -772,6 +812,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     isDraggingRef.current = true;
     hasDraggedRef.current = false;
     activePointerIdRef.current = e.pointerId;
+    hoverControllerRef.current?.handleGestureStart();
     dragStartRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -814,10 +855,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const world = screenToWorld(screenX, screenY);
       const hitNode = findNodeAt(world.x, world.y);
       if (hitNode) {
-        if (hoveredNodeIdRef.current !== hitNode.id) {
-          setHoveredNodeId(hitNode.id);
-          requestRender();
-        }
+        hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
         if (hoveredEdgeIdRef.current !== null) {
           setHoveredEdgeId(null);
           requestRender();
@@ -825,10 +863,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         return;
       }
 
-      if (hoveredNodeIdRef.current !== null) {
-        setHoveredNodeId(null);
-        requestRender();
-      }
+      hoverControllerRef.current?.handlePointerMoveOverEmpty();
 
       const hitEdge = findEdgeAt(world.x, world.y);
       if (hitEdge) {
@@ -859,6 +894,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
 
         const hitNode = findNodeAt(world.x, world.y);
         if (hitNode) {
+          hoverControllerRef.current?.handleClickNode(hitNode.id);
           onSelectNode(hitNode.node);
           onSelectEdge(null);
           setKeyboardNodeId(hitNode.id);
@@ -1264,6 +1300,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
+        onPointerLeave={() => hoverControllerRef.current?.handlePointerLeaveCanvas()}
         onLostPointerCapture={cleanUpPointerGesture}
         onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}

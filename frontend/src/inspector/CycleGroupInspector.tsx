@@ -64,7 +64,7 @@ export const CycleGroupInspector: React.FC<CycleGroupInspectorProps> = ({
       ? 'This strongly connected component contains one or more closed cycles of runtime dependencies. Modules import each other at runtime, which can lead to initialization deadlocks or undefined imports.'
       : classification === 'MixedStructural'
       ? 'This component is cyclically connected through a combination of runtime and type-only dependencies. Pure runtime imports do not form a cycle, so runtime deadlock is avoided, but tight architectural coupling remains.'
-      : 'All dependencies forming this cycle are TypeScript type-only imports. These are erased during compilation and do not affect emitted JavaScript runtime execution.';
+      : 'All dependencies forming this cycle are type-only imports (such as TypeScript type-only imports or Python TYPE_CHECKING imports). These are erased during compilation or type checking and do not affect runtime execution.';
 
   // Determine areas involved in this cycle
   const areasInvolved = useMemo(() => {

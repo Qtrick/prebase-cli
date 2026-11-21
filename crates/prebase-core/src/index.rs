@@ -284,12 +284,11 @@ impl GraphIndex {
 
         match direction {
             PathDirection::Outgoing => {
-                let mut predecessors: HashMap<String, (String, DependencyEdge)> = HashMap::new();
                 visited.insert(from_id.to_string());
-                queue.push_back((from_id.to_string(), 0usize));
+                queue.push_back((from_id.to_string(), vec![from_id.to_string()], Vec::new()));
 
-                while let Some((curr, depth)) = queue.pop_front() {
-                    if depth >= max_hops || visited.len() >= max_visited {
+                while let Some((curr, path_nodes, path_edges)) = queue.pop_front() {
+                    if path_edges.len() >= max_hops || visited.len() >= max_visited {
                         continue;
                     }
                     if let Some(edge_ids) = self.outgoing_by_source.get(&curr) {
@@ -307,34 +306,30 @@ impl GraphIndex {
 
                                 let next_id = &edge.target_file_id;
                                 if next_id == to_id {
-                                    let mut rev_nodes = vec![next_id.clone(), curr.clone()];
-                                    let mut rev_edges = vec![edge.clone()];
-                                    let mut tracer = curr.clone();
-                                    while let Some((parent, p_edge)) = predecessors.get(&tracer) {
-                                        rev_nodes.push(parent.clone());
-                                        rev_edges.push(p_edge.clone());
-                                        tracer = parent.clone();
-                                    }
-                                    rev_nodes.reverse();
-                                    rev_edges.reverse();
-                                    let hops = rev_edges.len();
-                                    let path_is_type = rev_edges.iter().all(|e| {
+                                    let mut final_nodes = path_nodes.clone();
+                                    final_nodes.push(next_id.clone());
+                                    let mut final_edges = path_edges.clone();
+                                    final_edges.push(edge.clone());
+                                    let hops = final_edges.len();
+                                    let path_is_type = final_edges.iter().all(|e| {
                                         e.relationship_kind == RelationshipKind::TypeOnly
                                             || (!e.evidence.is_empty()
                                                 && e.evidence.iter().all(|ev| ev.is_type_only))
                                     });
                                     return DependencyPathResult::Found(DependencyPath {
-                                        nodes: rev_nodes,
-                                        edges: rev_edges,
+                                        nodes: final_nodes,
+                                        edges: final_edges,
                                         hops,
                                         is_type_only: path_is_type,
                                     });
                                 }
 
                                 if visited.insert(next_id.clone()) {
-                                    predecessors
-                                        .insert(next_id.clone(), (curr.clone(), edge.clone()));
-                                    queue.push_back((next_id.clone(), depth + 1));
+                                    let mut next_nodes = path_nodes.clone();
+                                    next_nodes.push(next_id.clone());
+                                    let mut next_edges = path_edges.clone();
+                                    next_edges.push(edge.clone());
+                                    queue.push_back((next_id.clone(), next_nodes, next_edges));
                                 }
                             }
                         }
@@ -343,12 +338,11 @@ impl GraphIndex {
             }
             PathDirection::Incoming => {
                 // "Direction 'incoming' (used by): D is used by A -> returns [A, B, C, D]"
-                let mut predecessors: HashMap<String, (String, DependencyEdge)> = HashMap::new();
                 visited.insert(from_id.to_string());
-                queue.push_back((from_id.to_string(), 0usize));
+                queue.push_back((from_id.to_string(), vec![from_id.to_string()], Vec::new()));
 
-                while let Some((curr, depth)) = queue.pop_front() {
-                    if depth >= max_hops || visited.len() >= max_visited {
+                while let Some((curr, path_nodes, path_edges)) = queue.pop_front() {
+                    if path_edges.len() >= max_hops || visited.len() >= max_visited {
                         continue;
                     }
                     if let Some(edge_ids) = self.incoming_by_target.get(&curr) {
@@ -366,33 +360,32 @@ impl GraphIndex {
 
                                 let next_id = &edge.source_file_id;
                                 if next_id == to_id {
-                                    let mut fwd_nodes = vec![next_id.clone(), curr.clone()];
-                                    let mut fwd_edges = vec![edge.clone()];
-                                    let mut tracer = curr.clone();
-                                    while let Some((downstream, d_edge)) = predecessors.get(&tracer)
-                                    {
-                                        fwd_nodes.push(downstream.clone());
-                                        fwd_edges.push(d_edge.clone());
-                                        tracer = downstream.clone();
-                                    }
-                                    let hops = fwd_edges.len();
-                                    let path_is_type = fwd_edges.iter().all(|e| {
+                                    let mut final_nodes = path_nodes.clone();
+                                    final_nodes.push(next_id.clone());
+                                    final_nodes.reverse();
+                                    let mut final_edges = path_edges.clone();
+                                    final_edges.push(edge.clone());
+                                    final_edges.reverse();
+                                    let hops = final_edges.len();
+                                    let path_is_type = final_edges.iter().all(|e| {
                                         e.relationship_kind == RelationshipKind::TypeOnly
                                             || (!e.evidence.is_empty()
                                                 && e.evidence.iter().all(|ev| ev.is_type_only))
                                     });
                                     return DependencyPathResult::Found(DependencyPath {
-                                        nodes: fwd_nodes,
-                                        edges: fwd_edges,
+                                        nodes: final_nodes,
+                                        edges: final_edges,
                                         hops,
                                         is_type_only: path_is_type,
                                     });
                                 }
 
                                 if visited.insert(next_id.clone()) {
-                                    predecessors
-                                        .insert(next_id.clone(), (curr.clone(), edge.clone()));
-                                    queue.push_back((next_id.clone(), depth + 1));
+                                    let mut next_nodes = path_nodes.clone();
+                                    next_nodes.push(next_id.clone());
+                                    let mut next_edges = path_edges.clone();
+                                    next_edges.push(edge.clone());
+                                    queue.push_back((next_id.clone(), next_nodes, next_edges));
                                 }
                             }
                         }

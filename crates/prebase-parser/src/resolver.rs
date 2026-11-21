@@ -776,7 +776,29 @@ impl ImportResolver {
             return ResolvedTarget::External(top_level.to_string());
         }
 
-        // 4. External third-party package
+        // 4. Check if top_level is an internal package or module within candidate roots
+        let is_known_internal_pkg = candidate_roots.iter().any(|root| {
+            let pkg_init = if root.is_empty() {
+                format!("{top_level}/__init__.py")
+            } else {
+                format!("{root}/{top_level}/__init__.py")
+            };
+            let mod_file = if root.is_empty() {
+                format!("{top_level}.py")
+            } else {
+                format!("{root}/{top_level}.py")
+            };
+            self.known_files.contains(&pkg_init) || self.known_files.contains(&mod_file)
+        });
+
+        if is_known_internal_pkg {
+            return ResolvedTarget::Unresolved(
+                UnresolvedReasonKind::MissingInternalTarget,
+                format!("Cannot resolve internal Python target '{clean_spec}' from '{from_file}'"),
+            );
+        }
+
+        // 5. External third-party package
         ResolvedTarget::External(top_level.to_string())
     }
 

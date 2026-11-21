@@ -50,6 +50,10 @@ import {
   Target,
   PanelRightOpen,
   Download,
+  Filter,
+  SlidersHorizontal,
+  ChevronDown,
+  Check,
 } from 'lucide-react';
 import './App.css';
 
@@ -262,6 +266,35 @@ export const App: React.FC = () => {
   const [isPathExplorerOpen, setIsPathExplorerOpen] = useState(false);
   const [pathExplorerSourceNode, setPathExplorerSourceNode] = useState<FileNode | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+
+  // Toolbar menus state
+  const [isFilterMenuOpen, setIsFilterMenuOpen] = useState(false);
+  const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+  const viewMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (filterMenuRef.current && !filterMenuRef.current.contains(e.target as Node)) {
+        setIsFilterMenuOpen(false);
+      }
+      if (viewMenuRef.current && !viewMenuRef.current.contains(e.target as Node)) {
+        setIsViewMenuOpen(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsFilterMenuOpen(false);
+        setIsViewMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, []);
 
   // Compute highlighted nodes and edges for Path Explorer and Cycle Group Focus
   const highlightedNodeIds = useMemo<Set<string> | undefined>(() => {
@@ -972,11 +1005,17 @@ export const App: React.FC = () => {
   }, []);
 
   const handleExportCanvasImage = useCallback(() => {
-    const canvas = document.querySelector('main.main-content canvas') as HTMLCanvasElement | null;
+    const activeCanvasSelector =
+      activeTab === 'temporal'
+        ? 'canvas.temporal-canvas'
+        : networkViewMode === '2d'
+        ? 'canvas.relationship-canvas'
+        : 'canvas.network-canvas';
+    const canvas =
+      (document.querySelector(`main.main-content ${activeCanvasSelector}`) as HTMLCanvasElement | null) ||
+      (document.querySelector('main.main-content canvas') as HTMLCanvasElement | null);
     if (!canvas) return;
     try {
-      const dataUrl = canvas.toDataURL('image/png');
-      const a = document.createElement('a');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const mode =
         activeTab === 'temporal'
@@ -984,12 +1023,31 @@ export const App: React.FC = () => {
           : networkViewMode === '2d'
           ? 'relationship-2d'
           : 'network-3d';
-      a.download = `prebase-${mode}-${timestamp}.png`;
-      a.href = dataUrl;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setAnnouncement('Graph image exported as PNG');
+      const fileName = `prebase-${mode}-${timestamp}.png`;
+
+      if (canvas.toBlob) {
+        canvas.toBlob((blob) => {
+          if (!blob) return;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.download = fileName;
+          a.href = url;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setAnnouncement('Graph image exported as PNG');
+        }, 'image/png');
+      } else {
+        const dataUrl = canvas.toDataURL('image/png');
+        const a = document.createElement('a');
+        a.download = fileName;
+        a.href = dataUrl;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setAnnouncement('Graph image exported as PNG');
+      }
     } catch (err) {
       console.error('Failed to export canvas image:', err);
     }
@@ -1163,7 +1221,7 @@ export const App: React.FC = () => {
           ) : (
             <div className="temporal-header-info">
               <Clock size={15} color="#38bdf8" />
-              <span>Git Commit History & Ancestry DAG</span>
+              <span>Git Commit History</span>
               {commits.length > 0 && (
                 <span className="dim">
                   ({commits.length} {totalCommits ? `of ${totalCommits}` : ''} commits)
@@ -1173,120 +1231,179 @@ export const App: React.FC = () => {
           )}
 
           {activeTab === 'network' && (
-            <div className="network-mode-switcher" role="radiogroup" aria-label="Network View Mode">
-              <button
-                className={`mode-btn ${networkViewMode === '3d' ? 'active' : ''}`}
-                onClick={() => handleSwitchNetworkMode('3d')}
-                title="3D Repository Overview (Shortcut: V)"
-                role="radio"
-                aria-checked={networkViewMode === '3d'}
-              >
-                <Layers size={14} />
-                <span>3D Overview</span>
-              </button>
-              <button
-                className={`mode-btn ${networkViewMode === '2d' ? 'active' : ''}`}
-                onClick={() => handleSwitchNetworkMode('2d')}
-                title="Contextual 2D Relationship Explorer (Shortcut: V)"
-                role="radio"
-                aria-checked={networkViewMode === '2d'}
-              >
-                <Compass size={14} />
-                <span>2D Relationships</span>
-              </button>
+            <div className="workspace-header-actions">
+              <div className="network-mode-switcher" role="radiogroup" aria-label="Network View Mode">
+                <button
+                  className={`mode-btn ${networkViewMode === '3d' ? 'active' : ''}`}
+                  onClick={() => handleSwitchNetworkMode('3d')}
+                  title="3D Repository Overview (Shortcut: V)"
+                  role="radio"
+                  aria-checked={networkViewMode === '3d'}
+                >
+                  <Layers size={13} />
+                  <span>3D Overview</span>
+                </button>
+                <button
+                  className={`mode-btn ${networkViewMode === '2d' ? 'active' : ''}`}
+                  onClick={() => handleSwitchNetworkMode('2d')}
+                  title="Contextual 2D Relationship Explorer (Shortcut: V)"
+                  role="radio"
+                  aria-checked={networkViewMode === '2d'}
+                >
+                  <Compass size={13} />
+                  <span>2D Relationships</span>
+                </button>
+              </div>
+
+              <div className="toolbar-menu-anchor" ref={filterMenuRef}>
+                <button
+                  className={`toolbar-btn ${selectedLanguageFilter !== 'all' ? 'active' : ''}`}
+                  onClick={() => setIsFilterMenuOpen((prev) => !prev)}
+                  title="Filter repository files by language"
+                  aria-haspopup="menu"
+                  aria-expanded={isFilterMenuOpen}
+                >
+                  <Filter size={13} />
+                  <span>Filters</span>
+                  {selectedLanguageFilter !== 'all' && <span className="active-filter-dot" />}
+                  <ChevronDown size={11} className={`dropdown-chevron ${isFilterMenuOpen ? 'open' : ''}`} />
+                </button>
+                {isFilterMenuOpen && (
+                  <div className="toolbar-dropdown-menu" role="menu" aria-label="Filter by language">
+                    <div className="menu-group-header">Filter Language</div>
+                    <button
+                      className={`menu-item ${selectedLanguageFilter === 'all' ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={selectedLanguageFilter === 'all'}
+                      onClick={() => {
+                        setSelectedLanguageFilter('all');
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>All Languages</span>
+                      {selectedLanguageFilter === 'all' && <Check size={13} />}
+                    </button>
+                    <button
+                      className={`menu-item ${selectedLanguageFilter === 'typescript' ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={selectedLanguageFilter === 'typescript'}
+                      onClick={() => {
+                        setSelectedLanguageFilter('typescript');
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>TypeScript / JavaScript</span>
+                      {selectedLanguageFilter === 'typescript' && <Check size={13} />}
+                    </button>
+                    <button
+                      className={`menu-item ${selectedLanguageFilter === 'rust' ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={selectedLanguageFilter === 'rust'}
+                      onClick={() => {
+                        setSelectedLanguageFilter('rust');
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>Rust</span>
+                      {selectedLanguageFilter === 'rust' && <Check size={13} />}
+                    </button>
+                    <button
+                      className={`menu-item ${selectedLanguageFilter === 'python' ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={selectedLanguageFilter === 'python'}
+                      onClick={() => {
+                        setSelectedLanguageFilter('python');
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>Python</span>
+                      {selectedLanguageFilter === 'python' && <Check size={13} />}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="view-controls">
+                {networkViewMode === '3d' && (
+                  <button
+                    id="centerLock"
+                    className={`ctrl-btn icon-only ${keepGraphCentered ? 'active' : ''}`}
+                    onClick={() => {
+                      setKeepGraphCentered((prev) => {
+                        const next = !prev;
+                        setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
+                        return next;
+                      });
+                    }}
+                    title={keepGraphCentered ? 'Keep graph centered (Active) (Shortcut: C)' : 'Center lock off (Shortcut: C)'}
+                    role="checkbox"
+                    aria-checked={keepGraphCentered}
+                    aria-label="Keep graph centered"
+                  >
+                    <Target size={14} />
+                  </button>
+                )}
+                <div className="toolbar-menu-anchor" ref={viewMenuRef}>
+                  <button
+                    className="ctrl-btn icon-only"
+                    onClick={() => setIsViewMenuOpen((prev) => !prev)}
+                    title="View options and utilities"
+                    aria-haspopup="menu"
+                    aria-expanded={isViewMenuOpen}
+                    aria-label="View options"
+                  >
+                    <SlidersHorizontal size={14} />
+                  </button>
+                  {isViewMenuOpen && (
+                    <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
+                      <button
+                        id="fitView"
+                        className="menu-item"
+                        role="menuitem"
+                        onClick={() => {
+                          setFitViewCounter((c) => c + 1);
+                          setIsViewMenuOpen(false);
+                        }}
+                        title={networkViewMode === '2d' ? 'Fit 2D Relationship View (Shortcut: F)' : 'Fit View to All Nodes (Shortcut: F)'}
+                      >
+                        <Maximize2 size={13} />
+                        <span>Fit View</span>
+                        <span className="menu-shortcut">F</span>
+                      </button>
+                      <button
+                        id="resetCam"
+                        className="menu-item"
+                        role="menuitem"
+                        onClick={() => {
+                          setResetViewCounter((c) => c + 1);
+                          setIsViewMenuOpen(false);
+                        }}
+                        title={networkViewMode === '2d' ? 'Reset 2D Camera (Shortcut: R)' : 'Reset Camera to Standard 3D View (Shortcut: R)'}
+                      >
+                        <RotateCcw size={13} />
+                        <span>Reset View</span>
+                        <span className="menu-shortcut">R</span>
+                      </button>
+                      <div className="menu-divider" />
+                      <button
+                        id="exportPNG"
+                        className="menu-item"
+                        role="menuitem"
+                        onClick={() => {
+                          handleExportCanvasImage();
+                          setIsViewMenuOpen(false);
+                        }}
+                        title="Export active view as PNG image"
+                      >
+                        <Download size={13} />
+                        <span>Export PNG</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
-
-          {activeTab === 'network' && (
-            <div className="language-filter-group" role="radiogroup" aria-label="Language Filter">
-              <button
-                className={`lang-btn ${selectedLanguageFilter === 'all' ? 'active' : ''}`}
-                onClick={() => setSelectedLanguageFilter('all')}
-                title="Show all files (Shortcut: none)"
-                role="radio"
-                aria-checked={selectedLanguageFilter === 'all'}
-              >
-                All
-              </button>
-              <button
-                className={`lang-btn ${selectedLanguageFilter === 'typescript' ? 'active' : ''}`}
-                onClick={() => setSelectedLanguageFilter('typescript')}
-                title="Filter to TypeScript & JavaScript files"
-                role="radio"
-                aria-checked={selectedLanguageFilter === 'typescript'}
-              >
-                TS / JS
-              </button>
-              <button
-                className={`lang-btn ${selectedLanguageFilter === 'rust' ? 'active' : ''}`}
-                onClick={() => setSelectedLanguageFilter('rust')}
-                title="Filter to Rust crates and modules"
-                role="radio"
-                aria-checked={selectedLanguageFilter === 'rust'}
-              >
-                Rust
-              </button>
-              <button
-                className={`lang-btn ${selectedLanguageFilter === 'python' ? 'active' : ''}`}
-                onClick={() => setSelectedLanguageFilter('python')}
-                title="Filter to Python modules and packages"
-                role="radio"
-                aria-checked={selectedLanguageFilter === 'python'}
-              >
-                Python
-              </button>
-            </div>
-          )}
-
-          <div className="view-controls">
-            {activeTab === 'network' && networkViewMode === '3d' && (
-              <button
-                id="centerLock"
-                className={`ctrl-btn ${keepGraphCentered ? 'active' : ''}`}
-                onClick={() => {
-                  setKeepGraphCentered((prev) => {
-                    const next = !prev;
-                    setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
-                    return next;
-                  });
-                }}
-                title={keepGraphCentered ? 'Keep graph centered (Active) (Shortcut: C)' : 'Keep graph centered (Shortcut: C)'}
-                role="checkbox"
-                aria-checked={keepGraphCentered}
-                aria-pressed={keepGraphCentered}
-              >
-                <Target size={15} />
-                <span>{keepGraphCentered ? 'Centered' : 'Center Lock'}</span>
-              </button>
-            )}
-            <button
-              className="ctrl-btn"
-              onClick={() => setFitViewCounter((c) => c + 1)}
-              title={networkViewMode === '2d' ? 'Fit 2D Relationship View' : 'Fit View to All Nodes'}
-            >
-              <Maximize2 size={15} />
-              <span>Fit View</span>
-            </button>
-            <button
-              className="ctrl-btn"
-              onClick={() => {
-                setResetViewCounter((c) => c + 1);
-              }}
-              title={networkViewMode === '2d' ? 'Reset 2D Camera' : 'Reset Camera to Standard 3D View'}
-            >
-              <RotateCcw size={15} />
-              <span>Reset</span>
-            </button>
-            <button
-              className="ctrl-btn"
-              onClick={handleExportCanvasImage}
-              title="Export active graph view as high-resolution PNG image"
-              aria-label="Export PNG"
-            >
-              <Download size={15} />
-              <span>Export PNG</span>
-            </button>
-          </div>
         </header>
 
         {/* Live sync toast notification */}
@@ -1343,8 +1460,8 @@ export const App: React.FC = () => {
               </div>
             ) : snapshot.nodes.length === 0 ? (
               <div className="empty-overlay">
-                <h3>No supported JavaScript/TypeScript files found</h3>
-                <p>Ensure the directory contains .js, .jsx, .ts, or .tsx files.</p>
+                <h3>No supported source files found</h3>
+                <p>PreBase indexes JavaScript, TypeScript, Rust, and Python codebases. Place supported source files in this repository to explore their dependency graph.</p>
               </div>
             ) : (
               <>
@@ -1384,6 +1501,7 @@ export const App: React.FC = () => {
                       focusNodeId={focusNodeId}
                       selectedNodeId={selectedNode?.id || null}
                       selectedEdgeId={selectedEdge?.id || null}
+                      languageFilter={selectedLanguageFilter}
                       onSelectNode={handleSelectNode}
                       onSelectEdge={handleSelectEdge}
                       onRefocusNode={handleRefocusNode2D}

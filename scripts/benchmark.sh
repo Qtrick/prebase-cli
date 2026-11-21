@@ -76,9 +76,7 @@ cleanup() {
     fi
 
     # Remove temporary scratch workspace
-    if [ -n "${BENCH_DIR:-}" ] && [ -d "$BENCH_DIR" ]; then
-        rm -rf "$BENCH_DIR"
-    fi 2>/dev/null || rm -rf "$BENCH_DIR" 2>/dev/null || true
+    rm -rf "$BENCH_DIR" 2>/dev/null || rm -rf "$BENCH_DIR" 2>/dev/null || true
 
     # Ensure abnormal or premature termination produces a non-zero exit code
     if [ "$BENCHMARK_COMPLETED" -ne 1 ]; then
