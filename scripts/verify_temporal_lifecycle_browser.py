@@ -493,7 +493,7 @@ def main():
 
                 # 3i. Live Git-Ref Update via SSE: create 56th commit on disk while browser is open
                 log("Testing live git-ref update via SSE without page reload...")
-                page.locator("button.nav-item:has-text('Temporal Graph')").click()
+                page.locator("button.nav-item:has-text('History'), button.nav-item:has-text('Temporal Graph')").click()
                 expect(page.locator(".temporal-canvas-container canvas")).to_be_visible(timeout=10000)
 
                 # Attach CSP violation monitor to ensure no 'unsafe-eval' or script violations occur during live update

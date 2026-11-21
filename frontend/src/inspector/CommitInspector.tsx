@@ -235,8 +235,7 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
             <span className="stat-label">Navigation Guide</span>
             <ul style={{ margin: '8px 0 0 0', paddingLeft: '16px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
               <li>Click any commit dot or summary in the DAG to inspect file diffs and stats.</li>
-              <li>Use <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↑</kbd> and <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↓</kbd> arrow keys to navigate commits.</li>
-              <li>Drag to pan the timeline; scroll wheel to zoom.</li>
+              <li>Scroll vertically to browse history; use <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↑</kbd> and <kbd style={{ padding: '1px 5px', background: 'var(--bg-hover)', borderRadius: '3px', fontSize: '11px' }}>↓</kbd> arrow keys to navigate commits.</li>
               <li>Clicking an analyzed file in a commit opens the Network Graph focused on that file.</li>
             </ul>
           </div>
@@ -280,15 +279,17 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
         )}
 
         {/* Commit Hash and Copy */}
-        <div className="commit-sha-bar">
-          <div className="stat-row-between">
-            <span className="stat-label">Full Commit SHA</span>
-            <button className="copy-btn" onClick={handleCopyHash} title="Copy SHA">
-              {copied ? <Check size={13} color="var(--accent-teal)" /> : <Copy size={13} />}
-              <span>{copied ? 'Copied' : 'Copy'}</span>
-            </button>
+        <div className="commit-hash-row">
+          <div className="commit-hash-display">
+            <span className="commit-short-hash mono">{selectedCommit.short_hash}</span>
+            <span className="commit-full-hash mono sha-text" title={selectedCommit.hash}>
+              {selectedCommit.hash}
+            </span>
           </div>
-          <span className="stat-value mono sha-text">{selectedCommit.hash}</span>
+          <button className="copy-btn" onClick={handleCopyHash} title={`Copy full SHA: ${selectedCommit.hash}`}>
+            {copied ? <Check size={13} color="var(--accent-brand)" /> : <Copy size={13} />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
         </div>
 
         {/* Message */}
@@ -346,8 +347,8 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
               <div className="diff-stat-item">
                 <span className="stat-label">Lines</span>
                 <span className="stat-value mono">
-                  <span style={{ color: 'var(--accent-teal)' }}>+{details.stats.insertions}</span>{' '}
-                  <span style={{ color: 'var(--accent-rose)' }}>-{details.stats.deletions}</span>
+                  <span style={{ color: 'var(--semantic-added)' }}>+{details.stats.insertions}</span>{' '}
+                  <span style={{ color: 'var(--semantic-removed)' }}>-{details.stats.deletions}</span>
                 </span>
               </div>
             </div>

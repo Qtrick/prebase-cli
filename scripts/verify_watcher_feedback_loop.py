@@ -20,14 +20,22 @@ import re
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
 
+def mask_credentials(text: str) -> str:
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    return text
+
 def log(msg):
-    print(f"\x1b[36m[FEEDBACK-TEST]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[FEEDBACK-TEST]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def fail(msg):
-    print(f"\x1b[31m[FAIL]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[FAIL]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
     sys.exit(1)
 
 def parse_startup_info(log_path):

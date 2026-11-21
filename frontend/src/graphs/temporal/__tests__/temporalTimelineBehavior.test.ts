@@ -84,9 +84,97 @@ describe('History Timeline Behavioral Regression Suite', () => {
       );
       expect(pastBottom.y).toBe(bounds.minY);
     });
+
+    it('strictly maintains k = 1.0 scale invariance across repeated wheel scrolls and bursts', () => {
+      let currentTransform: Transform = { x: 50, y: 50, k: 1.0 };
+      const contentHeight = 5000;
+      const viewportHeight = 700;
+
+      // Simulate 20 successive wheel events with varying deltaY (flicks, slow rolls, reversals)
+      const deltas = [10, 25, 60, 120, 80, -20, -50, 100, 200, 30, -10, 15, 80, -40, 5, 50, 110, -70, 30, 20];
+
+      for (const d of deltas) {
+        currentTransform = applyTemporalWheelScroll(
+          currentTransform,
+          d,
+          contentHeight,
+          viewportHeight
+        );
+        // Invariant: k MUST remain exactly 1.0 at every single step!
+        expect(currentTransform.k).toBe(1.0);
+        expect(currentTransform.x).toBe(50);
+      }
+    });
+
+    it('handles short content smaller than viewport height without collapsing or unbounded overflow', () => {
+      const shortTransform: Transform = { x: 60, y: 60, k: 1.0 };
+      const shortContentHeight = 200;
+      const viewportHeight = 800;
+
+      const bounds = computeTemporalScrollBounds(shortContentHeight, viewportHeight);
+      expect(bounds.minY).toBeLessThanOrEqual(bounds.maxY);
+
+      // Scroll attempts are clamped within bounds
+      const scrolled = applyTemporalWheelScroll(
+        shortTransform,
+        300,
+        shortContentHeight,
+        viewportHeight
+      );
+      expect(scrolled.y).toBeGreaterThanOrEqual(bounds.minY);
+      expect(scrolled.y).toBeLessThanOrEqual(bounds.maxY);
+      expect(scrolled.k).toBe(1.0);
+    });
   });
 
   describe('Cursor Pagination Scroll Position Preservation', () => {
+    it('appends older commits without jumping or resetting scroll position across multi-page expansions', () => {
+      // Simulate initial 50 commits loaded
+      const commits: CommitSummary[] = [];
+      for (let i = 0; i < 50; i++) {
+        commits.push(
+          createMockCommit(`hash-${i}`, i < 49 ? [`hash-${i + 1}`] : [], 1700000000 - i * 3600)
+        );
+      }
+
+      let layout = computeTemporalLayout(commits);
+      expect(layout.nodes).toHaveLength(50);
+
+      let currentTransform: Transform = { x: 70, y: -600, k: 1.0 };
+      const anchorNodeId = 'hash-15';
+      const anchorNodeBefore = layout.nodes.find((n) => n.commit.hash === anchorNodeId)!;
+      const screenYAnchorBefore = currentTransform.y + anchorNodeBefore.y * currentTransform.k;
+
+      // Page 2: Load 50 more commits (total 100)
+      for (let i = 50; i < 100; i++) {
+        commits.push(
+          createMockCommit(`hash-${i}`, i < 99 ? [`hash-${i + 1}`] : [], 1700000000 - i * 3600)
+        );
+      }
+      layout = computeTemporalLayout(commits);
+      currentTransform = reconcilePaginationTransform(currentTransform, true);
+
+      // Verify anchor position invariant after Page 2
+      const anchorNodeAfterP2 = layout.nodes.find((n) => n.commit.hash === anchorNodeId)!;
+      const screenYAnchorAfterP2 = currentTransform.y + anchorNodeAfterP2.y * currentTransform.k;
+      expect(screenYAnchorAfterP2).toBe(screenYAnchorBefore);
+      expect(currentTransform.k).toBe(1.0);
+
+      // Page 3: Load 50 more commits (total 150)
+      for (let i = 100; i < 150; i++) {
+        commits.push(
+          createMockCommit(`hash-${i}`, i < 149 ? [`hash-${i + 1}`] : [], 1700000000 - i * 3600)
+        );
+      }
+      layout = computeTemporalLayout(commits);
+      currentTransform = reconcilePaginationTransform(currentTransform, true);
+
+      // Verify anchor position invariant after Page 3
+      const anchorNodeAfterP3 = layout.nodes.find((n) => n.commit.hash === anchorNodeId)!;
+      const screenYAnchorAfterP3 = currentTransform.y + anchorNodeAfterP3.y * currentTransform.k;
+      expect(screenYAnchorAfterP3).toBe(screenYAnchorBefore);
+      expect(currentTransform.k).toBe(1.0);
+    });
     it('appends older commits without jumping or resetting scroll position', () => {
       // Simulate initial 50 commits loaded
       const initialCommits: CommitSummary[] = [];

@@ -217,8 +217,8 @@ export const App: React.FC = () => {
   const selectedNodeRef = useRef(selectedNode);
   selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
-  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
   const [selectedAreaIds, setSelectedAreaIds] = useState<string[]>([]);
+  const selectedAreaId = selectedAreaIds.length === 1 ? selectedAreaIds[0] : null;
   const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<'all' | 'typescript' | 'rust' | 'python'>('all');
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
   const [keepGraphCentered, setKeepGraphCentered] = useState(true);
@@ -701,8 +701,10 @@ export const App: React.FC = () => {
         setSelectedNode((prev) => reconcileSelectedNodeOnSnapshot(prev, newSnap.nodes));
         // Re-sync selected edge if still exists in the new snapshot (reconciles stale evidence)
         setSelectedEdge((prev) => reconcileSelectedEdgeOnSnapshot(prev, newSnap.edges));
-        // Re-sync selected area if still has files in the new snapshot
-        setSelectedAreaId((prev) => reconcileSelectedAreaOnSnapshot(prev, newSnap.nodes));
+        // Re-sync selected areas if they still have files in the new snapshot
+        setSelectedAreaIds((prev) =>
+          prev.filter((areaId) => reconcileSelectedAreaOnSnapshot(areaId, newSnap.nodes) !== null)
+        );
         // Re-sync 2D focus node if still exists; do not auto-select random node on deletion
         setFocusNodeId((prev) => {
           const { nextFocusNodeId, missingNotice } = reconcileFocusNodeOnSnapshot(prev, newSnap.nodes);
@@ -979,7 +981,6 @@ export const App: React.FC = () => {
   }, []);
 
   const handleSelectArea = useCallback((areaId: string | null) => {
-    setSelectedAreaId(areaId);
     setSelectedAreaIds(areaId ? [areaId] : []);
     if (areaId) {
       setSelectedNode(null);
@@ -988,19 +989,16 @@ export const App: React.FC = () => {
   }, []);
 
   const handleToggleArea = useCallback((areaId: string) => {
-    setSelectedAreaIds((prev) => {
-      const next = prev.includes(areaId)
+    setSelectedAreaIds((prev) =>
+      prev.includes(areaId)
         ? prev.filter((id) => id !== areaId)
-        : [...prev, areaId];
-      setSelectedAreaId(next.length === 1 ? next[0] : null);
-      return next;
-    });
+        : [...prev, areaId]
+    );
     setSelectedNode(null);
     setSelectedEdge(null);
   }, []);
 
   const handleClearAreas = useCallback(() => {
-    setSelectedAreaId(null);
     setSelectedAreaIds([]);
   }, []);
 
@@ -1117,16 +1115,18 @@ export const App: React.FC = () => {
           <button
             className={`nav-item ${activeTab === 'network' ? 'active' : ''}`}
             onClick={() => setActiveTab('network')}
+            aria-label="Network"
           >
             <Share2 size={16} />
-            <span>Network Graph</span>
+            <span>Network</span>
           </button>
           <button
             className={`nav-item ${activeTab === 'temporal' ? 'active' : ''}`}
             onClick={() => setActiveTab('temporal')}
+            aria-label="History"
           >
             <Clock size={16} />
-            <span>Temporal Graph</span>
+            <span>History</span>
           </button>
         </nav>
 
@@ -1220,8 +1220,8 @@ export const App: React.FC = () => {
             />
           ) : (
             <div className="temporal-header-info">
-              <Clock size={15} color="#38bdf8" />
-              <span>Git Commit History</span>
+              <Clock size={15} color="var(--accent-brand)" />
+              <span>Commit history</span>
               {commits.length > 0 && (
                 <span className="dim">
                   ({commits.length} {totalCommits ? `of ${totalCommits}` : ''} commits)
@@ -1641,7 +1641,6 @@ export const App: React.FC = () => {
           onClose={() => {
             setSelectedNode(null);
             setSelectedEdge(null);
-            setSelectedAreaId(null);
             setSelectedAreaIds([]);
             setSelectedCycleGroup(null);
             setActiveDependencyPath(null);

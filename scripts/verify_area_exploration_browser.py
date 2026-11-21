@@ -204,7 +204,7 @@ def run_verification():
             try:
                 page.goto(app_url, wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_selector(".inspector-panel", timeout=10000)
-                page.wait_for_selector(".beginner-overview-card", timeout=10000)
+                page.wait_for_selector(".overview-metric-strip, .beginner-overview-card", timeout=10000)
             except Exception as e:
                 masked_err = mask_credentials(str(e))
                 log(f"Navigation or initial selector wait failed: {masked_err}")
@@ -318,7 +318,7 @@ def run_verification():
 
             # Return to overview by clicking inspector close button
             page.locator(".close-btn").click()
-            page.wait_for_selector(".beginner-overview-card", timeout=5000)
+            page.wait_for_selector(".overview-metric-strip, .beginner-overview-card", timeout=5000)
             success("Item 14 Confirmed: Successfully returned to repository overview.")
 
             context.close()

@@ -954,3 +954,159 @@ export function computeLabelPriorityScore(params: LabelPriorityParams): number {
   return score;
 }
 
+// ============================================================================
+// 3D Camera-Relative Depth Shading & Theme Compositing
+// ============================================================================
+
+export const GRAPH_BACKGROUND_DARK = '#111113';
+export const GRAPH_BACKGROUND_LIGHT = '#fafaf9';
+
+export interface CameraDepthShadingOptions {
+  isSelected?: boolean;
+  isHovered?: boolean;
+  minProminence?: number;
+}
+
+export interface CameraDepthShading {
+  depth: number;
+  shading: number;
+  prominence: number;
+  backgroundColor: string;
+}
+
+/**
+ * Computes camera-relative depth and shading for a node on a 3D sphere.
+ * - Nearest node (z = -sphereRadius): depth = 1.0, shading = 1.0 (maximum brightness/prominence).
+ * - Equator node (z = 0): depth = 0.5, shading = 0.5.
+ * - Farthest node (z = +sphereRadius): depth = 0.0, shading = 0.0 (softened/attenuated towards background).
+ * - Monotonicity: depth strictly decreases as z increases from -R to +R.
+ * - Robustness: degenerate radii (R <= 0), NaN, Infinity safe fallbacks.
+ * - Visibility floor: selected or hovered nodes retain high prominence (>= 0.75) even at rear apex.
+ */
+export function computeCameraDepthShading(
+  cameraSpaceZ: number,
+  sphereRadius: number,
+  theme: 'dark' | 'light' = 'dark',
+  options?: CameraDepthShadingOptions
+): CameraDepthShading {
+  const isLight = theme === 'light';
+  const backgroundColor = isLight ? GRAPH_BACKGROUND_LIGHT : GRAPH_BACKGROUND_DARK;
+
+  // Robustness guards: degenerate radius or non-finite inputs safely fallback
+  if (
+    !Number.isFinite(cameraSpaceZ) ||
+    !Number.isFinite(sphereRadius) ||
+    sphereRadius <= 0
+  ) {
+    const fallbackFloor = options?.minProminence ?? (options?.isSelected || options?.isHovered ? 0.75 : 0.0);
+    const shading = Math.max(fallbackFloor, 0.5);
+    return {
+      depth: 0.5,
+      shading,
+      prominence: shading,
+      backgroundColor,
+    };
+  }
+
+  // Clamp cameraSpaceZ to [-sphereRadius, +sphereRadius]
+  const clampedZ = Math.max(-sphereRadius, Math.min(sphereRadius, cameraSpaceZ));
+
+  // Normalized camera-relative depth: z = -R -> 1.0; z = 0 -> 0.5; z = +R -> 0.0
+  const depth = 0.5 - clampedZ / (2 * sphereRadius);
+
+  // Selection / hover visibility floor (default 0.75 if selected or hovered)
+  const floor = options?.minProminence ?? (options?.isSelected || options?.isHovered ? 0.75 : 0.0);
+  const shading = Math.max(floor, depth);
+
+  return {
+    depth,
+    shading,
+    prominence: shading,
+    backgroundColor,
+  };
+}
+
+/**
+ * Computes depth attenuation prominence for an edge connecting two nodes in camera space.
+ * An ordinary edge between far nodes has lower prominence than an edge between front nodes.
+ */
+export function computeEdgeDepthAttenuation(
+  sourceCameraZ: number,
+  targetCameraZ: number,
+  sphereRadius: number,
+  options?: {
+    isSourceSelected?: boolean;
+    isTargetSelected?: boolean;
+    isSourceHovered?: boolean;
+    isTargetHovered?: boolean;
+  }
+): number {
+  if (
+    !Number.isFinite(sourceCameraZ) ||
+    !Number.isFinite(targetCameraZ) ||
+    !Number.isFinite(sphereRadius) ||
+    sphereRadius <= 0
+  ) {
+    return 0.5;
+  }
+
+  const isHighlighted = Boolean(
+    options?.isSourceSelected ||
+    options?.isTargetSelected ||
+    options?.isSourceHovered ||
+    options?.isTargetHovered
+  );
+
+  const avgZ = (sourceCameraZ + targetCameraZ) / 2;
+  const shadingResult = computeCameraDepthShading(avgZ, sphereRadius, 'dark', {
+    minProminence: isHighlighted ? 0.75 : 0.0,
+  });
+
+  return shadingResult.prominence;
+}
+
+/**
+ * Composites a base color with the graph background according to depth shading prominence.
+ * Dark mode blends toward graphite background (#111113).
+ * Light mode blends toward alabaster background (#fafaf9).
+ */
+export function compositeDepthColor(
+  baseColorHex: string,
+  prominence: number,
+  theme: 'dark' | 'light' = 'dark'
+): string {
+  const clampedProminence = Math.max(0, Math.min(1, Number.isFinite(prominence) ? prominence : 0.5));
+  const isLight = theme === 'light';
+  const bgR = isLight ? 250 : 17;
+  const bgG = isLight ? 250 : 17;
+  const bgB = isLight ? 249 : 19;
+
+  let hex = baseColorHex.trim();
+  if (hex.startsWith('#')) {
+    hex = hex.slice(1);
+  }
+
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (hex.length === 3) {
+    r = parseInt(hex[0] + hex[0], 16) || 0;
+    g = parseInt(hex[1] + hex[1], 16) || 0;
+    b = parseInt(hex[2] + hex[2], 16) || 0;
+  } else if (hex.length === 6) {
+    r = parseInt(hex.slice(0, 2), 16) || 0;
+    g = parseInt(hex.slice(2, 4), 16) || 0;
+    b = parseInt(hex.slice(4, 6), 16) || 0;
+  } else {
+    return isLight ? GRAPH_BACKGROUND_LIGHT : GRAPH_BACKGROUND_DARK;
+  }
+
+  const outR = Math.round(r * clampedProminence + bgR * (1 - clampedProminence));
+  const outG = Math.round(g * clampedProminence + bgG * (1 - clampedProminence));
+  const outB = Math.round(b * clampedProminence + bgB * (1 - clampedProminence));
+
+  const toHex = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${toHex(outR)}${toHex(outG)}${toHex(outB)}`;
+}
+

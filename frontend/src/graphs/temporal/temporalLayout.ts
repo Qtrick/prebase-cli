@@ -33,14 +33,14 @@ export interface TemporalGraphLayout {
 }
 
 export const LANE_COLORS = [
-  '#2dd4bf', // cyan / teal (main trunk)
-  '#818cf8', // indigo
-  '#fbbf24', // amber
-  '#f43f5e', // rose
-  '#34d399', // emerald
-  '#a78bfa', // violet
-  '#38bdf8', // sky
-  '#fb923c', // orange
+  '#79a9a0', // restrained sage / slate (main trunk)
+  '#818cf8', // soft indigo
+  '#d97706', // warm amber
+  '#e11d48', // rose
+  '#10b981', // emerald
+  '#8b5cf6', // violet
+  '#0284c7', // sky
+  '#f97316', // orange
 ];
 
 export function getLaneColor(lane: number): string {

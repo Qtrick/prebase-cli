@@ -263,54 +263,106 @@ def main():
             page.screenshot(path=os.path.join(SCREENSHOT_DIR, "regression_01_responsive_search.png"))
 
             # =========================================================================
-            # SECTION 2: Hover Hysteresis in NetworkCanvas
+            # SECTION 2: 3D Depth Perception & Hover Hysteresis in NetworkCanvas
             # Requirements:
+            # - Nodes on front have higher depthT and depthScale than nodes on rear
+            # - 180° rotation inverts front and rear depth metrics
             # - Fast pointer traverse across multiple nodes does NOT trigger visual hover strobing
             # - Lingering on a node commits hover after threshold (~100ms)
             # - Leaving canvas cancels hover immediately
             # - Click immediately selects without delay
             # =========================================================================
-            log("=== SECTION 2: Hover Hysteresis in NetworkCanvas ===")
+            log("=== SECTION 2: 3D Depth Perception & Hover Hysteresis in NetworkCanvas ===")
             page.set_viewport_size({"width": 1280, "height": 800})
             canvas = page.locator("canvas.network-canvas")
             expect(canvas).to_be_visible()
             canvas_box = canvas.bounding_box()
             assert canvas_box is not None
 
-            center_x = canvas_box["x"] + canvas_box["width"] / 2
-            center_y = canvas_box["y"] + canvas_box["height"] / 2
+            # 2a. Real node positions from window.__prebaseNetworkDebug
+            log("Querying real projected nodes from window.__prebaseNetworkDebug...")
+            projected_nodes = page.evaluate("() => window.__prebaseNetworkDebug.getProjectedNodes()")
+            assert len(projected_nodes) >= 2, f"Expected at least 2 projected nodes, found {len(projected_nodes)}"
 
-            # 2a. Fast pointer sweep (simulate fast traverse across center of orb in <60ms)
-            log("Executing fast pointer traverse across canvas nodes...")
-            for offset in range(-150, 150, 30):
-                page.mouse.move(center_x + offset, center_y, steps=1)
-                time.sleep(0.005) # 5ms between positions -> well below 100ms threshold
+            front_node = projected_nodes[0]
+            rear_node = projected_nodes[-1]
+            log(f"Front node: {front_node['id']} (depthScale={front_node.get('depthScale', 1.0):.2f}, depth={front_node.get('depth', 1.0):.2f})")
+            log(f"Rear node: {rear_node['id']} (depthScale={rear_node.get('depthScale', 1.0):.2f}, depth={rear_node.get('depth', 1.0):.2f})")
 
-            # Fast sweep should not settle hover on intermediate nodes
-            log("Fast sweep completed without lingering.")
+            assert front_node["depth"] > rear_node["depth"], (
+                f"Depth invariant failure: front node depth {front_node['depth']} should exceed rear node depth {rear_node['depth']}"
+            )
+            assert front_node["depthScale"] >= rear_node["depthScale"], (
+                f"Depth scale failure: front node depthScale {front_node['depthScale']} should be >= rear node depthScale {rear_node['depthScale']}"
+            )
+            success("3D depth metric baseline verified: front hemisphere node is more prominent than rear hemisphere node.")
 
-            # 2b. Lingering on a node commits hover
-            log("Lingering pointer on node position for 200ms...")
-            page.mouse.move(center_x, center_y)
-            time.sleep(0.2) # >100ms threshold
+            # Test 180° rotation inverts front and rear
+            log("Testing 180° rotation depth inversion...")
+            initial_cam = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
+            page.evaluate(f"() => window.__prebaseNetworkDebug.setCamera({{ yaw: {initial_cam['yaw']} + Math.PI, pitch: {initial_cam['pitch']} }})")
+            page.wait_for_timeout(200)
+
+            rotated_nodes = page.evaluate("() => window.__prebaseNetworkDebug.getProjectedNodes()")
+            rotated_front = next(n for n in rotated_nodes if n["id"] == front_node["id"])
+            rotated_rear = next(n for n in rotated_nodes if n["id"] == rear_node["id"])
+            log(f"After 180° rotation: original front depth={rotated_front.get('depth'):.2f}, original rear depth={rotated_rear.get('depth'):.2f}")
+            assert rotated_rear["depth"] > rotated_front["depth"], (
+                "180° rotation must invert camera-relative depth: original rear node must now be in front!"
+            )
+            success("3D camera-relative depth inversion verified across 180° rotation.")
+
+            # Restore original rotation
+            page.evaluate(f"() => window.__prebaseNetworkDebug.setCamera({{ yaw: {initial_cam['yaw']}, pitch: {initial_cam['pitch']} }})")
+            page.wait_for_timeout(200)
+            projected_nodes = page.evaluate("() => window.__prebaseNetworkDebug.getProjectedNodes()")
+            target_node = projected_nodes[0]
+            node_screen_x = canvas_box["x"] + target_node["screenX"]
+            node_screen_y = canvas_box["y"] + target_node["screenY"]
+
+            # 2b. Fast pointer sweep (simulate fast traverse across nodes in <60ms)
+            log("Executing fast pointer traverse across node positions...")
+            page.mouse.move(node_screen_x - 120, node_screen_y, steps=1)
+            for offset in range(-80, 100, 30):
+                page.mouse.move(node_screen_x + offset, node_screen_y, steps=1)
+                time.sleep(0.005)
+
+            hovered_after_fast = page.evaluate("() => window.__prebaseNetworkDebug.getHoveredNodeId()")
+            assert hovered_after_fast is None, f"Fast sweep should not settle hover! Got {hovered_after_fast}"
+            success("Fast sweep across nodes completed without triggering premature hover hysteresis.")
+
+            # 2c. Lingering on a real node commits hover
+            log(f"Lingering pointer on node {target_node['id']} for 250ms...")
+            page.mouse.move(node_screen_x, node_screen_y)
+            time.sleep(0.25)
             page.wait_for_timeout(100)
-            success("Hover hysteresis lingering committed successfully.")
+            hovered_node = page.evaluate("() => window.__prebaseNetworkDebug.getHoveredNodeId()")
+            assert hovered_node == target_node["id"], (
+                f"Hover hysteresis failed to commit on target node! Expected {target_node['id']}, got {hovered_node}"
+            )
+            success(f"Hover hysteresis successfully settled on {target_node['id']}.")
 
-            # 2c. Leaving canvas cancels hover
-            log("Moving pointer outside canvas boundaries...")
-            page.mouse.move(10, 10) # Over sidebar
-            page.wait_for_timeout(100)
+            # 2d. Leaving canvas cancels hover
+            log("Moving pointer outside canvas boundaries (to sidebar)...")
+            page.mouse.move(10, 10)
+            page.wait_for_timeout(150)
+            hovered_outside = page.evaluate("() => window.__prebaseNetworkDebug.getHoveredNodeId()")
+            assert hovered_outside is None, f"Hover must clear when leaving canvas! Got {hovered_outside}"
             success("Hover successfully cancelled upon leaving canvas.")
 
-            # 2d. Immediate click selection without delay
-            log("Verifying immediate click selection...")
+            # 2e. Immediate click selection without delay
+            log(f"Verifying immediate click selection on node {target_node['id']}...")
             t_click_start = time.time()
-            page.mouse.click(center_x, center_y)
-            # Inspector should react immediately
+            page.mouse.click(node_screen_x, node_screen_y)
+            page.wait_for_timeout(100)
+            selected_node = page.evaluate("() => window.__prebaseNetworkDebug.getSelectedNodeId()")
+            assert selected_node == target_node["id"], (
+                f"Click failed to select node! Expected {target_node['id']}, got {selected_node}"
+            )
             expect(page.locator(".inspector-panel")).to_be_visible(timeout=2000)
             elapsed_ms = (time.time() - t_click_start) * 1000
             log(f"Click selection processed in {elapsed_ms:.1f}ms")
-            success("Immediate click selection verified without hover hysteresis delay.")
+            success(f"Immediate click selection verified on {target_node['id']} without hysteresis delay.")
 
             page.screenshot(path=os.path.join(SCREENSHOT_DIR, "regression_02_hover_hysteresis.png"))
 
@@ -322,7 +374,7 @@ def main():
             # - Keyboard up/down navigation
             # =========================================================================
             log("=== SECTION 3: History Timeline (Temporal DAG) ===")
-            page.locator(".nav-item:has-text('Temporal Graph')").click()
+            page.locator(".nav-item:has-text('History'), .nav-item:has-text('Temporal Graph')").click()
             expect(page.locator(".temporal-canvas")).to_be_visible(timeout=8000)
             temporal_canvas = page.locator(".temporal-canvas")
 
@@ -374,19 +426,20 @@ def main():
             temporal_canvas.focus()
             page.keyboard.press("ArrowDown")
             page.wait_for_timeout(200)
-            expect(page.locator(".inspector-panel .sha-text")).to_be_visible(timeout=3000)
-            first_selected_sha = page.locator(".inspector-panel .sha-text").inner_text()
+            commit_sha_el = page.locator(".inspector-panel .commit-short-hash, .inspector-panel .sha-text").first
+            expect(commit_sha_el).to_be_visible(timeout=3000)
+            first_selected_sha = commit_sha_el.inner_text()
             log(f"ArrowDown selected commit: {first_selected_sha}")
 
             page.keyboard.press("ArrowDown")
             page.wait_for_timeout(200)
-            second_selected_sha = page.locator(".inspector-panel .sha-text").inner_text()
+            second_selected_sha = commit_sha_el.inner_text()
             log(f"Second ArrowDown selected commit: {second_selected_sha}")
             assert first_selected_sha != second_selected_sha, "ArrowDown must navigate to next commit"
 
             page.keyboard.press("ArrowUp")
             page.wait_for_timeout(200)
-            restored_sha = page.locator(".inspector-panel .sha-text").inner_text()
+            restored_sha = commit_sha_el.inner_text()
             assert restored_sha == first_selected_sha, "ArrowUp must return to previous commit"
             success("Keyboard navigation (ArrowDown -> ArrowUp) verified.")
 
@@ -398,7 +451,7 @@ def main():
             # - Ensure language filtering applies consistently to both 3D and 2D views
             # =========================================================================
             log("=== SECTION 4: Language Filter Consistency ===")
-            page.locator(".nav-item:has-text('Network Graph')").click()
+            page.locator(".nav-item:has-text('Network'), .nav-item:has-text('Network Graph')").click()
             expect(page.locator("canvas.network-canvas")).to_be_visible(timeout=8000)
 
             # 4a. Select language filter in 3D

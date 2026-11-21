@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createHoverHysteresisController,
+  HOVER_HYSTERESIS_THRESHOLD_MS,
+  HOVER_RELEASE_GRACE_PERIOD_MS,
 } from '../hoverHysteresis';
 
 describe('NetworkCanvas Hover Hysteresis Behavioral Regression Suite', () => {
@@ -228,6 +230,170 @@ describe('NetworkCanvas Hover Hysteresis Behavioral Regression Suite', () => {
       expect(commitMock).toHaveBeenCalledWith('node-B');
 
       controller.dispose();
+    });
+  });
+
+  describe('Hover Hysteresis Release Grace Period', () => {
+    it('does not immediately clear committed hover during fast sweep through empty space for < 50ms when grace period (60ms) is active', () => {
+      const commitMock = vi.fn();
+      const controller = createHoverHysteresisController({
+        thresholdMs: 100,
+        gracePeriodMs: 60,
+        onCommitHover: commitMock,
+      });
+
+      // 1. Hover and commit node-Alpha
+      controller.handlePointerMoveOverNode('node-Alpha');
+      vi.advanceTimersByTime(100);
+      expect(commitMock).toHaveBeenCalledTimes(1);
+      expect(commitMock).toHaveBeenCalledWith('node-Alpha');
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Alpha');
+
+      // 2. Cursor transiently passes through empty space for 35ms (< 50ms)
+      controller.handlePointerMoveOverEmpty();
+      vi.advanceTimersByTime(35);
+
+      // Committed hover MUST remain intact without clearing or flickering!
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Alpha');
+      expect(commitMock).toHaveBeenCalledTimes(1); // No null commit!
+
+      // 3. Cursor returns to node-Alpha before 60ms grace period expires
+      controller.handlePointerMoveOverNode('node-Alpha');
+      vi.advanceTimersByTime(100);
+
+      // Node-Alpha remains continuously committed; grace period was cleanly cancelled
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Alpha');
+      expect(commitMock).toHaveBeenCalledTimes(1);
+
+      controller.dispose();
+    });
+
+    it('clears committed hover when lingering in empty space > 60ms', () => {
+      const commitMock = vi.fn();
+      const controller = createHoverHysteresisController({
+        thresholdMs: 100,
+        gracePeriodMs: 60,
+        onCommitHover: commitMock,
+      });
+
+      // Commit node-Beta
+      controller.handlePointerMoveOverNode('node-Beta');
+      vi.advanceTimersByTime(100);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Beta');
+
+      // Move into empty space
+      controller.handlePointerMoveOverEmpty();
+
+      // At 59ms, still preserved
+      vi.advanceTimersByTime(59);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Beta');
+
+      // Cross 60ms grace period boundary
+      vi.advanceTimersByTime(1);
+      expect(controller.getCommittedHoverNodeId()).toBeNull();
+      expect(commitMock).toHaveBeenLastCalledWith(null);
+
+      controller.dispose();
+    });
+
+    it('immediately cancels committed hover and pending grace timers when pointer leaves canvas (zero delay)', () => {
+      const commitMock = vi.fn();
+      const controller = createHoverHysteresisController({
+        thresholdMs: 100,
+        gracePeriodMs: 60,
+        onCommitHover: commitMock,
+      });
+
+      // Commit node-Gamma
+      controller.handlePointerMoveOverNode('node-Gamma');
+      vi.advanceTimersByTime(100);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Gamma');
+
+      // Move to empty space, starting 60ms grace timer
+      controller.handlePointerMoveOverEmpty();
+      vi.advanceTimersByTime(20); // only 20ms in
+
+      // Pointer exits canvas: MUST clear immediately without waiting remaining 40ms!
+      controller.handlePointerLeaveCanvas();
+      expect(controller.getCommittedHoverNodeId()).toBeNull();
+      expect(commitMock).toHaveBeenLastCalledWith(null);
+
+      // Advancing remaining time should not cause duplicate callbacks
+      const callsBefore = commitMock.mock.calls.length;
+      vi.advanceTimersByTime(100);
+      expect(commitMock.mock.calls.length).toBe(callsBefore);
+
+      controller.dispose();
+    });
+
+    it('immediately selects and commits hover on click even during empty space grace period (zero delay)', () => {
+      const commitMock = vi.fn();
+      const selectMock = vi.fn();
+      const controller = createHoverHysteresisController({
+        thresholdMs: 100,
+        gracePeriodMs: 60,
+        onCommitHover: commitMock,
+        onSelectNodeImmediate: selectMock,
+      });
+
+      // Commit node-1
+      controller.handlePointerMoveOverNode('node-1');
+      vi.advanceTimersByTime(100);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-1');
+
+      // Move over empty space (grace active)
+      controller.handlePointerMoveOverEmpty();
+      vi.advanceTimersByTime(25);
+
+      // User clicks node-2 directly
+      controller.handleClickNode('node-2');
+
+      // Synchronous, zero-delay selection and hover commit
+      expect(selectMock).toHaveBeenCalledTimes(1);
+      expect(selectMock).toHaveBeenCalledWith('node-2');
+      expect(controller.getCommittedHoverNodeId()).toBe('node-2');
+
+      // Advancing time should not clear hover or fire stale timers
+      vi.advanceTimersByTime(100);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-2');
+
+      controller.dispose();
+    });
+
+    it('immediately cancels hover when drag/gesture starts during empty space grace period (zero delay)', () => {
+      const commitMock = vi.fn();
+      const controller = createHoverHysteresisController({
+        thresholdMs: 100,
+        gracePeriodMs: 60,
+        onCommitHover: commitMock,
+      });
+
+      // Commit node-Delta
+      controller.handlePointerMoveOverNode('node-Delta');
+      vi.advanceTimersByTime(100);
+      expect(controller.getCommittedHoverNodeId()).toBe('node-Delta');
+
+      // Move over empty space (grace timer running)
+      controller.handlePointerMoveOverEmpty();
+      vi.advanceTimersByTime(15);
+
+      // Drag / orbit gesture begins
+      controller.handleGestureStart();
+      expect(controller.isGestureActive()).toBe(true);
+      expect(controller.getCommittedHoverNodeId()).toBeNull();
+      expect(commitMock).toHaveBeenLastCalledWith(null);
+
+      // Movement during drag is suppressed
+      controller.handlePointerMoveOverNode('node-Delta');
+      vi.advanceTimersByTime(150);
+      expect(controller.getCommittedHoverNodeId()).toBeNull();
+
+      controller.dispose();
+    });
+
+    it('uses exported HOVER_RELEASE_GRACE_PERIOD_MS constant (60ms) and HOVER_HYSTERESIS_THRESHOLD_MS (100ms)', () => {
+      expect(HOVER_HYSTERESIS_THRESHOLD_MS).toBe(100);
+      expect(HOVER_RELEASE_GRACE_PERIOD_MS).toBe(60);
     });
   });
 });

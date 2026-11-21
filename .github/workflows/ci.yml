@@ -134,6 +134,12 @@ jobs:
       - name: Run Temporal DAG & Auth Lifecycle Real Browser Verification
         run: python3 scripts/verify_temporal_lifecycle_browser.py
 
+      - name: Run Watcher Feedback Loop Verification
+        run: python3 scripts/verify_watcher_feedback_loop.py
+
+      - name: Run Behavioral Regression Real Browser Verification
+        run: python3 scripts/verify_behavioral_regression_browser.py
+
       - name: Run Performance Benchmarks
         run: ./scripts/benchmark.sh
 

@@ -774,46 +774,40 @@ export const Inspector: React.FC<InspectorProps> = ({
           )}
         </div>
         <div key="overview" className="inspector-content animate-reveal">
-          {/* Beginner-friendly plain English summary */}
-          <div className="beginner-overview-card">
-            <div className="beginner-card-title">
-              <Layers size={15} color="#38bdf8" />
-              <span>Repository overview</span>
+          {/* Compact 4-stat metric strip */}
+          <div className="overview-metric-strip beginner-overview-card">
+            <div className="overview-metric-item">
+              <span className="overview-metric-value">{totalDiscovered}</span>
+              <span className="overview-metric-label">Files</span>
             </div>
-            <p className="beginner-card-text">
-              PreBase discovered <strong>{totalDiscovered}</strong> files across{' '}
-              <strong>{repoStructure?.areas.length || 0}</strong> architectural areas. Analyzed{' '}
-              <strong>{totalAnalyzed}</strong> supported files for internal dependencies and confirmed{' '}
-              <strong>{snapshot.edges.length}</strong> direct code connections.
-              {unsupportedCount > 0 && (
-                <span> ({unsupportedCount} files are unsupported formats excluded from AST dependency analysis.)</span>
-              )}
-            </p>
+            <div className="overview-metric-item">
+              <span className="overview-metric-value">{totalAnalyzed}</span>
+              <span className="overview-metric-label">Analyzed</span>
+            </div>
+            <div className="overview-metric-item">
+              <span className="overview-metric-value">{snapshot.edges.length}</span>
+              <span className="overview-metric-label">Connections</span>
+            </div>
+            <div className="overview-metric-item">
+              <span className="overview-metric-value">{repoStructure?.areas.length || 0}</span>
+              <span className="overview-metric-label">Areas</span>
+            </div>
           </div>
+          <p className="beginner-card-text overview-subtle-hint">
+            PreBase discovered {totalDiscovered} files across {repoStructure?.areas.length || 0} areas ({totalAnalyzed} analyzed
+            {unsupportedCount > 0 ? `, ${unsupportedCount} unsupported files excluded` : ''}).
+          </p>
 
           {/* Quick Action: Dependency Path Explorer */}
           <div style={{ marginBottom: '14px' }}>
             <button
               type="button"
-              className="btn secondary text-xs"
+              className="secondary-action full-width"
               onClick={() => onTogglePathExplorer?.(true)}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-                padding: '8px 12px',
-                borderRadius: '6px',
-                background: 'var(--card-bg, #1e293b)',
-                border: '1px solid var(--border-color, #334155)',
-                color: 'var(--text-primary, #f8fafc)',
-                cursor: 'pointer',
-              }}
               title="Find verified dependency paths between two files"
             >
-              <Route size={14} color="#2dd4bf" />
-              <span className="font-medium">Explore Dependency Paths</span>
+              <Route size={14} color="var(--accent-brand)" />
+              <span>Explore Dependency Paths</span>
             </button>
           </div>
 
@@ -821,12 +815,16 @@ export const Inspector: React.FC<InspectorProps> = ({
           {repoStructure && repoStructure.suggestions.length > 0 && (
             <div className="exploration-section">
               <div className="section-title">
-                <Compass size={14} color="#2dd4bf" />
+                <Compass size={14} color="var(--accent-brand)" />
                 <h4>Start here</h4>
               </div>
               <div className="suggestion-cards-list">
                 {repoStructure.suggestions.slice(0, 4).map((sug) => {
                   const node = snapshot.nodes.find((n) => n.id === sug.nodeId);
+                  const isAmbiguous = repoStructure.suggestions.some(
+                    (other) => other.nodeId !== sug.nodeId && other.filename === sug.filename
+                  );
+                  const displayFile = isAmbiguous ? sug.relativePath : sug.filename;
                   return (
                     <button
                       key={sug.nodeId}
@@ -841,7 +839,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                         <span className="sug-title">{sug.title}</span>
                         <span className={`sug-badge ${sug.kind}`}>{sug.badge}</span>
                       </div>
-                      <div className="sug-filename mono">{sug.filename}</div>
+                      <div className="sug-filename mono" title={sug.relativePath}>{displayFile}</div>
                       <p className="sug-reason">{sug.reason}</p>
                     </button>
                   );
@@ -854,12 +852,12 @@ export const Inspector: React.FC<InspectorProps> = ({
           {repoStructure && repoStructure.areas.length > 0 && (
             <div className="areas-section">
               <div className="section-title">
-                <Folder size={14} color="#38bdf8" />
+                <Folder size={14} color="var(--accent-brand)" />
                 <h4>Areas</h4>
               </div>
               <div className="areas-grid">
                 {repoStructure.areas.map((area) => (
-                  <div key={area.id} style={{ display: 'flex', gap: '3px', alignItems: 'stretch' }}>
+                  <div key={area.id} className="area-grid-item">
                     <button
                       type="button"
                       className={`area-pill-card ${selectedAreaIds?.includes(area.id) ? 'selected' : ''}`}
@@ -869,13 +867,13 @@ export const Inspector: React.FC<InspectorProps> = ({
                     >
                       <span className="area-pill-name">{area.name}</span>
                       <span className="area-pill-meta">
-                        {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} area links
+                        {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} links
                       </span>
                     </button>
                     {onToggleArea && (
                       <button
                         type="button"
-                        className="icon-action-btn"
+                        className={`area-toggle-btn ${selectedAreaIds?.includes(area.id) ? 'selected' : ''}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           onToggleArea(area.id);
@@ -890,17 +888,9 @@ export const Inspector: React.FC<InspectorProps> = ({
                             ? `Deselect ${area.name}`
                             : `Add ${area.name} to comparison`
                         }
-                        style={{
-                          borderRadius: '6px',
-                          border: '1px solid var(--border-subtle, #334155)',
-                          padding: '0 6px',
-                          background: selectedAreaIds?.includes(area.id)
-                            ? 'rgba(56, 189, 248, 0.2)'
-                            : 'transparent',
-                        }}
                       >
                         {selectedAreaIds?.includes(area.id) ? (
-                          <Check size={12} color="#38bdf8" />
+                          <Check size={12} />
                         ) : (
                           <Plus size={12} />
                         )}
@@ -1035,8 +1025,8 @@ export const Inspector: React.FC<InspectorProps> = ({
                     style={{
                       padding: '8px 10px',
                       borderRadius: '6px',
-                      background: 'var(--card-bg, #1e293b)',
-                      border: '1px solid var(--border-color, #334155)',
+                      background: 'var(--bg-surface)',
+                      border: '1px solid var(--border-subtle)',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1044,7 +1034,7 @@ export const Inspector: React.FC<InspectorProps> = ({
                         type="button"
                         className="area-name-btn clickable font-medium text-xs mono"
                         onClick={() => onSelectArea?.(ac.area_id)}
-                        style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', padding: 0 }}
+                        style={{ background: 'none', border: 'none', color: 'var(--accent-brand)', cursor: 'pointer', padding: 0 }}
                         title={`Focus on area: ${ac.area_id}`}
                       >
                         {ac.area_id}
@@ -1128,8 +1118,8 @@ export const Inspector: React.FC<InspectorProps> = ({
                           style={{
                             padding: '3px 6px',
                             borderRadius: '4px',
-                            background: 'var(--card-bg, #1e293b)',
-                            border: '1px solid var(--border-color, #334155)',
+                            background: 'var(--bg-surface)',
+                            border: '1px solid var(--border-subtle)',
                             color: 'var(--text-primary)',
                           }}
                         >

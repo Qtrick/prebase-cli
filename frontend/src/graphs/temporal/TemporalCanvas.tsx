@@ -8,9 +8,9 @@ import {
   LayoutCommit,
   MARGIN_LEFT,
   ROW_HEIGHT,
+  LANE_WIDTH,
 } from './temporalLayout';
 import { computeTemporalTextLayout } from './temporalTextLayout';
-import { applyTemporalWheelScroll, computeCommitScrollIntoView } from './temporalScroll';
 
 interface TemporalCanvasProps {
   commits: CommitSummary[];
@@ -32,6 +32,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   theme = 'dark',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, k: 1 });
@@ -40,27 +41,20 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef<Point2D>({ x: 0, y: 0 });
   const initialTransformRef = useRef<Transform>({ x: 0, y: 0, k: 1 });
+  const initialScrollTopRef = useRef<number>(0);
   const didDragRef = useRef(false);
 
   const layout = useMemo(() => computeTemporalLayout(commits, isFiltered), [commits, isFiltered]);
 
-  // Fit View helper: scales horizontally to fit tracks & text without squishing vertical timeline (Defect 5.9)
+  // Fit View helper: aligns view to top without squishing vertical timeline or altering scale
   const fitView = useCallback(() => {
-    if (!containerRef.current || layout.nodes.length === 0) return;
-    const width = containerRef.current.clientWidth || 800;
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    setTransform({ x: 0, y: 0, k: 1.0 });
+  }, []);
 
-    const pad = 60;
-    const graphWidth = Math.max(100, layout.bounds.width);
-    const scaleX = (width - pad * 2) / graphWidth;
-    const k = Math.min(1.0, Math.max(0.65, scaleX));
-
-    const x = pad + 10;
-    const y = pad;
-
-    setTransform({ x, y, k });
-  }, [layout]);
-
-  // Initial fit view ONLY on first commits load (preserve camera transform during pagination! Defect 5.8)
+  // Initial fit view ONLY on first commits load (preserve scroll position during pagination!)
   const hasInitializedViewRef = useRef(false);
   useEffect(() => {
     if (commits.length > 0 && !hasInitializedViewRef.current) {
@@ -79,11 +73,20 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
   // External trigger for reset view
   useEffect(() => {
     if (resetViewTrigger && resetViewTrigger > 0) {
-      if (containerRef.current) {
-        setTransform({ x: MARGIN_LEFT, y: 40, k: 1 });
-      }
+      fitView();
     }
-  }, [resetViewTrigger]);
+  }, [resetViewTrigger, fitView]);
+
+  // Synchronize native vertical scrolling with canvas camera transform
+  const handleNativeScroll = useCallback(() => {
+    if (!scrollContainerRef.current) return;
+    const scrollTop = scrollContainerRef.current.scrollTop;
+    setTransform((prev) => ({
+      x: prev.x,
+      y: -scrollTop,
+      k: 1.0, // Strict scale invariance (zero wheel-based zoom scaling)
+    }));
+  }, []);
 
   // Expose deterministic debug API for automated browser verification (parity with NetworkCanvas)
   useEffect(() => {
@@ -187,49 +190,58 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     const isLight = theme === 'light';
 
     // 2. Draw commit nodes & labels
+    const maxLane = layout.nodes.reduce((max, n) => Math.max(max, n.lane), 0);
+    const laneAreaWidth = (maxLane + 1) * LANE_WIDTH;
+    const textStartX = MARGIN_LEFT + laneAreaWidth + 14;
+
     for (let i = 0; i < layout.nodes.length; i++) {
       const item = layout.nodes[i];
       const isSelected = item.commit.hash === selectedCommitHash;
       const isHovered = item.commit.hash === hoveredHash;
       const color = getLaneColor(item.lane);
 
-      // Node circle
-      const radius = isSelected ? 8 : isHovered ? 7 : 5.5;
+      // Selected row subtle background highlight
+      if (isSelected) {
+        ctx.fillStyle = isLight ? 'rgba(0, 0, 0, 0.04)' : 'rgba(255, 255, 255, 0.04)';
+        ctx.fillRect(0, item.y - ROW_HEIGHT / 2, width, ROW_HEIGHT);
+      }
 
-      // Outer glow on select/hover
+      // Node circle
+      const radius = isSelected ? 7 : isHovered ? 6.5 : 5;
+
+      // Outer ring on select/hover
       if (isSelected || isHovered) {
         ctx.beginPath();
-        ctx.arc(item.x, item.y, radius + 5, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = isLight ? 0.2 : 0.3;
-        ctx.fill();
-        ctx.globalAlpha = 1.0;
+        ctx.arc(item.x, item.y, radius + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = isSelected
+          ? (isLight ? '#356f67' : '#79a9a0')
+          : (isLight ? 'rgba(0, 0, 0, 0.15)' : 'rgba(255, 255, 255, 0.2)');
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
       }
 
       // Inner circle
       ctx.beginPath();
       ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? (isLight ? '#0284c7' : '#ffffff') : color;
+      ctx.fillStyle = isSelected ? (isLight ? '#356f67' : '#79a9a0') : color;
       ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = isSelected ? (isLight ? '#0284c7' : color) : (isLight ? '#ffffff' : '#0f172a');
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = isLight ? '#ffffff' : '#171719';
       ctx.stroke();
 
       // 3. Draw text and badges on the right side of the lanes
-      const textStartX = MARGIN_LEFT + (Math.max(1, item.lane) + 1.2) * 36 + 20;
-
       // Hash Badge
-      const badgeWidth = 64;
-      const badgeHeight = 20;
+      const badgeWidth = 60;
+      const badgeHeight = 19;
       const badgeX = textStartX;
       const badgeY = item.y - badgeHeight / 2;
 
       ctx.fillStyle = isSelected
-        ? (isLight ? 'rgba(2, 132, 199, 0.15)' : 'rgba(56, 189, 248, 0.25)')
-        : (isLight ? 'rgba(241, 245, 249, 0.95)' : 'rgba(30, 41, 59, 0.8)');
+        ? (isLight ? 'rgba(53, 111, 103, 0.12)' : 'rgba(121, 169, 160, 0.15)')
+        : (isLight ? '#f4f4f3' : '#1e1e21');
       ctx.strokeStyle = isSelected
-        ? (isLight ? '#0284c7' : '#38bdf8')
-        : (isLight ? 'rgba(203, 213, 225, 0.8)' : 'rgba(71, 85, 105, 0.6)');
+        ? (isLight ? 'rgba(53, 111, 103, 0.4)' : 'rgba(121, 169, 160, 0.4)')
+        : (isLight ? '#e5e5e2' : '#2e2e32');
       ctx.lineWidth = 1;
       roundRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 4);
       ctx.fill();
@@ -237,8 +249,8 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
 
       ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
       ctx.fillStyle = isSelected
-        ? (isLight ? '#0284c7' : '#38bdf8')
-        : (isLight ? '#475569' : '#94a3b8');
+        ? (isLight ? '#356f67' : '#79a9a0')
+        : (isLight ? '#55555d' : '#a1a1aa');
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       ctx.fillText(item.commit.short_hash, badgeX + badgeWidth / 2, item.y);
@@ -250,8 +262,8 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
         ? '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
         : '500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
       ctx.fillStyle = isSelected
-        ? (isLight ? '#0f172a' : '#f8fafc')
-        : (isLight ? '#1e293b' : '#e2e8f0');
+        ? (isLight ? '#202023' : '#ededef')
+        : (isLight ? '#38383e' : '#d4d4d8');
 
       // Responsive commit summary and author placement
       const containerWidth = containerRef.current?.clientWidth || 900;
@@ -270,7 +282,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       // Render author & relative date if space permits without clipping
       if (textLayout.metaX !== null && textLayout.displayMeta) {
         ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        ctx.fillStyle = isLight ? '#475569' : '#94a3b8';
+        ctx.fillStyle = isLight ? '#85858e' : '#71717a';
         ctx.fillText(textLayout.displayMeta, textLayout.metaX, item.y);
       }
     }
@@ -318,6 +330,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     didDragRef.current = false;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
     initialTransformRef.current = { ...transform };
+    initialScrollTopRef.current = scrollContainerRef.current ? scrollContainerRef.current.scrollTop : 0;
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -330,11 +343,13 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
         didDragRef.current = true;
       }
-      setTransform({
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = initialScrollTopRef.current - dy;
+      }
+      setTransform((prev) => ({
+        ...prev,
         x: initialTransformRef.current.x + dx,
-        y: initialTransformRef.current.y + dy,
-        k: initialTransformRef.current.k,
-      });
+      }));
       return;
     }
 
@@ -374,24 +389,11 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
     }
   };
 
-  // Native vertical scrolling (preserves transform.k, zero wheel-based zoom scaling)
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const height = canvas.clientHeight || 600;
-    const contentHeight = Math.max(height, layout.bounds.height);
-    setTransform((prev) =>
-      applyTemporalWheelScroll(prev, e.deltaY, contentHeight, height)
-    );
-  };
-
   const scrollCommitIntoView = (targetNode: LayoutCommit) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const height = canvas.clientHeight || 600;
-    setTransform((prev) => computeCommitScrollIntoView(prev, targetNode, height));
+    if (!scrollContainerRef.current) return;
+    const height = scrollContainerRef.current.clientHeight || 600;
+    const targetY = Math.max(0, targetNode.y - height / 2);
+    scrollContainerRef.current.scrollTo({ top: targetY, behavior: 'smooth' });
   };
 
   // Keyboard navigation for accessible commit selection
@@ -442,20 +444,49 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       ref={containerRef}
       className="temporal-canvas-container"
       style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onWheel={handleWheel}
     >
-      <canvas
-        ref={canvasRef}
-        className="temporal-canvas"
-        tabIndex={0}
-        role="application"
-        aria-label="Git commit history DAG"
-        aria-description="Use ArrowUp and ArrowDown to navigate commits, Home/End for start/end, Escape to deselect, mouse drag to pan timeline, mouse wheel to zoom, and click to inspect commit details."
-        onKeyDown={handleKeyDown}
-      />
+      <div
+        ref={scrollContainerRef}
+        className="temporal-scroll-container"
+        style={{
+          width: '100%',
+          height: '100%',
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          position: 'relative',
+        }}
+        onScroll={handleNativeScroll}
+      >
+        <canvas
+          ref={canvasRef}
+          className="temporal-canvas"
+          tabIndex={0}
+          role="application"
+          aria-label="Git commit history DAG"
+          aria-description="Use ArrowUp and ArrowDown to navigate commits, Home and End to jump, Enter or Click to inspect commit details."
+          style={{
+            position: 'sticky',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            display: 'block',
+          }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onKeyDown={handleKeyDown}
+        />
+        <div
+          className="temporal-scroll-spacer"
+          style={{
+            height: Math.max(layout.bounds.height + 120, 600),
+            width: '100%',
+            position: 'relative',
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
     </div>
   );
 };

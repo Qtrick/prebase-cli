@@ -21,7 +21,11 @@ import {
   type Viewport2D,
 } from './relationshipViewport';
 import { computeRelationshipLayoutKey } from './relationshipLayoutKey';
-import { createHoverHysteresisController, HoverHysteresisController } from '../network/hoverHysteresis';
+import {
+  createHoverHysteresisController,
+  HoverHysteresisController,
+  HOVER_RELEASE_GRACE_PERIOD_MS,
+} from '../network/hoverHysteresis';
 import {
   ArrowLeft,
   Search,
@@ -680,6 +684,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   useEffect(() => {
     const ctrl = createHoverHysteresisController({
       thresholdMs: 100,
+      gracePeriodMs: HOVER_RELEASE_GRACE_PERIOD_MS,
       onCommitHover: (id) => {
         setHoveredNodeId(id);
         requestRender();

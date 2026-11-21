@@ -22,7 +22,6 @@ import {
   wrapRotationAngle,
   clampPitch,
   computeGraphCentroid,
-  computeDepthAlpha,
   projectGraph,
   computeNetworkFitTransform,
   isNodeVisibleInViewport,
@@ -42,6 +41,9 @@ import {
   LabelCollisionGrid,
   computeLabelPriorityScore,
   ScreenRect,
+  computeCameraDepthShading,
+  computeEdgeDepthAttenuation,
+  compositeDepthColor,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
 import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
@@ -49,7 +51,11 @@ import { findEntryPointCandidate } from '../../utils/entryPointDetection';
 import { getAreaIdForPath } from '../../utils/repositoryAreas';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
-import { createHoverHysteresisController, HoverHysteresisController } from './hoverHysteresis';
+import {
+  createHoverHysteresisController,
+  HoverHysteresisController,
+  HOVER_RELEASE_GRACE_PERIOD_MS,
+} from './hoverHysteresis';
 
 export interface RevealRequest {
   nodeId: string;
@@ -141,6 +147,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     panY: 300,
     zoom: DEFAULT_ZOOM,
   });
+  const selectedNodeIdRef = useRef<string | null>(selectedNodeId);
+  selectedNodeIdRef.current = selectedNodeId;
 
   // RAF & Dirty flag scheduler
   const isDirtyRef = useRef<boolean>(true);
@@ -173,6 +181,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   useEffect(() => {
     const ctrl = createHoverHysteresisController({
       thresholdMs: 100,
+      gracePeriodMs: HOVER_RELEASE_GRACE_PERIOD_MS,
       onCommitHover: (id) => {
         setHoveredNodeId(id);
         requestRender();
@@ -211,21 +220,45 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }, []);
 
+  // Stable camera-independent normalization radius for 3D depth perception
+  const sphereRadius = useMemo(() => {
+    let maxR = 140;
+    const c = centroidRef.current;
+    for (const p of positions.values()) {
+      const d = Math.hypot(p.x - c.x, p.y - c.y, p.z - c.z);
+      if (d > maxR) maxR = d;
+    }
+    return maxR;
+  }, [positions]);
+
   // Expose authoritative debug metrics for Playwright browser verification & runtime inspection
   useEffect(() => {
     if (typeof window !== 'undefined') {
       (window as any).__prebaseNetworkDebug = {
         getCamera: () => ({ ...cameraRef.current }),
         getCentroid: () => ({ ...centroidRef.current }),
+        getSphereRadius: () => sphereRadius,
+        getHoveredNodeId: () => hoverControllerRef.current?.getCommittedHoverNodeId() ?? null,
+        getSelectedNodeId: () => selectedNodeIdRef.current,
+        setCamera: (updates: Partial<NetworkCamera>) => {
+          cameraRef.current = { ...cameraRef.current, ...updates };
+          requestRender();
+        },
         getProjectedNodes: () =>
-          projectedDataRef.current?.projectedList?.map((p) => ({
-            id: p.id,
-            screenX: p.screenX,
-            screenY: p.screenY,
-            depthScale: p.projected.depthScale,
-            z: p.projected.z,
-            localPos: p.localPos,
-          })) || [],
+          projectedDataRef.current?.projectedList?.map((p) => {
+            const depthShading = computeCameraDepthShading(p.projected.z, sphereRadius, theme);
+            return {
+              id: p.id,
+              screenX: p.screenX,
+              screenY: p.screenY,
+              depthScale: p.projected.depthScale,
+              z: p.projected.z,
+              depth: depthShading.depth,
+              shading: depthShading.shading,
+              prominence: depthShading.prominence,
+              localPos: p.localPos,
+            };
+          }) || [],
         isCenterLocked: () => keepGraphCentered,
       };
     }
@@ -234,7 +267,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         delete (window as any).__prebaseNetworkDebug;
       }
     };
-  }, [keepGraphCentered]);
+  }, [keepGraphCentered, sphereRadius, theme]);
 
   // Maintain stable centering from projected bounds during rotation and viewport changes (Prebasecode applyCenterLock parity)
   const applyCenterLock = useCallback(
@@ -593,6 +626,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           );
           if (!desc) continue;
 
+          // Depth attenuation: attenuate ordinary edges based on endpoint camera-relative depth
+          let depthMultiplier = 1.0;
+          if (!isEdgeSelected && !isConnected && (!highlightedEdgeIds || highlightedEdgeIds.size === 0)) {
+            const edgeProminence = computeEdgeDepthAttenuation(p1.projected.z, p2.projected.z, sphereRadius);
+            depthMultiplier = 0.35 + 0.65 * edgeProminence;
+          }
+
           // If highlighted edges are specified (e.g. active dependency path or cycle group),
           // dim non-path edges. Otherwise if architectural areas are selected, dim cross-area edges.
           let areaAlphaMultiplier = 1.0;
@@ -616,7 +656,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             }
           }
 
-          edgesToDraw.push({ p1, p2, desc, isEdgeSelected, areaAlphaMultiplier });
+          edgesToDraw.push({ p1, p2, desc, isEdgeSelected, areaAlphaMultiplier: areaAlphaMultiplier * depthMultiplier });
         }
 
         edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
@@ -662,12 +702,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.restore();
         }
 
-        // 3. Draw Nodes (sorted back-to-front by projected.z)
+        // 3. Draw Nodes (sorted far-to-near for Painter's algorithm)
         const sortedNodes = projData.projectedList;
-        for (let i = 0; i < sortedNodes.length; i++) {
+        for (let i = sortedNodes.length - 1; i >= 0; i--) {
           const pNode = sortedNodes[i];
           const isSelected = selectedNodeId === pNode.id;
           const isHovered = hoveredNodeId === pNode.id;
+          const isHighlighted = (highlightedNodeIds && highlightedNodeIds.has(pNode.id)) || false;
 
           let isDimmed = false;
           if (connectedNodes) {
@@ -683,49 +724,57 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
 
           const screenR = pNode.radius * camera.zoom;
-          const depthAlpha = computeDepthAlpha(pNode.projected.depthScale);
+          const depthShading = computeCameraDepthShading(
+            pNode.projected.z,
+            sphereRadius,
+            theme,
+            { isSelected, isHovered, minProminence: isHighlighted ? 0.8 : undefined }
+          );
 
           ctx.save();
-          ctx.globalAlpha = isDimmed ? 0.18 : depthAlpha;
+          // Attenuate alpha based on camera-relative depth: front nodes 1.0, rear nodes 0.42
+          const depthAlpha = 0.42 + 0.58 * depthShading.depth;
+          ctx.globalAlpha = isDimmed ? 0.16 : depthAlpha;
 
           const isLight = theme === 'light';
-          const isHighlighted = (highlightedNodeIds && highlightedNodeIds.has(pNode.id)) || false;
 
-          // Selection / Hover / Highlight outer ring
+          // Selection / Hover / Highlight outer ring with restrained palette
           if (isSelected || isHighlighted) {
             ctx.beginPath();
-            ctx.arc(pNode.screenX, pNode.screenY, screenR + 6, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? 'rgba(13, 148, 136, 0.45)' : 'rgba(45, 212, 191, 0.45)';
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 5.5, 0, Math.PI * 2);
+            ctx.strokeStyle = isLight ? 'rgba(53, 111, 103, 0.35)' : 'rgba(121, 169, 160, 0.35)';
             ctx.lineWidth = 3.0;
             ctx.stroke();
 
             ctx.beginPath();
-            ctx.arc(pNode.screenX, pNode.screenY, screenR + 3, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#0d9488' : '#2dd4bf';
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 2.5, 0, Math.PI * 2);
+            ctx.strokeStyle = isLight ? '#356f67' : '#79a9a0';
             ctx.lineWidth = 2.0;
             ctx.stroke();
           } else if (isHovered) {
             ctx.beginPath();
-            ctx.arc(pNode.screenX, pNode.screenY, screenR + 3.5, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#0284c7' : '#38bdf8';
-            ctx.lineWidth = 2.0;
+            ctx.arc(pNode.screenX, pNode.screenY, screenR + 3, 0, Math.PI * 2);
+            ctx.strokeStyle = isLight ? '#55555d' : '#a1a1aa';
+            ctx.lineWidth = 1.8;
             ctx.stroke();
           }
 
-          // Node glyph body
+          // Node glyph body with camera-relative depth color shading
           ctx.beginPath();
           ctx.arc(pNode.screenX, pNode.screenY, screenR, 0, Math.PI * 2);
           const isMainEntry = entryCandidate !== null && pNode.id === entryCandidate.nodeId;
-          ctx.fillStyle = isMainEntry
+          const baseColor = isMainEntry
             ? ENTRY_NODE_COLOR
             : getFileTypeColor(pNode.node.relative_path);
+          const shadedColor = compositeDepthColor(baseColor, depthShading.prominence, theme);
+          ctx.fillStyle = shadedColor;
           ctx.fill();
 
           ctx.strokeStyle = isSelected
-            ? (isLight ? '#0d9488' : '#2dd4bf')
+            ? (isLight ? '#356f67' : '#79a9a0')
             : isHovered
-              ? (isLight ? '#0284c7' : '#38bdf8')
-              : (isLight ? 'rgba(255, 255, 255, 0.9)' : 'rgba(15, 23, 42, 0.85)');
+              ? (isLight ? '#202023' : '#ededef')
+              : (isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(17, 17, 19, 0.85)');
           ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
           ctx.stroke();
           ctx.restore();
@@ -918,9 +967,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const screenY = clientY - rect.top;
       const camera = cameraRef.current;
 
-      // Iterate in reverse (frontmost nodes first by depth)
+      // Iterate frontmost nodes first (nearer nodes have smaller z and are at the start of projectedList)
       const list = projData.projectedList;
-      for (let i = list.length - 1; i >= 0; i--) {
+      for (let i = 0; i < list.length; i++) {
         const pNode = list[i];
         const screenR = pNode.radius * camera.zoom;
         const hitTargetRadius = Math.max(screenR + 4, 10);

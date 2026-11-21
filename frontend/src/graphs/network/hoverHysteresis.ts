@@ -11,9 +11,11 @@
  */
 
 export const HOVER_HYSTERESIS_THRESHOLD_MS = 100;
+export const HOVER_RELEASE_GRACE_PERIOD_MS = 60;
 
 export interface HoverHysteresisOptions {
   thresholdMs?: number;
+  gracePeriodMs?: number;
   onCommitHover: (nodeId: string | null) => void;
   onSelectNodeImmediate?: (nodeId: string) => void;
 }
@@ -35,12 +37,14 @@ export function createHoverHysteresisController(
   options: HoverHysteresisOptions
 ): HoverHysteresisController {
   const thresholdMs = options.thresholdMs ?? HOVER_HYSTERESIS_THRESHOLD_MS;
+  const gracePeriodMs = options.gracePeriodMs ?? 0;
   const onCommitHover = options.onCommitHover;
   const onSelectNodeImmediate = options.onSelectNodeImmediate;
 
   let committedHoverNodeId: string | null = null;
   let pendingHoverNodeId: string | null = null;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+  let emptyGraceTimer: ReturnType<typeof setTimeout> | null = null;
   let isDraggingOrRotating = false;
 
   const clearPendingTimer = () => {
@@ -51,7 +55,15 @@ export function createHoverHysteresisController(
     pendingHoverNodeId = null;
   };
 
+  const clearGraceTimer = () => {
+    if (emptyGraceTimer !== null) {
+      clearTimeout(emptyGraceTimer);
+      emptyGraceTimer = null;
+    }
+  };
+
   const commitHover = (nodeId: string | null) => {
+    clearGraceTimer();
     if (committedHoverNodeId !== nodeId) {
       committedHoverNodeId = nodeId;
       onCommitHover(nodeId);
@@ -63,12 +75,14 @@ export function createHoverHysteresisController(
       // If a gesture (drag/pan/rotate) is active, do not process hover
       if (isDraggingOrRotating) {
         clearPendingTimer();
+        clearGraceTimer();
         return;
       }
 
-      // If this node is already the committed hover target, keep it
+      // If returning to the already committed node, cancel any empty grace timer and keep it committed
       if (committedHoverNodeId === nodeId) {
         clearPendingTimer();
+        clearGraceTimer();
         return;
       }
 
@@ -77,8 +91,9 @@ export function createHoverHysteresisController(
         return;
       }
 
-      // Fast pointer traverse: cancel previous timer and schedule new linger check
+      // Fast pointer traverse: cancel previous timer, clear any empty release grace timer, and schedule new linger check
       clearPendingTimer();
+      clearGraceTimer();
       pendingHoverNodeId = nodeId;
 
       hoverTimer = setTimeout(() => {
@@ -94,19 +109,30 @@ export function createHoverHysteresisController(
     handlePointerMoveOverEmpty() {
       clearPendingTimer();
       if (committedHoverNodeId !== null) {
-        commitHover(null);
+        if (gracePeriodMs > 0) {
+          if (emptyGraceTimer === null) {
+            emptyGraceTimer = setTimeout(() => {
+              emptyGraceTimer = null;
+              commitHover(null);
+            }, gracePeriodMs);
+          }
+        } else {
+          commitHover(null);
+        }
       }
     },
 
     handlePointerLeaveCanvas() {
-      // Immediately cancel pending linger timer and immediately clear committed hover
+      // Immediately cancel pending linger timer and immediately clear committed hover with zero delay
       clearPendingTimer();
+      clearGraceTimer();
       commitHover(null);
     },
 
     handleClickNode(nodeId: string) {
       // Immediate selection: NEVER delay click behind 100ms hover hysteresis
       clearPendingTimer();
+      clearGraceTimer();
       // Synchronously select
       onSelectNodeImmediate?.(nodeId);
       // Synchronously commit hover state to clicked node
@@ -116,6 +142,7 @@ export function createHoverHysteresisController(
     handleGestureStart() {
       isDraggingOrRotating = true;
       clearPendingTimer();
+      clearGraceTimer();
       if (committedHoverNodeId !== null) {
         commitHover(null);
       }
@@ -124,6 +151,7 @@ export function createHoverHysteresisController(
     handleGestureEnd() {
       isDraggingOrRotating = false;
       clearPendingTimer();
+      clearGraceTimer();
     },
 
     getCommittedHoverNodeId() {
@@ -140,6 +168,7 @@ export function createHoverHysteresisController(
 
     dispose() {
       clearPendingTimer();
+      clearGraceTimer();
       committedHoverNodeId = null;
     },
   };
