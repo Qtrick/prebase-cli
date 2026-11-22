@@ -1,4 +1,6 @@
-import { FileNode, NetworkCamera, Point3D, ViewportInsets } from '../../../types/graph';
+import { FileNode, NetworkCamera, Point3D, Quaternion, ViewportInsets } from '../../../types/graph';
+
+export type { Quaternion };
 
 export interface ProjectedPoint {
   x: number;
@@ -57,6 +59,120 @@ export function clampPitch(pitch: number): number {
   return Math.max(-PITCH_CLAMP_LIMIT, Math.min(PITCH_CLAMP_LIMIT, pitch));
 }
 
+// ============================================================================
+// Authoritative Quaternion 3D Orientation (Unrestricted Sphere Rotation)
+// ============================================================================
+
+export function quaternionNormalize(q: Quaternion): Quaternion {
+  const [x = 0, y = 0, z = 0, w = 1] = q || [];
+  const len = Math.hypot(x, y, z, w);
+  if (!Number.isFinite(len) || len < 1e-12) return [0, 0, 0, 1];
+  return [x / len, y / len, z / len, w / len];
+}
+
+export function quaternionMultiply(q1: Quaternion, q2: Quaternion): Quaternion {
+  const [x1, y1, z1, w1] = q1;
+  const [x2, y2, z2, w2] = q2;
+  return quaternionNormalize([
+    w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+    w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+    w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+  ]);
+}
+
+export function rotateVectorByQuaternion(v: Point3D, q: Quaternion): Point3D {
+  const [qx, qy, qz, qw] = q;
+  const tx = 2 * (qy * v.z - qz * v.y);
+  const ty = 2 * (qz * v.x - qx * v.z);
+  const tz = 2 * (qx * v.y - qy * v.x);
+  return {
+    x: v.x + qw * tx + (qy * tz - qz * ty),
+    y: v.y + qw * ty + (qz * tx - qx * tz),
+    z: v.z + qw * tz + (qx * ty - qy * tx),
+  };
+}
+
+export function eulerToQuaternion(yaw: number, pitch: number): Quaternion {
+  const qYaw: Quaternion = [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
+  const qPitch: Quaternion = [Math.sin(pitch / 2), 0, 0, Math.cos(pitch / 2)];
+  return quaternionMultiply(qYaw, qPitch);
+}
+
+export function quaternionToEuler(q: Quaternion): { yaw: number; pitch: number } {
+  const zPrime = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, q);
+  const pitch = Math.asin(clamp(-zPrime.y, -1, 1));
+  const yaw = Math.atan2(zPrime.x, zPrime.z);
+  return { yaw, pitch };
+}
+
+export const DEFAULT_ORIENTATION: Quaternion = eulerToQuaternion(DEFAULT_YAW, DEFAULT_PITCH);
+
+export function rotateOrientationByScreenDelta(
+  orientation: Quaternion,
+  dx: number,
+  dy: number,
+  sensitivity: number = ROTATION_SENSITIVITY
+): Quaternion {
+  const deltaYaw = -dx * sensitivity;
+  const deltaPitch = dy * sensitivity;
+  const qDelta = eulerToQuaternion(deltaYaw, deltaPitch);
+  return quaternionMultiply(qDelta, orientation);
+}
+
+export function quaternionSlerp(q1: Quaternion, q2: Quaternion, t: number): Quaternion {
+  let dot = q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3];
+  let q2Target = q2;
+  if (dot < 0) {
+    dot = -dot;
+    q2Target = [-q2[0], -q2[1], -q2[2], -q2[3]];
+  }
+  if (dot > 0.9995) {
+    return quaternionNormalize([
+      q1[0] + (q2Target[0] - q1[0]) * t,
+      q1[1] + (q2Target[1] - q1[1]) * t,
+      q1[2] + (q2Target[2] - q1[2]) * t,
+      q1[3] + (q2Target[3] - q1[3]) * t,
+    ]);
+  }
+  const theta = Math.acos(clamp(dot, -1, 1));
+  const sinTheta = Math.sin(theta);
+  const w1 = Math.sin((1 - t) * theta) / sinTheta;
+  const w2 = Math.sin(t * theta) / sinTheta;
+  return quaternionNormalize([
+    w1 * q1[0] + w2 * q2Target[0],
+    w1 * q1[1] + w2 * q2Target[1],
+    w1 * q1[2] + w2 * q2Target[2],
+    w1 * q1[3] + w2 * q2Target[3],
+  ]);
+}
+
+export function computeQuaternionToFacePoint(localPos: Point3D): Quaternion {
+  const len = Math.hypot(localPos.x, localPos.y, localPos.z);
+  if (!Number.isFinite(len) || len < 1e-6) return [0, 0, 0, 1];
+  const u = { x: localPos.x / len, y: localPos.y / len, z: localPos.z / len };
+  const dot = u.z;
+  if (dot > 0.999999) return [0, 0, 0, 1];
+  if (dot < -0.999999) return [0, 1, 0, 0];
+  const w = { x: u.y, y: -u.x, z: 0 };
+  return quaternionNormalize([w.x, w.y, w.z, 1 + dot]);
+}
+
+export function ensureCameraOrientation(camera: NetworkCamera): NetworkCamera {
+  if (
+    camera.orientation &&
+    Array.isArray(camera.orientation) &&
+    camera.orientation.length === 4 &&
+    camera.orientation.every((v) => Number.isFinite(v))
+  ) {
+    return camera;
+  }
+  return {
+    ...camera,
+    orientation: eulerToQuaternion(camera.yaw ?? DEFAULT_YAW, camera.pitch ?? DEFAULT_PITCH),
+  };
+}
+
 export function computeGraphCentroid(positions: Iterable<Point3D>): Point3D {
   let count = 0;
   let sx = 0;
@@ -88,22 +204,39 @@ export function projectPoint3D(
   x: number,
   y: number,
   z: number,
-  yaw = 0,
-  pitch = 0,
+  yawOrOrientation: number | Quaternion = 0,
+  pitchOrFocalLength: number = 0,
   focalLength: number = NETWORK_FOCAL_LENGTH
 ): ProjectedPoint {
-  const cp = Math.cos(pitch);
-  const sp = Math.sin(pitch);
-  const y1 = y * cp - z * sp;
-  const z1 = y * sp + z * cp;
+  let x2: number;
+  let y1: number;
+  let z2: number;
+  let fl = focalLength;
 
-  const cy = Math.cos(yaw);
-  const sy = Math.sin(yaw);
-  const x2 = x * cy + z1 * sy;
-  const z2 = -x * sy + z1 * cy;
+  if (Array.isArray(yawOrOrientation)) {
+    const rotated = rotateVectorByQuaternion({ x, y, z }, yawOrOrientation);
+    x2 = rotated.x;
+    y1 = rotated.y;
+    z2 = rotated.z;
+    if (typeof pitchOrFocalLength === 'number' && pitchOrFocalLength > 0) {
+      fl = pitchOrFocalLength;
+    }
+  } else {
+    const yaw = yawOrOrientation;
+    const pitch = pitchOrFocalLength;
+    const cp = Math.cos(pitch);
+    const sp = Math.sin(pitch);
+    y1 = y * cp - z * sp;
+    const z1 = y * sp + z * cp;
 
-  const distance = Math.max(focalLength * 0.25, focalLength + z2);
-  const depthScale = focalLength / distance;
+    const cy = Math.cos(yaw);
+    const sy = Math.sin(yaw);
+    x2 = x * cy + z1 * sy;
+    z2 = -x * sy + z1 * cy;
+  }
+
+  const distance = Math.max(fl * 0.25, fl + z2);
+  const depthScale = fl / distance;
   const normalizedDepth = normalizeDepthScale(depthScale);
 
   return {
@@ -189,14 +322,22 @@ export function projectGraph(
       z: worldPos.z - centroid.z,
     };
 
-    const projected = projectPoint3D(
-      localPos.x,
-      localPos.y,
-      localPos.z,
-      camera.yaw,
-      camera.pitch,
-      NETWORK_FOCAL_LENGTH
-    );
+    const projected = camera.orientation
+      ? projectPoint3D(
+          localPos.x,
+          localPos.y,
+          localPos.z,
+          camera.orientation,
+          NETWORK_FOCAL_LENGTH
+        )
+      : projectPoint3D(
+          localPos.x,
+          localPos.y,
+          localPos.z,
+          camera.yaw,
+          camera.pitch,
+          NETWORK_FOCAL_LENGTH
+        );
 
     const radius = computeNetworkVisualRadius(node, projected.depthScale, {
       entryNodeId: options?.entryNodeId,
@@ -545,6 +686,7 @@ export function computeOrbitRevealCamera(
   const targetPitch = clampPitch(Math.atan2(sgn * y, Math.max(1e-4, sgn * z)));
   const yzHypot = Math.hypot(y, z);
   const targetYaw = wrapRotationAngle(Math.atan2(-x, sgn * Math.max(1e-4, yzHypot)));
+  const targetOrientation = eulerToQuaternion(targetYaw, targetPitch);
 
   const insetLeft = insets?.left ?? 0;
   const insetRight = insets?.right ?? 0;
@@ -555,6 +697,7 @@ export function computeOrbitRevealCamera(
 
   return {
     ...currentCamera,
+    orientation: targetOrientation,
     yaw: targetYaw,
     pitch: targetPitch,
     panX: usableCenterX,
@@ -697,12 +840,16 @@ export function handleGesturePointerMove(
   }
 
   if (gesture.mode === 'rotating') {
+    const startCam = ensureCameraOrientation(gesture.startCamera);
+    const nextOrientation = rotateOrientationByScreenDelta(startCam.orientation!, dx, dy);
+    const { yaw: nextYaw, pitch: nextPitch } = quaternionToEuler(nextOrientation);
     return {
       gesture: nextGesture,
       camera: {
         ...currentCamera,
-        yaw: wrapRotationAngle(gesture.startCamera.yaw - dx * ROTATION_SENSITIVITY),
-        pitch: clampPitch(gesture.startCamera.pitch + dy * ROTATION_SENSITIVITY),
+        orientation: nextOrientation,
+        yaw: nextYaw,
+        pitch: nextPitch,
       },
     };
   }
@@ -722,14 +869,22 @@ export function handleGesturePointerMove(
 }
 
 export function resetGestureState(camera?: NetworkCamera): NetworkGestureState {
+  const cam = camera ? ensureCameraOrientation(camera) : undefined;
   return {
     active: false,
     mode: 'idle',
     startX: 0,
     startY: 0,
-    startCamera: camera
-      ? { ...camera }
-      : { yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH, panX: 0, panY: 0, zoom: DEFAULT_ZOOM },
+    startCamera: cam
+      ? { ...cam }
+      : {
+          orientation: DEFAULT_ORIENTATION,
+          yaw: DEFAULT_YAW,
+          pitch: DEFAULT_PITCH,
+          panX: 0,
+          panY: 0,
+          zoom: DEFAULT_ZOOM,
+        },
     pointerId: null,
     pointerType: 'mouse',
     exceededThreshold: false,
@@ -842,14 +997,21 @@ export function stepRotationalInertia(params: StepInertiaParams): StepInertiaRes
     };
   }
 
-  const nextYaw = wrapRotationAngle(camera.yaw - nextVx * deltaMs * rotationSensitivity);
-  const nextPitch = clampPitch(camera.pitch + nextVy * deltaMs * rotationSensitivity);
+  const cam = ensureCameraOrientation(camera);
+  const nextOrientation = rotateOrientationByScreenDelta(
+    cam.orientation!,
+    nextVx * deltaMs,
+    nextVy * deltaMs,
+    rotationSensitivity
+  );
+  const { yaw: nextYaw, pitch: nextPitch } = quaternionToEuler(nextOrientation);
 
   return {
     vx: nextVx,
     vy: nextVy,
     camera: {
       ...camera,
+      orientation: nextOrientation,
       yaw: nextYaw,
       pitch: nextPitch,
     },
@@ -958,8 +1120,8 @@ export function computeLabelPriorityScore(params: LabelPriorityParams): number {
 // 3D Camera-Relative Depth Shading & Theme Compositing
 // ============================================================================
 
-export const GRAPH_BACKGROUND_DARK = '#111113';
-export const GRAPH_BACKGROUND_LIGHT = '#fafaf9';
+export const GRAPH_BACKGROUND_DARK = '#090d16';
+export const GRAPH_BACKGROUND_LIGHT = '#f8fafc';
 
 export interface CameraDepthShadingOptions {
   isSelected?: boolean;
@@ -1077,9 +1239,9 @@ export function compositeDepthColor(
 ): string {
   const clampedProminence = Math.max(0, Math.min(1, Number.isFinite(prominence) ? prominence : 0.5));
   const isLight = theme === 'light';
-  const bgR = isLight ? 250 : 17;
-  const bgG = isLight ? 250 : 17;
-  const bgB = isLight ? 249 : 19;
+  const bgR = isLight ? 248 : 9;
+  const bgG = isLight ? 250 : 13;
+  const bgB = isLight ? 252 : 22;
 
   let hex = baseColorHex.trim();
   if (hex.startsWith('#')) {

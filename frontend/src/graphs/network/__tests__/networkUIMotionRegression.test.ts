@@ -7,6 +7,7 @@ import {
 import {
   PITCH_CLAMP_LIMIT,
   ROTATION_SENSITIVITY,
+  eulerToQuaternion,
   shouldDrawNodeLabel,
   calculateReleaseSpeed,
   shouldInitiateInertia,
@@ -478,9 +479,10 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
         expect(step.camera.yaw).toBeLessThanOrEqual(Math.PI);
       });
 
-      it('clamps pitch strictly within [-1.48, 1.48] to prevent upside-down pole inversion', () => {
+      it('allows unrestricted continuous rotation past poles without pitch clamping during inertia step', () => {
         const cameraNearNorthPole: NetworkCamera = {
           ...baseCamera,
+          orientation: eulerToQuaternion(0, PITCH_CLAMP_LIMIT - 0.01),
           pitch: PITCH_CLAMP_LIMIT - 0.01,
         };
 
@@ -492,7 +494,9 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           rotationSensitivity: ROTATION_SENSITIVITY,
         });
 
-        expect(step.camera.pitch).toBe(PITCH_CLAMP_LIMIT);
+        // Unrestricted rotation continues past the pole without artificial clamp freeze
+        expect(step.camera.orientation).toBeDefined();
+        expect(Number.isFinite(step.camera.pitch)).toBe(true);
       });
 
       it('guarantees panX, panY, and zoom are 100% untouched by rotational coasting', () => {

@@ -775,7 +775,7 @@ export const Inspector: React.FC<InspectorProps> = ({
         </div>
         <div key="overview" className="inspector-content animate-reveal">
           {/* Compact 4-stat metric strip */}
-          <div className="overview-metric-strip beginner-overview-card">
+          <div className="overview-metric-strip">
             <div className="overview-metric-item">
               <span className="overview-metric-value">{totalDiscovered}</span>
               <span className="overview-metric-label">Files</span>

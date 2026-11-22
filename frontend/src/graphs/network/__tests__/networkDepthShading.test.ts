@@ -163,13 +163,13 @@ describe('3D Camera-Relative Depth Shading Math Suite', () => {
 
     it('smoothly interpolates intermediate RGB channels at equator (prominence = 0.5)', () => {
       // cyan = rgb(56, 189, 248)
-      // graphite = rgb(17, 17, 19)
+      // obsidian background = rgb(9, 13, 22)
       // Expected halfway:
-      // R = round(56 * 0.5 + 17 * 0.5) = round(36.5) = 37 -> 0x25
-      // G = round(189 * 0.5 + 17 * 0.5) = round(103) = 103 -> 0x67
-      // B = round(248 * 0.5 + 19 * 0.5) = round(133.5) = 134 -> 0x86
+      // R = round(56 * 0.5 + 9 * 0.5) = round(32.5) = 33 -> 0x21
+      // G = round(189 * 0.5 + 13 * 0.5) = round(101) = 101 -> 0x65
+      // B = round(248 * 0.5 + 22 * 0.5) = round(135) = 135 -> 0x87
       const halfwayDark = compositeDepthColor(cyanBase, 0.5, 'dark');
-      expect(halfwayDark).toBe('#256786');
+      expect(halfwayDark).toBe('#216587');
     });
 
     it('handles 3-digit shorthand hex colors', () => {

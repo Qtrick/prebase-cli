@@ -27,14 +27,16 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 ## Features
 
 ### 1. Interactive Network Graphs (3D Overview & Contextual 2D Relationships)
-- **Rotatable 3D Dependency Orb**: Freely rotates in three dimensions around the volumetric center of the graph formation via primary background dragging.
+- **Unrestricted Continuous 3D Rotation**: Freely rotates in three dimensions with screen-relative quaternion orientation, operating continuously 360° across poles and inverted orientations with zero pitch lock.
+- **Native Graph Zoom Interception**: Wheel events and trackpad pinches are intercepted via non-passive listeners, zooming the visualization smoothly within `[0.15, 4.0]` while preventing browser-level page zoom.
+- **Floating Controls HUD**: Glassmorphic control strip for Zoom In (`#zoomIn`, `+`), Zoom Out (`#zoomOut`, `-`), Fit View (`#fitView`, `F`), Reset Camera (`#resetCam`, `R`), and Center-Lock toggle (`#centerLock`, `L`).
 - **Contextual 2D Relationship Explorer**: Focused 3-to-5 column deterministic neighborhood analysis oriented strictly by dependency direction (`Dependents (Left) -> Focus File (Center) -> Dependencies (Right)`).
 - **Depth & Direction Controls**: Toggle between 1-hop direct neighbors and 2-hop extended context; filter by Dependents-only, Dependencies-only, or Both.
 - **Direction-Aware Bézier Routing**: Curved spline paths with explicit directional arrowheads, visual encoding of relationship kinds (solid = runtime import, dashed = type-only, dotted = dynamic import, violet = export), and vertical clearance for mutual dependency cycles.
 - **Seamless Dual-Mode Switching**: Instant transitions via header switcher (`3D Overview | 2D Relationships`) or non-conflicting `V` key shortcut, preserving active selection and independent viewport cameras.
 - **Focus History Navigation**: Double-click or press Enter on any neighbor card to refocus the 2D neighborhood; navigate back through your exploration trail with the in-canvas `← Back` button.
 - **Safety Caps & Omission Stats**: Caps visible nodes (120) and edges (240) deterministically to ensure fast compute times on huge repositories, displaying truthful omission counts.
-- **Intuitive Camera Navigation**: Shift-drag or middle-click pans; wheel or trackpad delivers smooth, continuous cursor-anchored zoom.
+- **Intuitive Camera Navigation**: Shift-drag or middle-click pans; wheel or trackpad delivers smooth, continuous cursor-anchored zoom with rotational inertia.
 - **Decoupled Selection & Inspection**: Selecting a node or clicking search results updates selection, highlights incident relationships, and inspects metadata with 0ms camera jump.
 - **Visibility-Aware Reveal**: Explicit "Reveal in 3D" action in the Inspector smoothly centers offscreen nodes while strictly preserving camera orientation.
 - **Tree-sitter Parser**: Extracts ES imports, CommonJS requires, dynamic imports, re-exports, and TypeScript type-only imports across `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts`.

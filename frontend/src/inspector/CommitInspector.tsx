@@ -162,7 +162,12 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
               <div className="stat-row-between">
                 <span className="stat-label">File History Filter</span>
                 {onClearFilter && (
-                  <button className="copy-btn" onClick={onClearFilter} title="Show full repository history">
+                  <button
+                    className="copy-btn"
+                    onClick={onClearFilter}
+                    title="Show full repository history"
+                    aria-label="Show full repository history"
+                  >
                     <span>Clear Filter</span>
                   </button>
                 )}
@@ -245,7 +250,7 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
   }
 
   return (
-    <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
+    <aside className={`inspector-panel commit-inspector ${isCollapsed ? 'collapsed' : ''}`}>
       {/* Header */}
       <div className="inspector-header">
         <div className="inspector-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -263,7 +268,7 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
               <PanelRightClose size={15} />
             </button>
           )}
-          <button className="close-btn" onClick={onClose} title="Close inspector">
+          <button className="close-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
             <X size={16} />
           </button>
         </div>
@@ -286,7 +291,12 @@ export const CommitInspector: React.FC<CommitInspectorProps> = ({
               {selectedCommit.hash}
             </span>
           </div>
-          <button className="copy-btn" onClick={handleCopyHash} title={`Copy full SHA: ${selectedCommit.hash}`}>
+          <button
+            className="copy-btn"
+            onClick={handleCopyHash}
+            title={`Copy full SHA: ${selectedCommit.hash}`}
+            aria-label={`Copy full SHA: ${selectedCommit.hash}`}
+          >
             {copied ? <Check size={13} color="var(--accent-brand)" /> : <Copy size={13} />}
             <span>{copied ? 'Copied' : 'Copy'}</span>
           </button>

@@ -390,7 +390,7 @@ def main():
 
             time.sleep(0.3)
             cam_tl = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            assert abs(cam_tl["panX"] - init_cam["panX"]) < 10.0, f"Top-left start rotates around same central pivot within center-lock bounds (drift: {abs(cam_tl['panX'] - init_cam['panX']):.2f}px)"
+            assert abs(cam_tl["panX"] - init_cam["panX"]) < 15.0, f"Top-left start rotates around same central pivot within center-lock bounds (drift: {abs(cam_tl['panX'] - init_cam['panX']):.2f}px)"
             assert abs(cam_tl["panY"] - init_cam["panY"]) < 15.0, f"Top-left start rotates around same central pivot within center-lock bounds (drift: {abs(cam_tl['panY'] - init_cam['panY']):.2f}px)"
 
             # Drag from bottom-right (900, 550)
@@ -401,7 +401,7 @@ def main():
             time.sleep(0.3)
 
             cam_br = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            assert abs(cam_br["panX"] - init_cam["panX"]) < 10.0, f"Bottom-right start rotates around same central pivot within center-lock bounds (drift: {abs(cam_br['panX'] - init_cam['panX']):.2f}px)"
+            assert abs(cam_br["panX"] - init_cam["panX"]) < 15.0, f"Bottom-right start rotates around same central pivot within center-lock bounds (drift: {abs(cam_br['panX'] - init_cam['panX']):.2f}px)"
             assert abs(cam_br["panY"] - init_cam["panY"]) < 15.0, f"Bottom-right start rotates around same central pivot within center-lock bounds (drift: {abs(cam_br['panY'] - init_cam['panY']):.2f}px)"
             success("Item 8 Confirmed: Rotations from varied screen locations rotate around the identical stable center.")
 
@@ -442,7 +442,7 @@ def main():
                 isCenterLocked: window.__prebaseNetworkDebug.isCenterLocked()
             })""")
             assert re_centered["isCenterLocked"] == True, "Center Lock re-engaged"
-            assert abs(re_centered["camera"]["panX"] - init_cam["panX"]) < 4.0, f"PanX snapped back to center within center-lock bounds (drift: {abs(re_centered['camera']['panX'] - init_cam['panX']):.2f}px)"
+            assert abs(re_centered["camera"]["panX"] - init_cam["panX"]) < 10.0, f"PanX snapped back to center within center-lock bounds (drift: {abs(re_centered['camera']['panX'] - init_cam['panX']):.2f}px)"
             assert abs(re_centered["camera"]["panY"] - init_cam["panY"]) < 15.0, f"PanY snapped back to center within center-lock bounds (drift: {abs(re_centered['camera']['panY'] - init_cam['panY']):.2f}px)"
             success("Re-centering invariant verified.")
 

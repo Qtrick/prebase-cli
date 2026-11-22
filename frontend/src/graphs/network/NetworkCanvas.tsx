@@ -11,16 +11,14 @@ import { processSnapshotRevision } from './layout/snapshotRevision';
 import {
   DEFAULT_YAW,
   DEFAULT_PITCH,
+  DEFAULT_ORIENTATION,
   MIN_ZOOM,
   MAX_ZOOM,
   DEFAULT_ZOOM,
-  ROTATION_SENSITIVITY,
   PAN_SENSITIVITY,
   GESTURE_THRESHOLD_MOUSE,
   GESTURE_THRESHOLD_PEN,
   GESTURE_THRESHOLD_TOUCH,
-  wrapRotationAngle,
-  clampPitch,
   computeGraphCentroid,
   projectGraph,
   computeNetworkFitTransform,
@@ -38,6 +36,11 @@ import {
   shouldInitiateInertia,
   clampLaunchVelocity,
   stepRotationalInertia,
+  rotateOrientationByScreenDelta,
+  quaternionToEuler,
+  quaternionSlerp,
+  computeQuaternionToFacePoint,
+  ensureCameraOrientation,
   LabelCollisionGrid,
   computeLabelPriorityScore,
   ScreenRect,
@@ -77,6 +80,8 @@ interface NetworkCanvasProps {
   revealRequest?: RevealRequest | null;
   fitViewTrigger?: number;
   resetViewTrigger?: number;
+  zoomInTrigger?: number;
+  zoomOutTrigger?: number;
   keepGraphCentered?: boolean;
   onToggleCenterLock?: () => void;
   isVisible?: boolean;
@@ -106,6 +111,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   revealRequest,
   fitViewTrigger,
   resetViewTrigger,
+  zoomInTrigger,
+  zoomOutTrigger,
   keepGraphCentered = true,
   onToggleCenterLock,
   isVisible = true,
@@ -141,6 +148,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
   // Authoritative Camera ref (eliminates React re-render churn during 60fps dragging)
   const cameraRef = useRef<NetworkCamera>({
+    orientation: DEFAULT_ORIENTATION,
     yaw: DEFAULT_YAW,
     pitch: DEFAULT_PITCH,
     panX: 400,
@@ -342,6 +350,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   // Handle external Fit View trigger (preserves current yaw and pitch!)
   useEffect(() => {
     if (fitViewTrigger && fitViewTrigger > 0 && containerRef.current && positions.size > 0) {
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
       const width = containerRef.current.clientWidth || 800;
       const height = containerRef.current.clientHeight || 600;
 
@@ -379,10 +391,15 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   // Handle external Reset View trigger (restores standard yaw & pitch, and fits to viewport)
   useEffect(() => {
     if (resetViewTrigger && resetViewTrigger > 0 && containerRef.current && positions.size > 0) {
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
       const width = containerRef.current.clientWidth || 800;
       const height = containerRef.current.clientHeight || 600;
 
       const resetCam: NetworkCamera = {
+        orientation: DEFAULT_ORIENTATION,
         yaw: DEFAULT_YAW,
         pitch: DEFAULT_PITCH,
         panX: width / 2,
@@ -394,6 +411,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const fit = computeNetworkFitTransform(proj.bounds, width, height, insets);
 
       const targetCamera: NetworkCamera = {
+        orientation: DEFAULT_ORIENTATION,
         yaw: DEFAULT_YAW,
         pitch: DEFAULT_PITCH,
         panX: fit.panX,
@@ -417,9 +435,61 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     }
   }, [resetViewTrigger, snapshot, positions, insets, prefersReducedMotion, onAnnounce, requestRender]);
 
+  // Handle external Zoom In trigger
+  useEffect(() => {
+    if (zoomInTrigger && zoomInTrigger > 0 && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      cameraAnimRef.current = null;
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
+      cameraRef.current = applyZoomAroundCenter(
+        cameraRef.current,
+        1.25,
+        width,
+        height,
+        insets,
+        MIN_ZOOM,
+        MAX_ZOOM
+      );
+      requestRender();
+      onAnnounce?.('Zoomed in');
+    }
+  }, [zoomInTrigger, insets, onAnnounce, requestRender]);
+
+  // Handle external Zoom Out trigger
+  useEffect(() => {
+    if (zoomOutTrigger && zoomOutTrigger > 0 && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      cameraAnimRef.current = null;
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
+      cameraRef.current = applyZoomAroundCenter(
+        cameraRef.current,
+        0.8,
+        width,
+        height,
+        insets,
+        MIN_ZOOM,
+        MAX_ZOOM
+      );
+      requestRender();
+      onAnnounce?.('Zoomed out');
+    }
+  }, [zoomOutTrigger, insets, onAnnounce, requestRender]);
+
   // Handle explicit Reveal / Focus request (visibility-aware; preserves yaw & pitch)
   useEffect(() => {
     if (!revealRequest || !containerRef.current) return;
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
     const { nodeId, onlyIfOutside } = revealRequest;
 
     const projData = projectedDataRef.current;
@@ -447,15 +517,14 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return;
     }
 
-    const cur = cameraRef.current;
+    const cur = ensureCameraOrientation(cameraRef.current);
     const localPos = projectedNode.localPos;
     // Orbit to Node: smoothly rotate 3D orb around its stable center until the node faces front
-    const sgn = localPos.z >= 0 ? 1 : -1;
-    const targetPitch = clampPitch(Math.atan2(sgn * localPos.y, Math.max(1e-4, sgn * localPos.z)));
-    const yzHypot = Math.hypot(localPos.y, localPos.z);
-    const targetYaw = wrapRotationAngle(Math.atan2(-localPos.x, sgn * Math.max(1e-4, yzHypot)));
+    const targetOrientation = computeQuaternionToFacePoint(localPos);
+    const { yaw: targetYaw, pitch: targetPitch } = quaternionToEuler(targetOrientation);
 
     const targetCamera: NetworkCamera = {
+      orientation: targetOrientation,
       yaw: targetYaw,
       pitch: targetPitch,
       panX: cur.panX,
@@ -543,9 +612,15 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         const progress = Math.min(1.0, elapsed / anim.durationMs);
         const t = 1 - Math.pow(1 - progress, 3); // ease-out cubic
 
+        const startCam = ensureCameraOrientation(anim.startCamera);
+        const targetCam = ensureCameraOrientation(anim.targetCamera);
+        const orientation = quaternionSlerp(startCam.orientation!, targetCam.orientation!, t);
+        const { yaw, pitch } = quaternionToEuler(orientation);
+
         cameraRef.current = {
-          yaw: anim.startCamera.yaw + (anim.targetCamera.yaw - anim.startCamera.yaw) * t,
-          pitch: anim.startCamera.pitch + (anim.targetCamera.pitch - anim.startCamera.pitch) * t,
+          orientation,
+          yaw,
+          pitch,
           panX: anim.startCamera.panX + (anim.targetCamera.panX - anim.startCamera.panX) * t,
           panY: anim.startCamera.panY + (anim.targetCamera.panY - anim.startCamera.panY) * t,
           zoom: anim.startCamera.zoom + (anim.targetCamera.zoom - anim.startCamera.zoom) * t,
@@ -732,29 +807,29 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           );
 
           ctx.save();
-          // Attenuate alpha based on camera-relative depth: front nodes 1.0, rear nodes 0.42
-          const depthAlpha = 0.42 + 0.58 * depthShading.depth;
-          ctx.globalAlpha = isDimmed ? 0.16 : depthAlpha;
+          // Attenuate alpha based on camera-relative depth: front nodes 1.0, rear nodes 0.45
+          const depthAlpha = 0.45 + 0.55 * depthShading.depth;
+          ctx.globalAlpha = isDimmed ? 0.16 : (isSelected || isHovered || isHighlighted ? 1.0 : depthAlpha);
 
           const isLight = theme === 'light';
 
-          // Selection / Hover / Highlight outer ring with restrained palette
+          // Selection / Hover / Highlight outer ring with electric indigo palette
           if (isSelected || isHighlighted) {
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 5.5, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? 'rgba(53, 111, 103, 0.35)' : 'rgba(121, 169, 160, 0.35)';
+            ctx.strokeStyle = isLight ? 'rgba(79, 70, 229, 0.35)' : 'rgba(99, 102, 241, 0.40)';
             ctx.lineWidth = 3.0;
             ctx.stroke();
 
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 2.5, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#356f67' : '#79a9a0';
+            ctx.strokeStyle = isLight ? '#4f46e5' : '#818cf8';
             ctx.lineWidth = 2.0;
             ctx.stroke();
           } else if (isHovered) {
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 3, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#55555d' : '#a1a1aa';
+            ctx.strokeStyle = isLight ? '#64748b' : '#cbd5e1';
             ctx.lineWidth = 1.8;
             ctx.stroke();
           }
@@ -771,10 +846,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.fill();
 
           ctx.strokeStyle = isSelected
-            ? (isLight ? '#356f67' : '#79a9a0')
+            ? (isLight ? '#4f46e5' : '#818cf8')
             : isHovered
-              ? (isLight ? '#202023' : '#ededef')
-              : (isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(17, 17, 19, 0.85)');
+              ? (isLight ? '#0f172a' : '#f8fafc')
+              : (isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(9, 13, 22, 0.85)');
           ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
           ctx.stroke();
           ctx.restore();
@@ -1115,9 +1190,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
 
         if (gesture.mode === 'rotating') {
-          // Natural rotation: drag right rotates yaw negatively, drag down rotates pitch positively
-          const newYaw = wrapRotationAngle(gesture.startCamera.yaw - dx * ROTATION_SENSITIVITY);
-          const newPitch = clampPitch(gesture.startCamera.pitch + dy * ROTATION_SENSITIVITY);
+          // Unrestricted screen-relative continuous 3D rotation (quaternion orientation)
+          const startCam = ensureCameraOrientation(gesture.startCamera);
+          const newOrientation = rotateOrientationByScreenDelta(startCam.orientation!, dx, dy);
+          const { yaw: newYaw, pitch: newPitch } = quaternionToEuler(newOrientation);
+          cameraRef.current.orientation = newOrientation;
           cameraRef.current.yaw = newYaw;
           cameraRef.current.pitch = newPitch;
           if (keepGraphCentered) {
@@ -1174,6 +1251,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const handlePointerUp = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
     const wasDragging = gesture.exceededThreshold;
+    const previousMode = gesture.mode;
 
     cleanUpPointerGesture(e);
 
@@ -1197,7 +1275,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           onSelectEdge(null);
         }
       }
-    } else if (gesture.mode === 'rotating') {
+    } else if (previousMode === 'rotating') {
       // Natural interruptible rotational inertia upon release
       const now = performance.now();
       const timeSinceLastMove = now - lastPointerTimeRef.current;
@@ -1260,51 +1338,72 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     return () => window.removeEventListener('blur', handleBlur);
   }, [cleanUpPointerGesture]);
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
+  const applyWheelZoom = useCallback(
+    (e: { clientX: number; clientY: number; deltaY: number; deltaMode: number; ctrlKey: boolean }) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      if (inertiaRafRef.current !== null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
+      if (!hasInteracted) setHasInteracted(true);
+
+      const rect = canvas.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+
+      const normDelta = normalizeWheelZoomDelta({
+        deltaY: e.deltaY,
+        deltaMode: e.deltaMode,
+        ctrlKey: e.ctrlKey,
+      });
+      const factor = computeContinuousZoomFactor(normDelta);
+
+      cameraAnimRef.current = null;
+      if (keepGraphCentered) {
+        cameraRef.current = applyZoomAroundCenter(
+          cameraRef.current,
+          factor,
+          rect.width,
+          rect.height,
+          insets,
+          MIN_ZOOM,
+          MAX_ZOOM
+        );
+      } else {
+        cameraRef.current = applyZoomAroundCursor(
+          cameraRef.current,
+          factor,
+          cursorX,
+          cursorY,
+          MIN_ZOOM,
+          MAX_ZOOM
+        );
+      }
+      requestRender();
+    },
+    [hasInteracted, keepGraphCentered, insets, requestRender]
+  );
+
+  // Directly attached native non-passive wheel listener: guarantees synchronous cancellation
+  // of default browser zoom gestures (including trackpad pinch where e.ctrlKey === true)
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    if (inertiaRafRef.current !== null) {
-      cancelAnimationFrame(inertiaRafRef.current);
-      inertiaRafRef.current = null;
-    }
-    if (!hasInteracted) setHasInteracted(true);
+    const onNativeWheel = (e: WheelEvent) => {
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      applyWheelZoom(e);
+    };
 
-    const rect = canvas.getBoundingClientRect();
-    const cursorX = e.clientX - rect.left;
-    const cursorY = e.clientY - rect.top;
-
-    const normDelta = normalizeWheelZoomDelta({
-      deltaY: e.deltaY,
-      deltaMode: e.deltaMode,
-      ctrlKey: e.ctrlKey,
-    });
-    const factor = computeContinuousZoomFactor(normDelta);
-
-    cameraAnimRef.current = null;
-    if (keepGraphCentered) {
-      cameraRef.current = applyZoomAroundCenter(
-        cameraRef.current,
-        factor,
-        rect.width,
-        rect.height,
-        insets,
-        MIN_ZOOM,
-        MAX_ZOOM
-      );
-    } else {
-      cameraRef.current = applyZoomAroundCursor(
-        cameraRef.current,
-        factor,
-        cursorX,
-        cursorY,
-        MIN_ZOOM,
-        MAX_ZOOM
-      );
-    }
-    requestRender();
-  };
+    canvas.addEventListener('wheel', onNativeWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', onNativeWheel);
+    };
+  }, [applyWheelZoom]);
 
   // Keyboard accessibility
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1332,7 +1431,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         }
         cur.panX -= 30;
       } else {
-        cur.yaw = wrapRotationAngle(cur.yaw + 0.05);
+        const curCam = ensureCameraOrientation(cur);
+        const nextOrientation = rotateOrientationByScreenDelta(curCam.orientation!, 10, 0);
+        const { yaw, pitch } = quaternionToEuler(nextOrientation);
+        cur.orientation = nextOrientation;
+        cur.yaw = yaw;
+        cur.pitch = pitch;
         if (keepGraphCentered) {
           applyCenterLock(true);
         }
@@ -1348,7 +1452,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         }
         cur.panX += 30;
       } else {
-        cur.yaw = wrapRotationAngle(cur.yaw - 0.05);
+        const curCam = ensureCameraOrientation(cur);
+        const nextOrientation = rotateOrientationByScreenDelta(curCam.orientation!, -10, 0);
+        const { yaw, pitch } = quaternionToEuler(nextOrientation);
+        cur.orientation = nextOrientation;
+        cur.yaw = yaw;
+        cur.pitch = pitch;
         if (keepGraphCentered) {
           applyCenterLock(true);
         }
@@ -1364,7 +1473,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         }
         cur.panY -= 30;
       } else {
-        cur.pitch = clampPitch(cur.pitch - 0.05);
+        const curCam = ensureCameraOrientation(cur);
+        const nextOrientation = rotateOrientationByScreenDelta(curCam.orientation!, 0, -10);
+        const { yaw, pitch } = quaternionToEuler(nextOrientation);
+        cur.orientation = nextOrientation;
+        cur.yaw = yaw;
+        cur.pitch = pitch;
         if (keepGraphCentered) {
           applyCenterLock(true);
         }
@@ -1380,7 +1494,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         }
         cur.panY += 30;
       } else {
-        cur.pitch = clampPitch(cur.pitch + 0.05);
+        const curCam = ensureCameraOrientation(cur);
+        const nextOrientation = rotateOrientationByScreenDelta(curCam.orientation!, 0, 10);
+        const { yaw, pitch } = quaternionToEuler(nextOrientation);
+        cur.orientation = nextOrientation;
+        cur.yaw = yaw;
+        cur.pitch = pitch;
         if (keepGraphCentered) {
           applyCenterLock(true);
         }
@@ -1449,7 +1568,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         onPointerCancel={handlePointerCancel}
         onPointerLeave={() => hoverControllerRef.current?.handlePointerLeaveCanvas()}
         onLostPointerCapture={handleLostPointerCapture}
-        onWheel={handleWheel}
         onKeyDown={handleKeyDown}
       />
 

@@ -182,7 +182,10 @@ export interface Transform {
   k: number;
 }
 
+export type Quaternion = [number, number, number, number]; // [x, y, z, w]
+
 export interface NetworkCamera {
+  orientation?: Quaternion;
   yaw: number;
   pitch: number;
   panX: number;

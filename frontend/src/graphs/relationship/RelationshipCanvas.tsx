@@ -81,6 +81,8 @@ interface RelationshipCanvasProps {
   backTargetName?: string | null;
   fitViewTrigger?: number;
   resetViewTrigger?: number;
+  zoomInTrigger?: number;
+  zoomOutTrigger?: number;
   initialViewport?: Viewport2D;
   onViewportChange?: (viewport: Viewport2D) => void;
   missingFocusPath?: string | null;
@@ -144,6 +146,8 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   backTargetName = null,
   fitViewTrigger = 0,
   resetViewTrigger = 0,
+  zoomInTrigger = 0,
+  zoomOutTrigger = 0,
   initialViewport,
   onViewportChange,
   missingFocusPath = null,
@@ -170,6 +174,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   // Track dragging state & active pointer
   const isDraggingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
+  const pointerTargetRef = useRef<HTMLElement | null>(null);
   const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const hasDraggedRef = useRef(false);
 
@@ -798,13 +803,17 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   );
 
   const cleanUpPointerGesture = useCallback((e?: React.PointerEvent<HTMLCanvasElement>) => {
-    if (e && activePointerIdRef.current === e.pointerId) {
+    const target = (e?.target as HTMLElement) || pointerTargetRef.current;
+    if (target && activePointerIdRef.current !== null) {
       try {
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+        if (target.hasPointerCapture(activePointerIdRef.current)) {
+          target.releasePointerCapture(activePointerIdRef.current);
+        }
       } catch {
         // ignored
       }
     }
+    pointerTargetRef.current = null;
     isDraggingRef.current = false;
     activePointerIdRef.current = null;
     hoverControllerRef.current?.handleGestureEnd();
@@ -817,6 +826,7 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     isDraggingRef.current = true;
     hasDraggedRef.current = false;
     activePointerIdRef.current = e.pointerId;
+    pointerTargetRef.current = e.target as HTMLElement;
     hoverControllerRef.current?.handleGestureStart();
     dragStartRef.current = {
       x: e.clientX,
@@ -933,12 +943,11 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   // Window blur / visibility cleanup
   useEffect(() => {
     const handleBlur = () => {
-      isDraggingRef.current = false;
-      activePointerIdRef.current = null;
+      cleanUpPointerGesture();
     };
     window.addEventListener('blur', handleBlur);
     return () => window.removeEventListener('blur', handleBlur);
-  }, []);
+  }, [cleanUpPointerGesture]);
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -957,10 +966,11 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     [screenToWorld, findNodeAt, onRefocusNode, onAnnounce]
   );
 
-  const handleWheel = useCallback(
-    (e: React.WheelEvent<HTMLCanvasElement>) => {
-      e.preventDefault();
-      const rect = e.currentTarget.getBoundingClientRect();
+  const applyWheelZoom = useCallback(
+    (e: { clientX: number; clientY: number; deltaY: number }) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
       const mouseY = e.clientY - rect.top;
 
@@ -979,6 +989,59 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     },
     [onViewportChange, requestRender]
   );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onNativeWheel = (e: WheelEvent) => {
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      applyWheelZoom(e);
+    };
+
+    canvas.addEventListener('wheel', onNativeWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', onNativeWheel);
+    };
+  }, [applyWheelZoom]);
+
+  useEffect(() => {
+    if (zoomInTrigger && zoomInTrigger > 0 && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      const cur = viewportRef.current;
+      const nextZoom = Math.min(2.5, Math.max(0.15, cur.zoom * 1.25));
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const nextPanX = centerX - (centerX - cur.panX) * (nextZoom / cur.zoom);
+      const nextPanY = centerY - (centerY - cur.panY) * (nextZoom / cur.zoom);
+      const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
+      hasUserAdjustedViewRef.current = true;
+      setViewport(next);
+      onViewportChange?.(next);
+      requestRender();
+    }
+  }, [zoomInTrigger, onViewportChange, requestRender]);
+
+  useEffect(() => {
+    if (zoomOutTrigger && zoomOutTrigger > 0 && containerRef.current) {
+      const width = containerRef.current.clientWidth || 800;
+      const height = containerRef.current.clientHeight || 600;
+      const cur = viewportRef.current;
+      const nextZoom = Math.min(2.5, Math.max(0.15, cur.zoom * 0.8));
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const nextPanX = centerX - (centerX - cur.panX) * (nextZoom / cur.zoom);
+      const nextPanY = centerY - (centerY - cur.panY) * (nextZoom / cur.zoom);
+      const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
+      hasUserAdjustedViewRef.current = true;
+      setViewport(next);
+      onViewportChange?.(next);
+      requestRender();
+    }
+  }, [zoomOutTrigger, onViewportChange, requestRender]);
 
   // Keyboard navigation & accessibility (strictly avoids WCAG 2.1.2 Tab traps)
   const handleKeyDown = useCallback(
@@ -1308,7 +1371,6 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         onPointerLeave={() => hoverControllerRef.current?.handlePointerLeaveCanvas()}
         onLostPointerCapture={cleanUpPointerGesture}
         onDoubleClick={handleDoubleClick}
-        onWheel={handleWheel}
       />
     </div>
   );

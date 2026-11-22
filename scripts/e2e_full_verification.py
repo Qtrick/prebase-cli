@@ -321,7 +321,7 @@ def main():
                     try:
                         page.goto(f"{base_url}/?view=network", wait_until="domcontentloaded", timeout=15000)
                         page.wait_for_selector("#root", timeout=10000)
-                        page.wait_for_selector(".nav-item:has-text('Network Graph')", timeout=10000)
+                        page.wait_for_selector(".nav-item:has-text('Network')", timeout=10000)
                     except Exception as e:
                         try:
                             fail_shot = os.path.join(FAILURE_ARTIFACT_DIR, "e2e_full_nav_failure.png")
@@ -333,7 +333,7 @@ def main():
                     dom_output = page.content()
                     assert "root" in dom_output, "DOM output missing #root element"
                     assert "PreBase" in dom_output, "DOM output missing PreBase title"
-                    assert "Network Graph" in dom_output, "DOM output missing Network Graph tab"
+                    assert "Network" in dom_output, "DOM output missing Network tab"
                     browser.close()
                 success("Browser rendered web UI cleanly with expected DOM components and session cookie.")
             except ImportError:

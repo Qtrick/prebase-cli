@@ -54,6 +54,8 @@ import {
   SlidersHorizontal,
   ChevronDown,
   Check,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import './App.css';
 
@@ -248,9 +250,11 @@ export const App: React.FC = () => {
 
   const coordinator = defaultNetworkCoordinator;
 
-  // View triggers (true bounding box fit view & reset view)
+  // View triggers (true bounding box fit view & reset view & zoom)
   const [fitViewCounter, setFitViewCounter] = useState(0);
   const [resetViewCounter, setResetViewCounter] = useState(0);
+  const [zoomInCounter, setZoomInCounter] = useState(0);
+  const [zoomOutCounter, setZoomOutCounter] = useState(0);
 
   // Viewport insets (header floating at top 64px, margins)
   const networkInsets = useMemo<ViewportInsets>(() => ({
@@ -1088,30 +1092,33 @@ export const App: React.FC = () => {
               className="theme-toggle-btn"
               onClick={toggleTheme}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
-              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
             </button>
             <span className="brand-version">v0.1</span>
           </div>
         </div>
 
-        <div className="repo-badge">
-          <FolderGit2 size={16} className="repo-icon" />
-          <div className="repo-meta">
-            <span className="repo-title">{repoInfo?.repository_name || 'Loading...'}</span>
-            <span className="repo-path mono">{repoInfo?.repository_root_display || ''}</span>
+        {/* Unified Repository & Branch Context Card */}
+        <div className="repo-badge repo-identity-card">
+          <div className="repo-identity-main">
+            <FolderGit2 size={15} className="repo-icon" />
+            <div className="repo-meta">
+              <span className="repo-title">{repoInfo?.repository_name || 'Loading...'}</span>
+              <span className="repo-path mono">{repoInfo?.repository_root_display || ''}</span>
+            </div>
           </div>
+          {gitStatus?.branch && (
+            <div className="git-branch-badge repo-branch-pill">
+              <GitBranch size={12} className="branch-icon" />
+              <span className="mono">{gitStatus.branch}</span>
+              {gitStatus.is_dirty && <span className="dirty-dot" title="Working tree has uncommitted changes" />}
+            </div>
+          )}
         </div>
 
-        {gitStatus?.branch && (
-          <div className="git-branch-badge">
-            <GitBranch size={13} color="#818cf8" />
-            <span className="mono">{gitStatus.branch}</span>
-            {gitStatus.is_dirty && <span className="dirty-dot" title="Working tree has uncommitted changes" />}
-          </div>
-        )}
-
-        <nav className="nav-menu">
+        <nav className="nav-menu" aria-label="Main Navigation">
           <button
             className={`nav-item ${activeTab === 'network' ? 'active' : ''}`}
             onClick={() => setActiveTab('network')}
@@ -1324,6 +1331,42 @@ export const App: React.FC = () => {
               </div>
 
               <div className="view-controls">
+                <button
+                  id="zoomIn"
+                  className="ctrl-btn icon-only"
+                  onClick={() => setZoomInCounter((c) => c + 1)}
+                  title="Zoom In (Shortcut: +)"
+                  aria-label="Zoom in"
+                >
+                  <ZoomIn size={14} />
+                </button>
+                <button
+                  id="zoomOut"
+                  className="ctrl-btn icon-only"
+                  onClick={() => setZoomOutCounter((c) => c + 1)}
+                  title="Zoom Out (Shortcut: -)"
+                  aria-label="Zoom out"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <button
+                  id="fitView"
+                  className="ctrl-btn icon-only"
+                  onClick={() => setFitViewCounter((c) => c + 1)}
+                  title={networkViewMode === '2d' ? 'Fit 2D Relationship View (Shortcut: F)' : 'Fit View to All Nodes (Shortcut: F)'}
+                  aria-label="Fit view"
+                >
+                  <Maximize2 size={14} />
+                </button>
+                <button
+                  id="resetCam"
+                  className="ctrl-btn icon-only"
+                  onClick={() => setResetViewCounter((c) => c + 1)}
+                  title={networkViewMode === '2d' ? 'Reset 2D Camera (Shortcut: R)' : 'Reset Camera to Standard 3D View (Shortcut: R)'}
+                  aria-label="Reset camera"
+                >
+                  <RotateCcw size={14} />
+                </button>
                 {networkViewMode === '3d' && (
                   <button
                     id="centerLock"
@@ -1347,44 +1390,15 @@ export const App: React.FC = () => {
                   <button
                     className="ctrl-btn icon-only"
                     onClick={() => setIsViewMenuOpen((prev) => !prev)}
-                    title="View options and utilities"
+                    title="Export & view utilities"
                     aria-haspopup="menu"
                     aria-expanded={isViewMenuOpen}
-                    aria-label="View options"
+                    aria-label="More view options"
                   >
                     <SlidersHorizontal size={14} />
                   </button>
                   {isViewMenuOpen && (
                     <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
-                      <button
-                        id="fitView"
-                        className="menu-item"
-                        role="menuitem"
-                        onClick={() => {
-                          setFitViewCounter((c) => c + 1);
-                          setIsViewMenuOpen(false);
-                        }}
-                        title={networkViewMode === '2d' ? 'Fit 2D Relationship View (Shortcut: F)' : 'Fit View to All Nodes (Shortcut: F)'}
-                      >
-                        <Maximize2 size={13} />
-                        <span>Fit View</span>
-                        <span className="menu-shortcut">F</span>
-                      </button>
-                      <button
-                        id="resetCam"
-                        className="menu-item"
-                        role="menuitem"
-                        onClick={() => {
-                          setResetViewCounter((c) => c + 1);
-                          setIsViewMenuOpen(false);
-                        }}
-                        title={networkViewMode === '2d' ? 'Reset 2D Camera (Shortcut: R)' : 'Reset Camera to Standard 3D View (Shortcut: R)'}
-                      >
-                        <RotateCcw size={13} />
-                        <span>Reset View</span>
-                        <span className="menu-shortcut">R</span>
-                      </button>
-                      <div className="menu-divider" />
                       <button
                         id="exportPNG"
                         className="menu-item"
@@ -1427,6 +1441,7 @@ export const App: React.FC = () => {
               className="clear-filter-btn"
               onClick={() => setTemporalFilterPath(null)}
               title="Clear file filter"
+              aria-label="Clear file filter and show all commit history"
             >
               <X size={13} />
               <span>Show All History</span>
@@ -1484,6 +1499,8 @@ export const App: React.FC = () => {
                       revealRequest={revealRequest}
                       fitViewTrigger={fitViewCounter}
                       resetViewTrigger={resetViewCounter}
+                      zoomInTrigger={zoomInCounter}
+                      zoomOutTrigger={zoomOutCounter}
                       keepGraphCentered={keepGraphCentered}
                       onToggleCenterLock={() => setKeepGraphCentered((prev) => !prev)}
                       isVisible={networkViewMode === '3d'}
@@ -1510,6 +1527,8 @@ export const App: React.FC = () => {
                       backTargetName={resolveBackTargetName(focusHistory, snapshot.nodes)}
                       fitViewTrigger={fitViewCounter}
                       resetViewTrigger={resetViewCounter}
+                      zoomInTrigger={zoomInCounter}
+                      zoomOutTrigger={zoomOutCounter}
                       initialViewport={independent2DViewport}
                       onViewportChange={setIndependent2DViewport}
                       missingFocusPath={missingFocusPath}

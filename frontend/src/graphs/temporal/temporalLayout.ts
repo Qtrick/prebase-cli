@@ -33,13 +33,13 @@ export interface TemporalGraphLayout {
 }
 
 export const LANE_COLORS = [
-  '#79a9a0', // restrained sage / slate (main trunk)
-  '#818cf8', // soft indigo
-  '#d97706', // warm amber
-  '#e11d48', // rose
+  '#6366f1', // electric indigo (main trunk)
+  '#06b6d4', // cyan
+  '#f59e0b', // warm amber
+  '#f43f5e', // rose
   '#10b981', // emerald
   '#8b5cf6', // violet
-  '#0284c7', // sky
+  '#38bdf8', // sky
   '#f97316', // orange
 ];
 

@@ -214,7 +214,7 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
         ctx.beginPath();
         ctx.arc(item.x, item.y, radius + 4, 0, Math.PI * 2);
         ctx.strokeStyle = isSelected
-          ? (isLight ? '#356f67' : '#79a9a0')
+          ? (isLight ? '#4f46e5' : '#818cf8')
           : (isLight ? 'rgba(0, 0, 0, 0.15)' : 'rgba(255, 255, 255, 0.2)');
         ctx.lineWidth = 1.5;
         ctx.stroke();
@@ -223,10 +223,10 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       // Inner circle
       ctx.beginPath();
       ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? (isLight ? '#356f67' : '#79a9a0') : color;
+      ctx.fillStyle = isSelected ? (isLight ? '#4f46e5' : '#818cf8') : color;
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = isLight ? '#ffffff' : '#171719';
+      ctx.strokeStyle = isLight ? '#ffffff' : '#0e1526';
       ctx.stroke();
 
       // 3. Draw text and badges on the right side of the lanes
@@ -237,11 +237,11 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
       const badgeY = item.y - badgeHeight / 2;
 
       ctx.fillStyle = isSelected
-        ? (isLight ? 'rgba(53, 111, 103, 0.12)' : 'rgba(121, 169, 160, 0.15)')
-        : (isLight ? '#f4f4f3' : '#1e1e21');
+        ? (isLight ? 'rgba(79, 70, 229, 0.12)' : 'rgba(99, 102, 241, 0.20)')
+        : (isLight ? '#f1f5f9' : '#141d33');
       ctx.strokeStyle = isSelected
-        ? (isLight ? 'rgba(53, 111, 103, 0.4)' : 'rgba(121, 169, 160, 0.4)')
-        : (isLight ? '#e5e5e2' : '#2e2e32');
+        ? (isLight ? 'rgba(79, 70, 229, 0.5)' : 'rgba(99, 102, 241, 0.55)')
+        : (isLight ? '#e2e8f0' : '#232f48');
       ctx.lineWidth = 1;
       roundRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 4);
       ctx.fill();
@@ -249,8 +249,8 @@ export const TemporalCanvas: React.FC<TemporalCanvasProps> = ({
 
       ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
       ctx.fillStyle = isSelected
-        ? (isLight ? '#356f67' : '#79a9a0')
-        : (isLight ? '#55555d' : '#a1a1aa');
+        ? (isLight ? '#4f46e5' : '#818cf8')
+        : (isLight ? '#334155' : '#94a3b8');
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       ctx.fillText(item.commit.short_hash, badgeX + badgeWidth / 2, item.y);
