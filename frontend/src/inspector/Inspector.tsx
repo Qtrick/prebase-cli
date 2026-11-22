@@ -9,13 +9,14 @@ import {
   GraphSnapshot,
 } from '../types/graph';
 import { api } from '../transport/api';
-import { getFileTypeColor, ENTRY_NODE_COLOR } from '../graphs/network/fileTypeColors';
+import { getFileTypeColor, getAreaColor, ENTRY_NODE_COLOR } from '../graphs/network/fileTypeColors';
 import {
   deriveRepositoryStructure,
   getAreaIdForPath,
   AreaEdge,
   AreaEdgeContributingFilePair,
 } from '../utils/repositoryAreas';
+import { computeAreaMonograms } from '../utils/monogramDisambiguation';
 import { useCopyFeedback } from '../utils/clipboard';
 import { PathExplorer } from './PathExplorer';
 import { CycleGroupInspector } from './CycleGroupInspector';
@@ -76,6 +77,7 @@ interface InspectorProps {
   onSwitchTo3D?: () => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+  theme?: 'dark' | 'light';
 }
 
 export function getNodeRelationshipSentence(
@@ -150,6 +152,7 @@ export const Inspector: React.FC<InspectorProps> = ({
   onSwitchTo3D,
   isCollapsed = false,
   onToggleCollapse,
+  theme = 'dark',
 }) => {
   const [inspection, setInspection] = useState<FileInspection | null>(null);
   const [loading, setLoading] = useState(false);
@@ -193,6 +196,10 @@ export const Inspector: React.FC<InspectorProps> = ({
     if (!snapshot) return null;
     return deriveRepositoryStructure(snapshot.nodes, snapshot.edges);
   }, [snapshot]);
+
+  const areaMonograms = useMemo(() => {
+    return computeAreaMonograms(repoStructure?.areas || []);
+  }, [repoStructure?.areas]);
 
   useEffect(() => {
     if (selectedNode) {
@@ -876,48 +883,62 @@ export const Inspector: React.FC<InspectorProps> = ({
                 <h4>Areas</h4>
               </div>
               <div className="areas-grid">
-                {repoStructure.areas.map((area) => (
-                  <div key={area.id} className="area-grid-item">
-                    <button
-                      type="button"
-                      className={`area-pill-card ${selectedAreaIds?.includes(area.id) ? 'selected' : ''}`}
-                      onClick={() => onSelectArea?.(area.id)}
-                      title={`Focus on area: ${area.displayPath}`}
-                      style={{ flex: 1 }}
-                    >
-                      <span className="area-pill-name">{area.name}</span>
-                      <span className="area-pill-meta">
-                        {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} links
-                      </span>
-                    </button>
-                    {onToggleArea && (
+                {repoStructure.areas.map((area) => {
+                  const areaColor = getAreaColor(area.id, theme);
+                  const monogram = areaMonograms.get(area.id) || area.name.slice(0, 2).toUpperCase();
+                  const isSelected = selectedAreaIds?.includes(area.id) || selectedAreaId === area.id;
+                  return (
+                    <div key={area.id} className="area-grid-item">
                       <button
                         type="button"
-                        className={`area-toggle-btn ${selectedAreaIds?.includes(area.id) ? 'selected' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleArea(area.id);
-                        }}
-                        title={
-                          selectedAreaIds?.includes(area.id)
-                            ? `Deselect ${area.name}`
-                            : `Add ${area.name} to comparison`
-                        }
-                        aria-label={
-                          selectedAreaIds?.includes(area.id)
-                            ? `Deselect ${area.name}`
-                            : `Add ${area.name} to comparison`
-                        }
+                        className={`area-pill-card ${isSelected ? 'selected' : ''}`}
+                        onClick={() => onSelectArea?.(area.id)}
+                        title={`Focus on area: ${area.displayPath}`}
+                        style={{ flex: 1 }}
                       >
-                        {selectedAreaIds?.includes(area.id) ? (
-                          <Check size={12} />
-                        ) : (
-                          <Plus size={12} />
-                        )}
+                        <div
+                          className="area-color-swatch"
+                          style={{ backgroundColor: areaColor }}
+                          title={`Canonical color for ${area.name}`}
+                        >
+                          <span className="area-swatch-monogram">{monogram}</span>
+                        </div>
+                        <div className="area-card-info">
+                          <span className="area-pill-name">{area.name}</span>
+                          <span className="area-pill-meta">
+                            {area.fileCount} file{area.fileCount !== 1 ? 's' : ''} · {area.outgoingAreaEdges.length + area.incomingAreaEdges.length} links
+                          </span>
+                        </div>
                       </button>
-                    )}
-                  </div>
-                ))}
+                      {onToggleArea && (
+                        <button
+                          type="button"
+                          className={`area-toggle-btn ${isSelected ? 'selected' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleArea(area.id);
+                          }}
+                          title={
+                            selectedAreaIds?.includes(area.id)
+                              ? `Deselect ${area.name}`
+                              : `Add ${area.name} to comparison`
+                          }
+                          aria-label={
+                            selectedAreaIds?.includes(area.id)
+                              ? `Deselect ${area.name}`
+                              : `Add ${area.name} to comparison`
+                          }
+                        >
+                          {isSelected ? (
+                            <Check size={12} />
+                          ) : (
+                            <Plus size={12} />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

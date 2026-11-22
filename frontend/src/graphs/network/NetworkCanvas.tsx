@@ -19,7 +19,6 @@ import {
   GESTURE_THRESHOLD_MOUSE,
   GESTURE_THRESHOLD_PEN,
   GESTURE_THRESHOLD_TOUCH,
-  computeGraphCentroid,
   projectGraph,
   projectPoint3D,
   computeNetworkFitTransform,
@@ -50,10 +49,10 @@ import {
   ScreenRect,
   computeCameraDepthShading,
   computeEdgeDepthAttenuation,
-  compositeDepthColor,
+  resolveNodeVisualDescriptor,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual, resolveAreaEdgeVisual } from './render/networkEdgeVisual';
-import { getFileTypeColor, getAreaColor, ENTRY_NODE_COLOR } from './fileTypeColors';
+import { getAreaColor, ENTRY_NODE_COLOR } from './fileTypeColors';
 import { findEntryPointCandidate } from '../../utils/entryPointDetection';
 import {
   deriveRepositoryStructure,
@@ -62,6 +61,7 @@ import {
   RepositoryArea,
 } from '../../utils/repositoryAreas';
 import { computeAreaAnchors } from './layout/sphereLayout';
+import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -87,6 +87,7 @@ interface NetworkCanvasProps {
   selectedAreaEdge?: AreaEdge | null;
   onSelectAreaEdge?: (edge: AreaEdge | null) => void;
   languageFilter?: 'all' | 'typescript' | 'rust' | 'python';
+  sourceOnlyFilter?: boolean;
   highlightedNodeIds?: Set<string> | null;
   highlightedEdgeIds?: Set<string> | null;
   onSelectNode: (node: FileNode | null) => void;
@@ -121,6 +122,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   selectedAreaEdge = null,
   onSelectAreaEdge,
   languageFilter = 'all',
+  sourceOnlyFilter = false,
   highlightedNodeIds = null,
   highlightedEdgeIds = null,
   onSelectNode,
@@ -268,6 +270,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     return computeAreaAnchors(areaIds, sphereRadius);
   }, [repoStructure.areas, sphereRadius]);
 
+  const areaMonograms = useMemo(() => {
+    return computeAreaMonograms(repoStructure.areas);
+  }, [repoStructure.areas]);
+
   const isSmallRepo = snapshot.nodes.length <= 12 || repoStructure.areas.length <= 1;
 
   const scope: 'overview' | 'area' | 'file' = selectedNodeId
@@ -365,7 +371,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         width,
         height,
         cameraRef.current.zoom,
-        insets
+        insets,
+        true
       );
 
       if (!isCenterDeadZone(cameraRef.current, target, 0.5)) {
@@ -410,7 +417,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     setPositions(result.state.positions);
     positionsRef.current = result.state.positions;
-    centroidRef.current = computeGraphCentroid(result.state.positions.values());
+    centroidRef.current = { x: 0, y: 0, z: 0 };
     initializedRepoIdRef.current = result.state.repositoryId;
 
     if (result.didTriggerInitialFit) {
@@ -430,10 +437,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const width = containerRef.current.clientWidth || 800;
       const height = containerRef.current.clientHeight || 600;
 
-      // Single authoritative projection at current yaw & pitch
+      // Single authoritative projection at current yaw & pitch with area anchors included
       const currentCam = cameraRef.current;
-      const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, currentCam);
-      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets);
+      const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, currentCam, {
+        extraPoints: areaAnchors.values(),
+        extraRadius: 52,
+      });
+      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 96, true, 1.25);
 
       if (prefersReducedMotion) {
         cameraRef.current = {
@@ -459,7 +469,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
       onAnnounce?.('Fitted graph to viewport');
     }
-  }, [fitViewTrigger, snapshot, positions, insets, prefersReducedMotion, onAnnounce, requestRender]);
+  }, [fitViewTrigger, snapshot, positions, insets, areaAnchors, prefersReducedMotion, onAnnounce, requestRender]);
 
   // Handle external Reset View trigger (restores standard yaw & pitch, and fits to viewport)
   useEffect(() => {
@@ -480,8 +490,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         zoom: 1.0,
       };
 
-      const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, resetCam);
-      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets);
+      const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, resetCam, {
+        extraPoints: areaAnchors.values(),
+        extraRadius: 52,
+      });
+      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 96, true, 1.25);
 
       const targetCamera: NetworkCamera = {
         orientation: DEFAULT_ORIENTATION,
@@ -506,7 +519,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
       onAnnounce?.('Reset camera to default 3D orientation');
     }
-  }, [resetViewTrigger, snapshot, positions, insets, prefersReducedMotion, onAnnounce, requestRender]);
+  }, [resetViewTrigger, snapshot, positions, insets, areaAnchors, prefersReducedMotion, onAnnounce, requestRender]);
 
   // Handle external Zoom In trigger
   useEffect(() => {
@@ -736,6 +749,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           entryNodeId: entryCandidate?.nodeId,
           selectedNodeId,
           hoveredNodeId,
+          extraPoints: areaAnchors.values(),
+          extraRadius: 52,
         };
         const projData = projectGraph(
           snapshot.nodes,
@@ -1068,6 +1083,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               if (!srcMatch && !tgtMatch) areaAlphaMultiplier *= 0.1;
             }
 
+            if (sourceOnlyFilter) {
+              const srcIsSource = p1.node.analysis_status === 'Analyzed' && p1.node.file_kind === 'Source';
+              const tgtIsSource = p2.node.analysis_status === 'Analyzed' && p2.node.file_kind === 'Source';
+              if (!srcIsSource && !tgtIsSource) areaAlphaMultiplier *= 0.08;
+            }
+
             edgesToDraw.push({ p1, p2, edge, desc, isEdgeSelected, areaAlphaMultiplier: areaAlphaMultiplier * depthMultiplier });
           }
 
@@ -1143,6 +1164,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             isDimmed = !matchesLanguageFilter(pNode.node, languageFilter);
           }
 
+          if (!isDimmed && sourceOnlyFilter) {
+            isDimmed = pNode.node.analysis_status !== 'Analyzed' || pNode.node.file_kind !== 'Source';
+          }
+
           const isOverviewMode = scope === 'overview' && !isSmallRepo;
           const screenR = isOverviewMode
             ? Math.max(2.8, Math.min(5.0, pNode.radius * 0.75 * camera.zoom))
@@ -1155,11 +1180,26 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             { isSelected, isHovered, minProminence: isHighlighted ? 0.8 : undefined }
           );
 
+          const isMainEntry = entryCandidate !== null && pNode.id === entryCandidate.nodeId;
+          const nodeAreaId = getAreaIdForPath(pNode.node.relative_path);
+          const descriptor = resolveNodeVisualDescriptor(
+            pNode.node,
+            nodeAreaId,
+            depthShading.prominence,
+            depthShading.depth,
+            theme,
+            {
+              isEntry: isMainEntry,
+              isSelected,
+              isHovered,
+              isHighlighted,
+              isDimmed,
+              isOverviewMode,
+            }
+          );
+
           ctx.save();
-          const depthAlpha = 0.45 + 0.55 * depthShading.depth;
-          ctx.globalAlpha = isDimmed
-            ? 0.12
-            : (isSelected || isHovered || isHighlighted ? 1.0 : (isOverviewMode ? depthAlpha * 0.85 : depthAlpha));
+          ctx.globalAlpha = descriptor.depthAlpha;
 
           const isLight = theme === 'light';
 
@@ -1173,34 +1213,26 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 2.5, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#4f46e5' : '#818cf8';
+            ctx.strokeStyle = descriptor.haloColor || (isLight ? '#4f46e5' : '#818cf8');
             ctx.lineWidth = 2.0;
             ctx.stroke();
-          } else if (isHovered) {
+          } else if (isHovered && descriptor.haloColor) {
             ctx.beginPath();
             ctx.arc(pNode.screenX, pNode.screenY, screenR + 3, 0, Math.PI * 2);
-            ctx.strokeStyle = isLight ? '#64748b' : '#cbd5e1';
-            ctx.lineWidth = 1.8;
+            ctx.strokeStyle = descriptor.haloColor;
+            ctx.lineWidth = descriptor.haloWidth;
             ctx.stroke();
           }
 
           // Node glyph body with camera-relative depth color shading
           ctx.beginPath();
           ctx.arc(pNode.screenX, pNode.screenY, screenR, 0, Math.PI * 2);
-          const isMainEntry = entryCandidate !== null && pNode.id === entryCandidate.nodeId;
-          const baseColor = isMainEntry
-            ? ENTRY_NODE_COLOR
-            : getFileTypeColor(pNode.node.relative_path);
-          const shadedColor = compositeDepthColor(baseColor, depthShading.prominence, theme);
-          ctx.fillStyle = shadedColor;
+          ctx.fillStyle = descriptor.fillColor;
           ctx.fill();
 
-          ctx.strokeStyle = isSelected
-            ? (isLight ? '#4f46e5' : '#818cf8')
-            : isHovered
-              ? (isLight ? '#0f172a' : '#f8fafc')
-              : (isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(9, 13, 22, 0.85)');
-          ctx.lineWidth = isSelected || isHovered ? 1.8 : (isOverviewMode ? 0.7 : 1.0);
+          // Architectural group membership ring colored by canonical area color
+          ctx.strokeStyle = descriptor.areaRingColor;
+          ctx.lineWidth = descriptor.ringWidth;
           ctx.stroke();
           ctx.restore();
         }
@@ -1238,9 +1270,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             ctx.lineWidth = 1.8;
             ctx.stroke();
 
-            // Monogram text
+            // Monogram text (disambiguated uniquely across repository areas)
             const parts = pAnchor.area.name.split(/[-_/ ]+/).filter(Boolean);
-            const monogram = (parts.length >= 2 ? parts[0][0] + parts[1][0] : pAnchor.area.name.slice(0, 2)).toUpperCase();
+            const fallbackMonogram = (parts.length >= 2 ? parts[0][0] + parts[1][0] : pAnchor.area.name.slice(0, 2)).toUpperCase();
+            const monogram = areaMonograms.get(pAnchor.area.id) || fallbackMonogram;
             ctx.fillStyle = '#ffffff';
             ctx.font = `700 ${Math.round(pAnchor.radius * 0.8)}px "JetBrains Mono", ui-monospace, monospace`;
             ctx.textAlign = 'center';

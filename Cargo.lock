@@ -1151,11 +1151,15 @@ name = "prebase-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "open",
  "prebase-core",
+ "prebase-git",
  "prebase-parser",
  "prebase-server",
  "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

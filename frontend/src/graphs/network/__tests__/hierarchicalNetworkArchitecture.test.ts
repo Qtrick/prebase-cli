@@ -283,7 +283,7 @@ describe('Hierarchical Network Graph Architecture Regression Suite', () => {
         }
       });
 
-      it('guarantees the 3D centroid of all nodes remains at (0, 0, 0)', () => {
+      it('guarantees all nodes lie exactly on the spherical shell centered at (0, 0, 0)', () => {
         const { nodes, edges } = createMultiAreaSnapshot();
         const layoutNodes: LayoutNode[] = nodes.map((n) => ({
           id: n.id,
@@ -297,19 +297,33 @@ describe('Hierarchical Network Graph Architecture Regression Suite', () => {
 
         const positions = layoutSphere(layoutNodes, layoutLinks, DEFAULT_SPHERE_LAYOUT_CONFIG);
 
-        let sumX = 0;
-        let sumY = 0;
-        let sumZ = 0;
-        for (const pos of positions.values()) {
-          sumX += pos.x;
-          sumY += pos.y;
-          sumZ += pos.z;
+        // Every node must sit precisely on the true spherical shell centered at the origin
+        const radii = Array.from(positions.values()).map((pos) => Math.hypot(pos.x, pos.y, pos.z));
+        expect(radii.length).toBe(nodes.length);
+        const shellRadius = radii[0];
+        expect(shellRadius).toBeGreaterThan(50);
+        for (const r of radii) {
+          expect(r).toBeCloseTo(shellRadius, 3);
         }
 
-        const count = positions.size;
-        expect(sumX / count).toBeCloseTo(0, 4);
-        expect(sumY / count).toBeCloseTo(0, 4);
-        expect(sumZ / count).toBeCloseTo(0, 4);
+        // Bounding extents span across the origin in all 3 dimensions
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+        for (const pos of positions.values()) {
+          if (pos.x < minX) minX = pos.x;
+          if (pos.x > maxX) maxX = pos.x;
+          if (pos.y < minY) minY = pos.y;
+          if (pos.y > maxY) maxY = pos.y;
+          if (pos.z < minZ) minZ = pos.z;
+          if (pos.z > maxZ) maxZ = pos.z;
+        }
+        expect(minX).toBeLessThan(0);
+        expect(maxX).toBeGreaterThan(0);
+        expect(minY).toBeLessThan(0);
+        expect(maxY).toBeGreaterThan(0);
+        expect(minZ).toBeLessThan(0);
+        expect(maxZ).toBeGreaterThan(0);
       });
 
       it('preserves existing node positions during incremental layout without thrashing', () => {

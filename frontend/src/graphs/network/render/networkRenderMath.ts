@@ -1,4 +1,5 @@
 import { FileNode, NetworkCamera, Point3D, Quaternion, ViewportInsets } from '../../../types/graph';
+import { getFileTypeColor, getAreaColor, ENTRY_NODE_COLOR } from '../fileTypeColors';
 
 export type { Quaternion };
 
@@ -296,6 +297,8 @@ export function projectGraph(
     entryNodeId?: string | null;
     selectedNodeId?: string | null;
     hoveredNodeId?: string | null;
+    extraPoints?: readonly Point3D[] | Iterable<Point3D>;
+    extraRadius?: number;
   }
 ): ProjectedGraph {
   const projectedList: ProjectedNode[] = [];
@@ -364,6 +367,25 @@ export function projectGraph(
     maxY = Math.max(maxY, projected.y + radius);
   }
 
+  // Include extra visual points (e.g. area anchors, boundary hubs) into projected bounds
+  if (options?.extraPoints) {
+    const extraR = options.extraRadius ?? 48;
+    for (const pt of options.extraPoints) {
+      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !Number.isFinite(pt.z)) continue;
+      const lx = pt.x - centroid.x;
+      const ly = pt.y - centroid.y;
+      const lz = pt.z - centroid.z;
+      const proj = camera.orientation
+        ? projectPoint3D(lx, ly, lz, camera.orientation, NETWORK_FOCAL_LENGTH)
+        : projectPoint3D(lx, ly, lz, camera.yaw, camera.pitch, NETWORK_FOCAL_LENGTH);
+
+      minX = Math.min(minX, proj.x - extraR);
+      maxX = Math.max(maxX, proj.x + extraR);
+      minY = Math.min(minY, proj.y - extraR);
+      maxY = Math.max(maxY, proj.y + extraR);
+    }
+  }
+
   // Sort by depth (z) ascending for drawing back-to-front
   projectedList.sort((a, b) => a.projected.z - b.projected.z);
 
@@ -389,7 +411,8 @@ export function computeNetworkFitTransform(
   viewportHeight: number,
   insets?: ViewportInsets,
   padding = 64,
-  centerAtPivot = false
+  centerAtPivot = false,
+  maxFitZoom = MAX_ZOOM
 ): { panX: number; panY: number; zoom: number } {
   const insetLeft = insets?.left ?? 0;
   const insetRight = insets?.right ?? 0;
@@ -406,7 +429,8 @@ export function computeNetworkFitTransform(
     const maxExtentY = Math.max(Math.abs(bounds.minY), Math.abs(bounds.maxY));
     const scaleX = (usableW - padding * 2) / Math.max(20, maxExtentX * 2);
     const scaleY = (usableH - padding * 2) / Math.max(20, maxExtentY * 2);
-    const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(scaleX, scaleY)));
+    const fitLimit = Math.min(MAX_ZOOM, maxFitZoom);
+    const zoom = Math.max(MIN_ZOOM, Math.min(fitLimit, Math.min(scaleX, scaleY)));
     return {
       panX: usableCenterX,
       panY: usableCenterY,
@@ -419,7 +443,8 @@ export function computeNetworkFitTransform(
 
   const scaleX = (usableW - padding * 2) / graphWidth;
   const scaleY = (usableH - padding * 2) / graphHeight;
-  const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(scaleX, scaleY)));
+  const fitLimit = Math.min(MAX_ZOOM, maxFitZoom);
+  const zoom = Math.max(MIN_ZOOM, Math.min(fitLimit, Math.min(scaleX, scaleY)));
 
   const graphMidX = (bounds.minX + bounds.maxX) / 2;
   const graphMidY = (bounds.minY + bounds.maxY) / 2;
@@ -524,7 +549,8 @@ export function computeCenterLockedTransform(
   viewportWidth: number,
   viewportHeight: number,
   currentZoom: number,
-  insets?: ViewportInsets
+  insets?: ViewportInsets,
+  centerAtPivot = false
 ): { panX: number; panY: number; zoom: number } {
   const zoom = Number.isFinite(currentZoom) && currentZoom > 0 ? currentZoom : 1.0;
   const insetLeft = insets?.left ?? 0;
@@ -537,7 +563,7 @@ export function computeCenterLockedTransform(
   const usableCenterX = insetLeft + usableW / 2;
   const usableCenterY = insetTop + usableH / 2;
 
-  if (!bounds) {
+  if (!bounds || centerAtPivot) {
     return { panX: usableCenterX, panY: usableCenterY, zoom };
   }
 
@@ -1268,3 +1294,74 @@ export function compositeDepthColor(
   return `#${toHex(outR)}${toHex(outG)}${toHex(outB)}`;
 }
 
+// ============================================================================
+// Node Visual Descriptor & Area Membership Ring Resolution
+// ============================================================================
+
+export interface NodeVisualDescriptor {
+  fillColor: string;
+  areaRingColor: string;
+  ringWidth: number;
+  depthAlpha: number;
+  haloColor: string | null;
+  haloWidth: number;
+}
+
+export function resolveNodeVisualDescriptor(
+  node: FileNode,
+  areaId: string | undefined,
+  depthProminence: number,
+  depthScale: number,
+  theme: 'dark' | 'light' = 'dark',
+  options?: {
+    isEntry?: boolean;
+    isSelected?: boolean;
+    isHovered?: boolean;
+    isHighlighted?: boolean;
+    isDimmed?: boolean;
+    isOverviewMode?: boolean;
+  }
+): NodeVisualDescriptor {
+  const isLight = theme === 'light';
+  const isSelected = Boolean(options?.isSelected);
+  const isHovered = Boolean(options?.isHovered);
+  const isHighlighted = Boolean(options?.isHighlighted);
+  const isDimmed = Boolean(options?.isDimmed);
+  const isOverview = Boolean(options?.isOverviewMode);
+
+  // Interior body color
+  const baseColor = options?.isEntry
+    ? ENTRY_NODE_COLOR
+    : getFileTypeColor(node.relative_path);
+  const fillColor = compositeDepthColor(baseColor, depthProminence, theme);
+
+  // Canonical area color for membership ring
+  const baseAreaColor = getAreaColor(areaId, theme);
+  const areaRingColor = compositeDepthColor(baseAreaColor, Math.max(0.35, depthProminence), theme);
+  const ringWidth = isSelected || isHovered ? 1.6 : (isOverview ? 0.9 : 1.2);
+
+  // Overall alpha
+  const depthAlpha = isDimmed
+    ? 0.12
+    : (isSelected || isHovered || isHighlighted ? 1.0 : (isOverview ? (0.45 + 0.55 * depthScale) * 0.85 : 0.45 + 0.55 * depthScale));
+
+  // Selection / Hover outer halo
+  let haloColor: string | null = null;
+  let haloWidth = 0;
+  if (isSelected || isHighlighted) {
+    haloColor = isLight ? '#4f46e5' : '#818cf8';
+    haloWidth = 2.0;
+  } else if (isHovered) {
+    haloColor = isLight ? '#64748b' : '#cbd5e1';
+    haloWidth = 1.8;
+  }
+
+  return {
+    fillColor,
+    areaRingColor,
+    ringWidth,
+    depthAlpha,
+    haloColor,
+    haloWidth,
+  };
+}

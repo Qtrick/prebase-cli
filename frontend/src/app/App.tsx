@@ -224,6 +224,7 @@ export const App: React.FC = () => {
   const [selectedAreaIds, setSelectedAreaIds] = useState<string[]>([]);
   const selectedAreaId = selectedAreaIds.length === 1 ? selectedAreaIds[0] : null;
   const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<'all' | 'typescript' | 'rust' | 'python'>('all');
+  const [sourceOnlyFilter, setSourceOnlyFilter] = useState<boolean>(false);
   const [revealRequest, setRevealRequest] = useState<RevealRequest | null>(null);
   const [keepGraphCentered, setKeepGraphCentered] = useState(true);
   const [announcement, setAnnouncement] = useState<string>('');
@@ -1280,19 +1281,45 @@ export const App: React.FC = () => {
 
               <div className="toolbar-menu-anchor" ref={filterMenuRef}>
                 <button
-                  className={`toolbar-btn ${selectedLanguageFilter !== 'all' ? 'active' : ''}`}
+                  className={`toolbar-btn ${selectedLanguageFilter !== 'all' || sourceOnlyFilter ? 'active' : ''}`}
                   onClick={() => setIsFilterMenuOpen((prev) => !prev)}
-                  title="Filter repository files by language"
+                  title="Filter repository files by scope or language"
                   aria-haspopup="menu"
                   aria-expanded={isFilterMenuOpen}
                 >
                   <Filter size={13} />
                   <span>Filters</span>
-                  {selectedLanguageFilter !== 'all' && <span className="active-filter-dot" />}
+                  {(selectedLanguageFilter !== 'all' || sourceOnlyFilter) && <span className="active-filter-dot" />}
                   <ChevronDown size={11} className={`dropdown-chevron ${isFilterMenuOpen ? 'open' : ''}`} />
                 </button>
                 {isFilterMenuOpen && (
-                  <div className="toolbar-dropdown-menu" role="menu" aria-label="Filter by language">
+                  <div className="toolbar-dropdown-menu" role="menu" aria-label="Filter graph files">
+                    <div className="menu-group-header">File Visibility</div>
+                    <button
+                      className={`menu-item ${!sourceOnlyFilter ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={!sourceOnlyFilter}
+                      onClick={() => {
+                        setSourceOnlyFilter(false);
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>All Discovered Files ({snapshot?.coverage.total_discovered || 0})</span>
+                      {!sourceOnlyFilter && <Check size={13} />}
+                    </button>
+                    <button
+                      className={`menu-item ${sourceOnlyFilter ? 'selected' : ''}`}
+                      role="menuitemradio"
+                      aria-checked={sourceOnlyFilter}
+                      onClick={() => {
+                        setSourceOnlyFilter(true);
+                        setIsFilterMenuOpen(false);
+                      }}
+                    >
+                      <span>Analyzed Code Only ({snapshot?.coverage.total_analyzed || 0})</span>
+                      {sourceOnlyFilter && <Check size={13} />}
+                    </button>
+                    <div className="menu-divider" />
                     <div className="menu-group-header">Filter Language</div>
                     <button
                       className={`menu-item ${selectedLanguageFilter === 'all' ? 'selected' : ''}`}
@@ -1510,6 +1537,7 @@ export const App: React.FC = () => {
                       selectedAreaEdge={selectedAreaEdge}
                       onSelectAreaEdge={handleSelectAreaEdge}
                       languageFilter={selectedLanguageFilter}
+                      sourceOnlyFilter={sourceOnlyFilter}
                       highlightedNodeIds={highlightedNodeIds}
                       highlightedEdgeIds={highlightedEdgeIds}
                       onSelectNode={handleSelectNode}
@@ -1709,6 +1737,7 @@ export const App: React.FC = () => {
             setPathExplorerSourceNode(node);
             setIsPathExplorerOpen(true);
           }}
+          theme={theme}
         />
       )}
 

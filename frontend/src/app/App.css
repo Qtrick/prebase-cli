@@ -175,21 +175,26 @@ body,
   letter-spacing: 0.02em;
 }
 
-/* Unified Repository & Branch Identity Card */
+/* Unified Repository & Branch Identity Card (Linear/Raycast sleek header) */
 .repo-badge {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: var(--bg-surface);
+  gap: 7px;
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 9px 10px;
+  padding: 8px 10px;
   margin-bottom: 14px;
-  transition: border-color var(--transition-fast);
+  transition: all var(--transition-fast);
+}
+
+[data-theme="light"] .repo-badge {
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .repo-badge:hover {
   border-color: var(--border-active);
+  background: var(--bg-surface);
 }
 
 .repo-identity-main {
@@ -2799,16 +2804,20 @@ button:focus-visible,
    Repository Overview & Exploration Components (Theme-Aware, High-Legibility)
    ============================================================================ */
 
-/* Metric Strip (Clean 4-stat overview) */
+/* Metric Strip (Clean 4-stat overview - Linear / Raycast Style) */
 .overview-metric-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  background: var(--bg-surface);
+  gap: 0;
+  background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 10px 6px;
+  padding: 8px 0;
   margin-bottom: 12px;
+}
+
+[data-theme="light"] .overview-metric-strip {
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .overview-metric-item {
@@ -2817,10 +2826,21 @@ button:focus-visible,
   align-items: center;
   text-align: center;
   gap: 2px;
+  position: relative;
+}
+
+.overview-metric-item:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 15%;
+  height: 70%;
+  width: 1px;
+  background: var(--border-subtle);
 }
 
 .overview-metric-value {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
   line-height: 1.2;
@@ -2833,7 +2853,7 @@ button:focus-visible,
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
 }
 
 .overview-subtle-hint {
@@ -2874,7 +2894,7 @@ button:focus-visible,
   font-weight: 600;
 }
 
-/* Exploration & Suggestion Cards */
+/* Exploration & Suggestion Cards (Flat Row Hierarchy) */
 .exploration-section {
   display: flex;
   flex-direction: column;
@@ -2885,7 +2905,7 @@ button:focus-visible,
 .suggestion-cards-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .suggestion-card {
@@ -2893,9 +2913,9 @@ button:focus-visible,
   flex-direction: column;
   gap: 3px;
   width: 100%;
-  padding: 8px 10px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
+  padding: 7px 9px;
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--text-primary);
   cursor: pointer;
@@ -2907,10 +2927,9 @@ button:focus-visible,
 }
 
 .suggestion-card:hover {
-  background: var(--bg-hover);
-  border-color: var(--accent-brand-border);
-  box-shadow: 0 0 0 1px var(--accent-brand-border);
-  transform: translateY(-1px);
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .suggestion-card:active {
@@ -2993,7 +3012,7 @@ button:focus-visible,
 
 .areas-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
   gap: 6px;
 }
 
@@ -3005,9 +3024,10 @@ button:focus-visible,
 
 .area-pill-card {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 7px 9px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -3018,6 +3038,7 @@ button:focus-visible,
   transition: all var(--transition-fast);
   appearance: none;
   -webkit-appearance: none;
+  min-width: 0;
 }
 
 .area-pill-card:hover {
@@ -3026,8 +3047,38 @@ button:focus-visible,
   transform: translateY(-1px);
 }
 
-.area-pill-card:active {
-  transform: translateY(0);
+.area-pill-card.selected {
+  background: var(--bg-selected);
+  border-color: var(--accent-brand);
+  box-shadow: 0 0 0 1px var(--accent-brand);
+}
+
+.area-color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.area-swatch-monogram {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #ffffff;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.area-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .area-pill-name {
@@ -3037,6 +3088,7 @@ button:focus-visible,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.25;
 }
 
 .area-pill-meta {
@@ -3045,6 +3097,7 @@ button:focus-visible,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.2;
 }
 
 .area-toggle-btn {
@@ -3058,6 +3111,18 @@ button:focus-visible,
   color: var(--text-muted);
   cursor: pointer;
   transition: all var(--transition-fast);
+}
+
+.area-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-active);
+}
+
+.area-toggle-btn.selected {
+  background: var(--accent-brand-bg);
+  border-color: var(--accent-brand-border);
+  color: var(--accent-brand-hover);
 }
 
 .area-toggle-btn:hover {

@@ -186,8 +186,10 @@ export function layoutSphere(
       cfg.forceStrength * 0.012,
       pinnedIds
     );
-    centerPositions(positions);
+    // Unpinned nodes are projected directly onto the true spherical shell centered at (0, 0, 0).
+    // Pinned nodes from existingPositions remain strictly immutable to guarantee zero live-reconciliation thrash.
     for (const [id, p] of positions.entries()) {
+      if (pinnedIds.has(id)) continue;
       const len = Math.hypot(p.x, p.y, p.z) || 1;
       positions.set(id, {
         x: (p.x / len) * shellRadius,

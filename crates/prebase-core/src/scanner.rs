@@ -126,11 +126,11 @@ impl RepositoryScanner {
             // and names with surrounding whitespace must not bypass boundary checks.
             let part_lower = part.to_ascii_lowercase();
             match part_lower.trim() {
-                ".git" | "node_modules" | "dist" | "build" | ".build" | ".next" | ".nuxt"
-                | "coverage" | "target" | ".reference" | ".cache" | ".turbo" | ".vscode"
-                | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws" | ".gnupg"
-                | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache" | "venv"
-                | ".venv" => return true,
+                ".prebase" | ".git" | "node_modules" | "dist" | "build" | ".build" | ".next"
+                | ".nuxt" | "coverage" | "target" | ".reference" | ".cache" | ".turbo"
+                | ".vscode" | ".idea" | ".cursor" | ".agents" | ".codex" | ".ssh" | ".aws"
+                | ".gnupg" | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache"
+                | "venv" | ".venv" => return true,
                 _ => {}
             }
         }

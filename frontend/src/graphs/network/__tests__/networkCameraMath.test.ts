@@ -704,4 +704,267 @@ describe('Network Camera & 3D Projection Math', () => {
       expect(orbitCam!.yaw).not.toBe(baseCamera.yaw);
     });
   });
+
+  describe('Pivot-Centered Framing, Area Anchor Bounds Expansion, and MaxFitZoom Invariants', () => {
+    describe('projectGraph with extraPoints and extraRadius', () => {
+      it('bounds without extraPoints only encompasses node radii', () => {
+        const nodes = [createNode('node-1'), createNode('node-2')];
+        const positions = new Map<string, Point3D>([
+          ['node-1', { x: -50, y: 0, z: 0 }],
+          ['node-2', { x: 50, y: 0, z: 0 }],
+        ]);
+        const centroid: Point3D = { x: 0, y: 0, z: 0 };
+        const camera: NetworkCamera = { yaw: 0, pitch: 0, panX: 400, panY: 300, zoom: 1 };
+
+        const graph = projectGraph(nodes, positions, centroid, camera);
+        expect(graph.bounds.minX).toBeLessThan(-50);
+        expect(graph.bounds.minX).toBeGreaterThan(-70);
+        expect(graph.bounds.maxX).toBeGreaterThan(50);
+        expect(graph.bounds.maxX).toBeLessThan(70);
+      });
+
+      it('expands projected bounds to encompass outer area anchor points with default extraRadius (48px)', () => {
+        const nodes = [createNode('node-1'), createNode('node-2')];
+        const positions = new Map<string, Point3D>([
+          ['node-1', { x: -50, y: 0, z: 0 }],
+          ['node-2', { x: 50, y: 0, z: 0 }],
+        ]);
+        const centroid: Point3D = { x: 0, y: 0, z: 0 };
+        const camera: NetworkCamera = { yaw: 0, pitch: 0, panX: 400, panY: 300, zoom: 1 };
+
+        // Area anchors placed at outer perimeter: x = 200, y = -150
+        const extraAnchors: Point3D[] = [
+          { x: 200, y: 0, z: 0 },
+          { x: 0, y: -150, z: 0 },
+        ];
+
+        const graph = projectGraph(nodes, positions, centroid, camera, {
+          extraPoints: extraAnchors,
+        });
+
+        // 200 + 48 default extraRadius = 248
+        expect(graph.bounds.maxX).toBeCloseTo(248, 2);
+        // -150 - 48 = -198
+        expect(graph.bounds.minY).toBeCloseTo(-198, 2);
+      });
+
+      it('honors custom extraRadius when specified', () => {
+        const nodes = [createNode('node-1')];
+        const positions = new Map<string, Point3D>([
+          ['node-1', { x: 0, y: 0, z: 0 }],
+        ]);
+        const centroid: Point3D = { x: 0, y: 0, z: 0 };
+        const camera: NetworkCamera = { yaw: 0, pitch: 0, panX: 400, panY: 300, zoom: 1 };
+
+        const anchor: Point3D = { x: 120, y: 80, z: 0 };
+        const graph = projectGraph(nodes, positions, centroid, camera, {
+          extraPoints: [anchor],
+          extraRadius: 64,
+        });
+
+        // 120 + 64 = 184
+        expect(graph.bounds.maxX).toBeCloseTo(184, 2);
+        // 80 + 64 = 144
+        expect(graph.bounds.maxY).toBeCloseTo(144, 2);
+      });
+
+      it('handles Iterable sets and ignores non-finite extra points safely', () => {
+        const nodes = [createNode('node-1')];
+        const positions = new Map<string, Point3D>([
+          ['node-1', { x: 0, y: 0, z: 0 }],
+        ]);
+        const centroid: Point3D = { x: 0, y: 0, z: 0 };
+        const camera: NetworkCamera = { yaw: 0, pitch: 0, panX: 400, panY: 300, zoom: 1 };
+
+        const anchorSet = new Set<Point3D>([
+          { x: 100, y: 50, z: 0 },
+          { x: NaN, y: 0, z: 0 } as any,
+          { x: Infinity, y: 0, z: 0 } as any,
+          null as any,
+        ]);
+
+        const graph = projectGraph(nodes, positions, centroid, camera, {
+          extraPoints: anchorSet,
+          extraRadius: 52,
+        });
+
+        expect(Number.isFinite(graph.bounds.minX)).toBe(true);
+        expect(Number.isFinite(graph.bounds.maxX)).toBe(true);
+        expect(Number.isFinite(graph.bounds.minY)).toBe(true);
+        expect(Number.isFinite(graph.bounds.maxY)).toBe(true);
+        expect(graph.bounds.maxX).toBeCloseTo(152, 2);
+      });
+    });
+
+    describe('computeCenterLockedTransform with centerAtPivot = true', () => {
+      it('anchors panX and panY exactly to usableCenterX and usableCenterY regardless of asymmetric bounds', () => {
+        const width = 1200;
+        const height = 800;
+        const insets: ViewportInsets = { left: 240, right: 300, top: 60, bottom: 40 };
+
+        const usableW = width - insets.left! - insets.right!; // 1200 - 540 = 660
+        const usableH = height - insets.top! - insets.bottom!; // 800 - 100 = 700
+        const usableCenterX = insets.left! + usableW / 2; // 240 + 330 = 570
+        const usableCenterY = insets.top! + usableH / 2; // 60 + 350 = 410
+
+        // Strongly asymmetric bounds where nodes are all on the positive side
+        const asymmetricBounds = { minX: 100, maxX: 400, minY: 50, maxY: 250 };
+
+        // With centerAtPivot = true:
+        const centered = computeCenterLockedTransform(
+          asymmetricBounds,
+          width,
+          height,
+          1.5,
+          insets,
+          true
+        );
+
+        expect(centered.panX).toBe(usableCenterX);
+        expect(centered.panY).toBe(usableCenterY);
+        expect(centered.zoom).toBe(1.5);
+      });
+
+      it('prevents asymmetric midpoint distortion compared to centerAtPivot = false', () => {
+        const width = 1000;
+        const height = 800;
+        const asymmBounds = { minX: 60, maxX: 140, minY: -20, maxY: 60 }; // midX = 100, midY = 20
+        const zoom = 1.2;
+
+        const defaultBehavior = computeCenterLockedTransform(
+          asymmBounds,
+          width,
+          height,
+          zoom,
+          undefined,
+          false
+        );
+        // Offsets the 3D origin away from screen center to center the bounding box midpoint
+        expect(defaultBehavior.panX).toBe(500 - 100 * zoom);
+        expect(defaultBehavior.panY).toBe(400 - 20 * zoom);
+
+        const pivotCentered = computeCenterLockedTransform(
+          asymmBounds,
+          width,
+          height,
+          zoom,
+          undefined,
+          true
+        );
+        // Strictly centers the 3D rotation origin (0, 0, 0)
+        expect(pivotCentered.panX).toBe(500);
+        expect(pivotCentered.panY).toBe(400);
+      });
+    });
+
+    describe('computeNetworkFitTransform with centerAtPivot = true and maxFitZoom', () => {
+      it('anchors pan directly to usable center when centerAtPivot = true', () => {
+        const bounds = { minX: -150, maxX: 200, minY: -100, maxY: 120 };
+        const insets: ViewportInsets = { left: 200, right: 200, top: 50, bottom: 50 };
+        const width = 1200;
+        const height = 800;
+
+        const fit = computeNetworkFitTransform(
+          bounds,
+          width,
+          height,
+          insets,
+          64,
+          true
+        );
+
+        const usableCenterX = 200 + (1200 - 400) / 2; // 600
+        const usableCenterY = 50 + (800 - 100) / 2; // 400
+
+        expect(fit.panX).toBe(usableCenterX);
+        expect(fit.panY).toBe(usableCenterY);
+      });
+
+      it('fits maximum symmetric extent into usable viewport so both positive and negative extremes fit', () => {
+        // Asymmetric bounds: maxX is 250, minX is -100
+        // Symmetric extent must be based on max(abs(-100), abs(250)) = 250 -> diameter 500
+        const bounds = { minX: -100, maxX: 250, minY: -120, maxY: 180 };
+        const width = 1000;
+        const height = 800;
+        const padding = 50;
+
+        const fit = computeNetworkFitTransform(
+          bounds,
+          width,
+          height,
+          undefined,
+          padding,
+          true
+        );
+
+        const usableW = 1000 - padding * 2; // 900
+        const usableH = 800 - padding * 2; // 700
+        const expectedScaleX = usableW / (250 * 2); // 900 / 500 = 1.8
+        const expectedScaleY = usableH / (180 * 2); // 700 / 360 = 1.944...
+
+        expect(fit.zoom).toBeCloseTo(Math.min(expectedScaleX, expectedScaleY), 5);
+
+        // Verify that +250 and -250 on screen fit within padded viewport
+        const rightScreen = fit.panX + 250 * fit.zoom;
+        const leftScreen = fit.panX - 250 * fit.zoom;
+        expect(rightScreen).toBeLessThanOrEqual(1000 - padding + 1e-4);
+        expect(leftScreen).toBeGreaterThanOrEqual(padding - 1e-4);
+      });
+
+      it('clamps initial zoom to comfortable maxFitZoom to avoid being too close on small graphs', () => {
+        // Very small bounds (e.g. 3 nodes in a tiny cluster)
+        const smallBounds = { minX: -30, maxX: 30, minY: -30, maxY: 30 };
+        const width = 1200;
+        const height = 900;
+        const padding = 96;
+
+        // Without maxFitZoom constraint, geometric scale would be ~ (1200 - 192) / 60 = 16.8 (clamped to MAX_ZOOM = 4.0)
+        const unconstrained = computeNetworkFitTransform(
+          smallBounds,
+          width,
+          height,
+          undefined,
+          padding,
+          true
+        );
+        expect(unconstrained.zoom).toBe(MAX_ZOOM); // 4.0 (too close!)
+
+        // With maxFitZoom = 1.25 (PreBase default comfortable view)
+        const constrained = computeNetworkFitTransform(
+          smallBounds,
+          width,
+          height,
+          undefined,
+          padding,
+          true,
+          1.25
+        );
+        expect(constrained.zoom).toBe(1.25); // comfortably clamped!
+        expect(constrained.panX).toBe(600);
+        expect(constrained.panY).toBe(450);
+      });
+
+      it('does not artificially clamp zoom when graph is large and requires zoom < maxFitZoom', () => {
+        // Large bounds requiring scale around 0.6
+        const largeBounds = { minX: -600, maxX: 600, minY: -450, maxY: 450 };
+        const width = 1000;
+        const height = 800;
+        const padding = 96;
+
+        const fit = computeNetworkFitTransform(
+          largeBounds,
+          width,
+          height,
+          undefined,
+          padding,
+          true,
+          1.25
+        );
+
+        // (1000 - 192) / 1200 = 808 / 1200 ≈ 0.6733
+        expect(fit.zoom).toBeLessThan(1.25);
+        expect(fit.zoom).toBeCloseTo(808 / 1200, 4);
+      });
+    });
+  });
 });

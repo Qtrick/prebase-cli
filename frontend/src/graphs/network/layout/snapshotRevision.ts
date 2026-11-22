@@ -4,17 +4,18 @@ import {
   Point3D,
   ViewportInsets,
 } from '../../../types/graph';
-import { layoutSphere } from './sphereLayout';
+import { layoutSphere, computeAreaAnchors } from './sphereLayout';
 import { layoutOrganic } from './organicLayout';
+import { computeNetworkSphereRadius } from './networkNormalization';
 import {
+  DEFAULT_ORIENTATION,
   DEFAULT_YAW,
   DEFAULT_PITCH,
-  computeGraphCentroid,
   projectGraph,
   computeNetworkFitTransform,
 } from '../render/networkRenderMath';
 import { findEntryPointCandidate } from '../../../utils/entryPointDetection';
-import { getAreaIdForPath } from '../../../utils/repositoryAreas';
+import { getAreaIdForPath, deriveRepositoryStructure } from '../../../utils/repositoryAreas';
 
 export type NetworkLayoutMode = 'sphere' | 'organic';
 
@@ -99,23 +100,36 @@ export function processSnapshotRevision(
         );
 
   if (isNewRepo) {
-    const centroid = computeGraphCentroid(computedPositions.values());
+    const centroid = { x: 0, y: 0, z: 0 };
     const tempCamera: NetworkCamera = {
+      orientation: DEFAULT_ORIENTATION,
       yaw: DEFAULT_YAW,
       pitch: DEFAULT_PITCH,
       panX: viewport.width / 2,
       panY: viewport.height / 2,
       zoom: 1.0,
     };
-    const proj = projectGraph(snapshot.nodes, computedPositions, centroid, tempCamera);
+    const sphereRadius = computeNetworkSphereRadius(snapshot.nodes.length);
+    const repoStructure = deriveRepositoryStructure(snapshot.nodes, snapshot.edges);
+    const areaIds = repoStructure.areas.map((a) => a.id);
+    const anchors = computeAreaAnchors(areaIds, sphereRadius);
+
+    const proj = projectGraph(snapshot.nodes, computedPositions, centroid, tempCamera, {
+      extraPoints: anchors.values(),
+      extraRadius: 52,
+    });
     const fit = computeNetworkFitTransform(
       proj.bounds,
       viewport.width,
       viewport.height,
-      viewport.insets
+      viewport.insets,
+      96,
+      true,
+      1.25
     );
 
     const initialCamera: NetworkCamera = {
+      orientation: DEFAULT_ORIENTATION,
       yaw: DEFAULT_YAW,
       pitch: DEFAULT_PITCH,
       panX: fit.panX,

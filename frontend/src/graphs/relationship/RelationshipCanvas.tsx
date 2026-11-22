@@ -174,7 +174,6 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   // Track dragging state & active pointer
   const isDraggingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
-  const pointerTargetRef = useRef<HTMLElement | null>(null);
   const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const hasDraggedRef = useRef(false);
 
@@ -803,17 +802,13 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   );
 
   const cleanUpPointerGesture = useCallback((e?: React.PointerEvent<HTMLCanvasElement>) => {
-    const target = (e?.target as HTMLElement) || pointerTargetRef.current;
-    if (target && activePointerIdRef.current !== null) {
+    if (e && activePointerIdRef.current === e.pointerId) {
       try {
-        if (target.hasPointerCapture(activePointerIdRef.current)) {
-          target.releasePointerCapture(activePointerIdRef.current);
-        }
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       } catch {
         // ignored
       }
     }
-    pointerTargetRef.current = null;
     isDraggingRef.current = false;
     activePointerIdRef.current = null;
     hoverControllerRef.current?.handleGestureEnd();
@@ -826,7 +821,6 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     isDraggingRef.current = true;
     hasDraggedRef.current = false;
     activePointerIdRef.current = e.pointerId;
-    pointerTargetRef.current = e.target as HTMLElement;
     hoverControllerRef.current?.handleGestureStart();
     dragStartRef.current = {
       x: e.clientX,
@@ -943,11 +937,12 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
   // Window blur / visibility cleanup
   useEffect(() => {
     const handleBlur = () => {
-      cleanUpPointerGesture();
+      isDraggingRef.current = false;
+      activePointerIdRef.current = null;
     };
     window.addEventListener('blur', handleBlur);
     return () => window.removeEventListener('blur', handleBlur);
-  }, [cleanUpPointerGesture]);
+  }, []);
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1018,7 +1013,6 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const nextPanX = centerX - (centerX - cur.panX) * (nextZoom / cur.zoom);
       const nextPanY = centerY - (centerY - cur.panY) * (nextZoom / cur.zoom);
       const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
-      hasUserAdjustedViewRef.current = true;
       setViewport(next);
       onViewportChange?.(next);
       requestRender();
@@ -1036,7 +1030,6 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       const nextPanX = centerX - (centerX - cur.panX) * (nextZoom / cur.zoom);
       const nextPanY = centerY - (centerY - cur.panY) * (nextZoom / cur.zoom);
       const next = { panX: nextPanX, panY: nextPanY, zoom: nextZoom };
-      hasUserAdjustedViewRef.current = true;
       setViewport(next);
       onViewportChange?.(next);
       requestRender();

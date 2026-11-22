@@ -27,6 +27,10 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 ## Features
 
 ### 1. Interactive Network Graphs (3D Overview & Contextual 2D Relationships)
+- **Architectural Group Membership Rings**: File nodes display concentric, depth-attenuated outer rings matching their canonical architectural group color (`frontend`, `server`, `git`, `parser`, `tests`), while preserving language/file-type interior fills and distinct selection halos.
+- **Collision-Free Area Monograms**: Area monograms are uniquely disambiguated across the repository (e.g., `tests` receives `TS` and `testing` receives `TG`), preventing monogram collisions on overview hubs.
+- **Source-Focused File Visibility**: Toggle between "All Discovered Files" and "Analyzed Code Only" via the Filters dropdown, allowing clean architectural exploration without clutter from unsupported artifacts.
+- **Professional Linear/Raycast UI**: Modern developer-tool aesthetic with Obsidian Navy & Electric Indigo theme, sleek divider-separated metric strips, borderless flat rows with subtle hover states, and circular canonical area swatches.
 - **Unrestricted Continuous 3D Rotation**: Freely rotates in three dimensions with screen-relative quaternion orientation, operating continuously 360° across poles and inverted orientations with zero pitch lock.
 - **Native Graph Zoom Interception**: Wheel events and trackpad pinches are intercepted via non-passive listeners, zooming the visualization smoothly within `[0.15, 4.0]` while preventing browser-level page zoom.
 - **Floating Controls HUD**: Glassmorphic control strip for Zoom In (`#zoomIn`, `+`), Zoom Out (`#zoomOut`, `-`), Fit View (`#fitView`, `F`), Reset Camera (`#resetCam`, `R`), and Center-Lock toggle (`#centerLock`, `L`).
@@ -109,31 +113,92 @@ cd prebase-cli
 # target/release/prebase
 ```
 
-### Running PreBase
+### Installation
 
-Navigate to any JavaScript or TypeScript repository and execute:
+Install PreBase into your local user binary directory (`$HOME/.local/bin` by default):
 
 ```bash
-# Analyze current directory and open interactive 3D Network Graph (default)
-./target/release/prebase map
+# From cloned repository
+./scripts/install.sh
 
-# Explicitly launch the 3D Network Graph view
-./target/release/prebase map --view 3d
+# Or install to a custom directory prefix (e.g., /usr/local/bin)
+./scripts/install.sh --prefix /usr/local
+```
 
-# Launch directly into the Contextual 2D Relationship Explorer
-./target/release/prebase map --view 2d
+Ensure `$HOME/.local/bin` is in your shell `PATH` (e.g. `export PATH="$HOME/.local/bin:$PATH"`).
+
+---
+
+### Running PreBase
+
+PreBase can be used both as an **interactive graphical application** and as a **fast, terminal-native CLI** for scripts, CI pipelines, and developer workflows.
+
+#### 1. Fast Terminal-Native CLI Commands (No browser required)
+
+All CLI commands run in sub-second time directly from your terminal and support both human-friendly formatted terminal output and `--json` for machine consumption:
+
+```bash
+# High-level architecture summary: file counts, languages, hub files, and top areas
+prebase analyze
+prebase analyze /path/to/repo --json
+
+# List indexed repository files with language, size, and analysis status
+prebase files
+prebase files --language typescript
+prebase files --json
+
+# Fast filename and path search ranked by architectural centrality
+prebase search "Card"
+prebase search "model" --json
+
+# Detailed single-file architecture report: direct dependencies, callers, lines/bytes
+prebase inspect src/components/Card.tsx
+prebase inspect src/components/Card.tsx --json
+
+# Print direct dependencies imported by a specific file
+prebase deps src/app/App.tsx
+prebase deps src/app/App.tsx --json
+
+# Print direct dependents (callers) that import a specific file
+prebase dependents src/types/graph.ts
+prebase dependents src/types/graph.ts --json
+
+# Trace shortest dependency path between any two source files
+prebase path src/main.tsx src/types/graph.ts
+prebase path src/main.tsx src/types/graph.ts --json
+
+# Stream Git commit history in concise terminal format without starting a browser
+prebase history --text --limit 20
+prebase history --text --json
+
+# Check background server status or cleanly stop a detached daemon
+prebase status
+prebase stop
+```
+
+#### 2. Interactive Browser Views (Web UI)
+
+```bash
+# Analyze repository and open interactive 3D Network Graph in foreground
+prebase map
+
+# Launch server in background daemon mode (freeing terminal immediately)
+prebase map --detach
+
+# Explicitly launch into Contextual 2D Relationship Explorer
+prebase map --view 2d
 
 # Launch directly in 2D mode focused on a specific file
-./target/release/prebase map --view 2d --focus src/components/Card.tsx
+prebase map --view 2d --focus src/components/Card.tsx
 
-# Open directly into the Temporal Graph (Git history)
-./target/release/prebase history
+# Open directly into the Temporal Graph (Git history DAG)
+prebase history
 
 # Analyze an explicit path without automatically opening the browser
-./target/release/prebase map /path/to/project --no-open
+prebase map /path/to/project --no-open
 
 # Bind to a custom port and disable filesystem watching
-./target/release/prebase map --port 8080 --no-watch
+prebase map --port 8080 --no-watch
 ```
 
 > **View Modes**: PreBase supports both a full volumetric **3D Overview** and a focused **2D Relationship Explorer**. By default, `prebase map` launches in 3D mode. Launching with `--view 2d` (or pressing `V` in the UI) switches directly into the deterministic 2D column view, with optional `--focus <path>` to center on a designated source file.
@@ -143,18 +208,26 @@ Navigate to any JavaScript or TypeScript repository and execute:
 ## CLI Reference
 
 ```text
-PreBase is a local-first codebase intelligence application that analyzes repository
-structure and Git history, rendering interactive Network and Temporal graphs in your local browser.
+PreBase CLI — Codebase Intelligence & Temporal Analysis
 
 Usage: prebase [OPTIONS] [PATH] [COMMAND]
 
 Commands:
-  map      Open repository directly into the interactive Network Graph
-  history  Inspect Git commit history, ancestry DAG, and changed files (Temporal Graph)
-  help     Print this message or the help of the given subcommand(s)
+  map         Launch interactive Network Graph (3D Overview & 2D Relationship Explorer)
+  history     Inspect Git commit ancestry DAG or print concise commit history
+  analyze     Print high-level architectural metrics and dependency hubs
+  files       List indexed repository source files with language and status
+  search      Search files by name or path ranked by dependency importance
+  inspect     Display detailed architecture inspection for a specific file
+  deps        List direct dependencies imported by a file
+  dependents  List direct dependents (callers) that import a file
+  path        Trace dependency path connecting two source files
+  status      Check status of active PreBase background server for this repository
+  stop        Stop active PreBase background server for this repository
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [PATH]   Target repository path to analyze (defaults to current directory)
+  [PATH]  Target repository path to analyze (defaults to current directory)
 
 Options:
       --port <PORT>  Specific port to bind the local server to (defaults to random available port)
@@ -162,10 +235,6 @@ Options:
       --no-watch     Disable live filesystem watching and graph synchronization
   -h, --help         Print help
   -V, --version      Print version
-
-Map Subcommand Options:
-      --view <VIEW>            Network graph view mode: '3d' (default) or '2d'
-      --focus <RELATIVE_PATH>  Relative file path to focus in the 2D relationship view or 3D graph
 ```
 
 ---
