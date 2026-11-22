@@ -64,9 +64,9 @@ export function clampPitch(pitch: number): number {
 // ============================================================================
 
 export function quaternionNormalize(q: Quaternion): Quaternion {
-  const [x = 0, y = 0, z = 0, w = 1] = q || [];
+  const [x, y, z, w] = q;
   const len = Math.hypot(x, y, z, w);
-  if (!Number.isFinite(len) || len < 1e-12) return [0, 0, 0, 1];
+  if (len < 1e-12) return [0, 0, 0, 1];
   return [x / len, y / len, z / len, w / len];
 }
 
@@ -139,17 +139,17 @@ export function quaternionSlerp(q1: Quaternion, q2: Quaternion, t: number): Quat
   const sinTheta = Math.sin(theta);
   const w1 = Math.sin((1 - t) * theta) / sinTheta;
   const w2 = Math.sin(t * theta) / sinTheta;
-  return quaternionNormalize([
+  return [
     w1 * q1[0] + w2 * q2Target[0],
     w1 * q1[1] + w2 * q2Target[1],
     w1 * q1[2] + w2 * q2Target[2],
     w1 * q1[3] + w2 * q2Target[3],
-  ]);
+  ];
 }
 
 export function computeQuaternionToFacePoint(localPos: Point3D): Quaternion {
   const len = Math.hypot(localPos.x, localPos.y, localPos.z);
-  if (!Number.isFinite(len) || len < 1e-6) return [0, 0, 0, 1];
+  if (len < 1e-6) return [0, 0, 0, 1];
   const u = { x: localPos.x / len, y: localPos.y / len, z: localPos.z / len };
   const dot = u.z;
   if (dot > 0.999999) return [0, 0, 0, 1];
@@ -159,12 +159,7 @@ export function computeQuaternionToFacePoint(localPos: Point3D): Quaternion {
 }
 
 export function ensureCameraOrientation(camera: NetworkCamera): NetworkCamera {
-  if (
-    camera.orientation &&
-    Array.isArray(camera.orientation) &&
-    camera.orientation.length === 4 &&
-    camera.orientation.every((v) => Number.isFinite(v))
-  ) {
+  if (camera.orientation && Array.isArray(camera.orientation) && camera.orientation.length === 4) {
     return camera;
   }
   return {
@@ -324,20 +319,20 @@ export function projectGraph(
 
     const projected = camera.orientation
       ? projectPoint3D(
-          localPos.x,
-          localPos.y,
-          localPos.z,
-          camera.orientation,
-          NETWORK_FOCAL_LENGTH
-        )
+        localPos.x,
+        localPos.y,
+        localPos.z,
+        camera.orientation,
+        NETWORK_FOCAL_LENGTH
+      )
       : projectPoint3D(
-          localPos.x,
-          localPos.y,
-          localPos.z,
-          camera.yaw,
-          camera.pitch,
-          NETWORK_FOCAL_LENGTH
-        );
+        localPos.x,
+        localPos.y,
+        localPos.z,
+        camera.yaw,
+        camera.pitch,
+        NETWORK_FOCAL_LENGTH
+      );
 
     const radius = computeNetworkVisualRadius(node, projected.depthScale, {
       entryNodeId: options?.entryNodeId,
@@ -683,7 +678,7 @@ export function computeOrbitRevealCamera(
   }
 
   const sgn = z >= 0 ? 1 : -1;
-  const targetPitch = clampPitch(Math.atan2(sgn * y, Math.max(1e-4, sgn * z)));
+  const targetPitch = Math.atan2(sgn * y, Math.max(1e-4, sgn * z));
   const yzHypot = Math.hypot(y, z);
   const targetYaw = wrapRotationAngle(Math.atan2(-x, sgn * Math.max(1e-4, yzHypot)));
   const targetOrientation = eulerToQuaternion(targetYaw, targetPitch);
@@ -878,13 +873,13 @@ export function resetGestureState(camera?: NetworkCamera): NetworkGestureState {
     startCamera: cam
       ? { ...cam }
       : {
-          orientation: DEFAULT_ORIENTATION,
-          yaw: DEFAULT_YAW,
-          pitch: DEFAULT_PITCH,
-          panX: 0,
-          panY: 0,
-          zoom: DEFAULT_ZOOM,
-        },
+        orientation: DEFAULT_ORIENTATION,
+        yaw: DEFAULT_YAW,
+        pitch: DEFAULT_PITCH,
+        panX: 0,
+        panY: 0,
+        zoom: DEFAULT_ZOOM,
+      },
     pointerId: null,
     pointerType: 'mouse',
     exceededThreshold: false,
@@ -909,7 +904,8 @@ export function shouldDrawNodeLabel(params: NodeLabelVisibilityParams): boolean 
   if (isSelected || isHovered) {
     return true;
   }
-  const isFrontFacing = projectedZ >= -15;
+  // Camera-space Z convention: negative Z is foreground (nearer), positive Z is background (farther).
+  const isFrontFacing = projectedZ <= 15;
   if (isConnectedToSelected && (isFrontFacing || zoom > 1.2)) {
     return true;
   }
@@ -917,9 +913,9 @@ export function shouldDrawNodeLabel(params: NodeLabelVisibilityParams): boolean 
   if (zoom <= 1.3) {
     return isHub && isFrontFacing;
   } else if (zoom <= 2.2) {
-    return isFrontFacing && (totalDegree >= 2 || projectedZ > 20);
+    return isFrontFacing && (totalDegree >= 2 || projectedZ < -20);
   } else {
-    return isFrontFacing || projectedZ > -40;
+    return isFrontFacing || projectedZ < 40;
   }
 }
 
@@ -1108,8 +1104,8 @@ export function computeLabelPriorityScore(params: LabelPriorityParams): number {
   if (params.isConnectedToSelected) score += 20000;
   if (params.isInFocusedArea) score += 10000;
 
-  // Foreground nodes (+z) receive substantial score boost
-  score += params.projectedZ * 10;
+  // Foreground nodes (-z in camera space / higher depthScale) receive substantial score boost
+  score += -params.projectedZ * 10;
   score += params.depthScale * 50;
   score += Math.min(20, params.totalDegree) * 5;
 

@@ -21,6 +21,7 @@ import {
   GESTURE_THRESHOLD_TOUCH,
   computeGraphCentroid,
   projectGraph,
+  projectPoint3D,
   computeNetworkFitTransform,
   isNodeVisibleInViewport,
   applyZoomAroundCursor,
@@ -31,6 +32,9 @@ import {
   isCenterDeadZone,
   ProjectedGraph,
   ProjectedNode,
+  ProjectedPoint,
+  CameraDepthShading,
+  NETWORK_FOCAL_LENGTH,
   shouldDrawNodeLabel,
   calculateReleaseSpeed,
   shouldInitiateInertia,
@@ -48,10 +52,16 @@ import {
   computeEdgeDepthAttenuation,
   compositeDepthColor,
 } from './render/networkRenderMath';
-import { resolveNetworkEdgeVisual } from './render/networkEdgeVisual';
-import { getFileTypeColor, ENTRY_NODE_COLOR } from './fileTypeColors';
+import { resolveNetworkEdgeVisual, resolveAreaEdgeVisual } from './render/networkEdgeVisual';
+import { getFileTypeColor, getAreaColor, ENTRY_NODE_COLOR } from './fileTypeColors';
 import { findEntryPointCandidate } from '../../utils/entryPointDetection';
-import { getAreaIdForPath } from '../../utils/repositoryAreas';
+import {
+  deriveRepositoryStructure,
+  getAreaIdForPath,
+  AreaEdge,
+  RepositoryArea,
+} from '../../utils/repositoryAreas';
+import { computeAreaAnchors } from './layout/sphereLayout';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -59,6 +69,7 @@ import {
   HoverHysteresisController,
   HOVER_RELEASE_GRACE_PERIOD_MS,
 } from './hoverHysteresis';
+import { X } from 'lucide-react';
 
 export interface RevealRequest {
   nodeId: string;
@@ -72,6 +83,9 @@ interface NetworkCanvasProps {
   selectedEdgeId: string | null;
   selectedAreaId?: string | null;
   selectedAreaIds?: string[] | null;
+  onSelectArea?: (areaId: string | null) => void;
+  selectedAreaEdge?: AreaEdge | null;
+  onSelectAreaEdge?: (edge: AreaEdge | null) => void;
   languageFilter?: 'all' | 'typescript' | 'rust' | 'python';
   highlightedNodeIds?: Set<string> | null;
   highlightedEdgeIds?: Set<string> | null;
@@ -103,6 +117,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   selectedEdgeId,
   selectedAreaId = null,
   selectedAreaIds = null,
+  onSelectArea,
+  selectedAreaEdge = null,
+  onSelectAreaEdge,
   languageFilter = 'all',
   highlightedNodeIds = null,
   highlightedEdgeIds = null,
@@ -124,6 +141,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [hoveredAreaId, setHoveredAreaId] = useState<string | null>(null);
+  const [hoveredAreaEdgeId, setHoveredAreaEdgeId] = useState<string | null>(null);
   const [showLegend, setShowLegend] = useState(false);
   const [positions, setPositions] = useState<Map<string, Point3D>>(new Map());
   const positionsRef = useRef<Map<string, Point3D>>(positions);
@@ -239,6 +258,41 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     return maxR;
   }, [positions]);
 
+  // Hierarchical Repository Architecture & Spherical Area Anchors
+  const repoStructure = useMemo(() => {
+    return deriveRepositoryStructure(snapshot.nodes, snapshot.edges);
+  }, [snapshot.nodes, snapshot.edges]);
+
+  const areaAnchors = useMemo(() => {
+    const areaIds = repoStructure.areas.map((a) => a.id);
+    return computeAreaAnchors(areaIds, sphereRadius);
+  }, [repoStructure.areas, sphereRadius]);
+
+  const isSmallRepo = snapshot.nodes.length <= 12 || repoStructure.areas.length <= 1;
+
+  const scope: 'overview' | 'area' | 'file' = selectedNodeId
+    ? 'file'
+    : selectedAreaId
+      ? 'area'
+      : 'overview';
+
+  interface ProjectedAreaAnchor {
+    area: RepositoryArea;
+    anchor: Point3D;
+    proj: ProjectedPoint;
+    screenX: number;
+    screenY: number;
+    radius: number;
+    isFront: boolean;
+    depthShading: CameraDepthShading;
+  }
+  const projectedAreaAnchorsRef = useRef<Map<string, ProjectedAreaAnchor>>(new Map());
+
+  const renderedEdgesRef = useRef<{
+    fileEdges: { edge: DependencyEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
+    areaEdges: { edge: AreaEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
+  }>({ fileEdges: [], areaEdges: [] });
+
   // Expose authoritative debug metrics for Playwright browser verification & runtime inspection
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -248,6 +302,25 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         getSphereRadius: () => sphereRadius,
         getHoveredNodeId: () => hoverControllerRef.current?.getCommittedHoverNodeId() ?? null,
         getSelectedNodeId: () => selectedNodeIdRef.current,
+        getScope: () => scope,
+        getSelectedAreaId: () => selectedAreaId,
+        getSelectedAreaEdge: () => selectedAreaEdge,
+        getAreaCount: () => repoStructure.areas.length,
+        getProjectedAreaAnchors: () =>
+          Array.from(projectedAreaAnchorsRef.current.values()).map((a) => ({
+            areaId: a.area.id,
+            name: a.area.name,
+            fileCount: a.area.fileCount,
+            screenX: a.screenX,
+            screenY: a.screenY,
+            radius: a.radius,
+            isFront: a.isFront,
+            z: a.proj.z,
+          })),
+        getRenderedEdgesCount: () => ({
+          fileEdges: renderedEdgesRef.current.fileEdges.length,
+          areaEdges: renderedEdgesRef.current.areaEdges.length,
+        }),
         setCamera: (updates: Partial<NetworkCamera>) => {
           cameraRef.current = { ...cameraRef.current, ...updates };
           requestRender();
@@ -275,7 +348,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         delete (window as any).__prebaseNetworkDebug;
       }
     };
-  }, [keepGraphCentered, sphereRadius, theme]);
+  }, [keepGraphCentered, sphereRadius, theme, scope, selectedAreaId, selectedAreaEdge, repoStructure]);
 
   // Maintain stable centering from projected bounds during rotation and viewport changes (Prebasecode applyCenterLock parity)
   const applyCenterLock = useCallback(
@@ -678,103 +751,373 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ? new Set([activeHighlightId, ...(neighborMap.get(activeHighlightId) || [])])
           : null;
 
-        // 2. Draw Edges
-        const edgesToDraw = [];
-        for (let i = 0; i < snapshot.edges.length; i++) {
-          const edge = snapshot.edges[i];
-          const p1 = projData.projectedMap.get(edge.source_file_id);
-          const p2 = projData.projectedMap.get(edge.target_file_id);
-          if (!p1 || !p2) continue;
+        // Reset rendered edge registries for this frame
+        renderedEdgesRef.current = { fileEdges: [], areaEdges: [] };
 
-          const isConnected = Boolean(
-            activeHighlightId &&
-            (edge.source_file_id === activeHighlightId || edge.target_file_id === activeHighlightId)
-          );
-          const isEdgeSelected = selectedEdgeId === edge.id;
-          const desc = resolveNetworkEdgeVisual(
-            edge,
-            isConnected || isEdgeSelected,
-            activeHighlightId,
-            camera.zoom,
-            null,
-            theme
-          );
-          if (!desc) continue;
+        // 1. Project Area Anchors
+        const areaAnchorsMap = new Map<string, ProjectedAreaAnchor>();
+        for (let i = 0; i < repoStructure.areas.length; i++) {
+          const area = repoStructure.areas[i];
+          const anchor = areaAnchors.get(area.id);
+          if (!anchor) continue;
 
-          // Depth attenuation: attenuate ordinary edges based on endpoint camera-relative depth
-          let depthMultiplier = 1.0;
-          if (!isEdgeSelected && !isConnected && (!highlightedEdgeIds || highlightedEdgeIds.size === 0)) {
-            const edgeProminence = computeEdgeDepthAttenuation(p1.projected.z, p2.projected.z, sphereRadius);
-            depthMultiplier = 0.35 + 0.65 * edgeProminence;
+          const proj = camera.orientation
+            ? projectPoint3D(anchor.x, anchor.y, anchor.z, camera.orientation, NETWORK_FOCAL_LENGTH)
+            : projectPoint3D(anchor.x, anchor.y, anchor.z, camera.yaw, camera.pitch, NETWORK_FOCAL_LENGTH);
+
+          const screenX = camera.panX + proj.x * camera.zoom;
+          const screenY = camera.panY + proj.y * camera.zoom;
+          const radius = Math.max(12, Math.min(22, 16 * proj.depthScale * Math.sqrt(Math.min(1.4, camera.zoom))));
+          const depthShading = computeCameraDepthShading(proj.z, sphereRadius, theme);
+          const isFront = proj.z <= 15;
+
+          areaAnchorsMap.set(area.id, {
+            area,
+            anchor,
+            proj,
+            screenX,
+            screenY,
+            radius,
+            isFront,
+            depthShading,
+          });
+        }
+        projectedAreaAnchorsRef.current = areaAnchorsMap;
+
+        // 2. Draw Edges based on scope
+        if (scope === 'overview' && !isSmallRepo) {
+          // OVERVIEW SCOPE: Draw aggregated area edges between area anchors!
+          for (let i = 0; i < repoStructure.areaEdges.length; i++) {
+            const aEdge = repoStructure.areaEdges[i];
+            const p1 = areaAnchorsMap.get(aEdge.sourceAreaId);
+            const p2 = areaAnchorsMap.get(aEdge.targetAreaId);
+            if (!p1 || !p2) continue;
+
+            const isSelected = selectedAreaEdge?.id === aEdge.id;
+            const isHovered = hoveredAreaEdgeId === aEdge.id;
+            const desc = resolveAreaEdgeVisual(aEdge, isSelected, isHovered, camera.zoom, theme);
+
+            // Camera depth attenuation
+            const edgeProminence = computeEdgeDepthAttenuation(p1.proj.z, p2.proj.z, sphereRadius);
+            const alphaMultiplier = isSelected ? 1.0 : (0.45 + 0.55 * edgeProminence);
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(p1.screenX, p1.screenY);
+            ctx.lineTo(p2.screenX, p2.screenY);
+            ctx.strokeStyle = desc.color;
+            ctx.lineWidth = desc.width;
+            ctx.globalAlpha = desc.alpha * alphaMultiplier;
+            if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
+            ctx.stroke();
+
+            // Directional arrow on area edge
+            if (desc.showArrow || isSelected) {
+              const dx = p2.screenX - p1.screenX;
+              const dy = p2.screenY - p1.screenY;
+              const len = Math.hypot(dx, dy);
+              if (len > 32) {
+                const midX = p1.screenX + dx * 0.60;
+                const midY = p1.screenY + dy * 0.60;
+                const angle = Math.atan2(dy, dx);
+                const arrowSize = Math.max(5.0, 6.5 * Math.min(1.3, camera.zoom));
+
+                ctx.fillStyle = desc.color;
+                ctx.beginPath();
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle - Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle - Math.PI / 6)
+                );
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle + Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle + Math.PI / 6)
+                );
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+            ctx.restore();
+
+            renderedEdgesRef.current.areaEdges.push({
+              edge: aEdge,
+              p1: { screenX: p1.screenX, screenY: p1.screenY },
+              p2: { screenX: p2.screenX, screenY: p2.screenY },
+            });
+          }
+        } else if (scope === 'file') {
+          // FILE SCOPE: Draw incident edges to selectedNodeId (or hoveredNodeId)
+          const targetId = selectedNodeId || hoveredNodeId;
+          const edgesToDraw = [];
+
+          for (let i = 0; i < snapshot.edges.length; i++) {
+            const edge = snapshot.edges[i];
+            const p1 = projData.projectedMap.get(edge.source_file_id);
+            const p2 = projData.projectedMap.get(edge.target_file_id);
+            if (!p1 || !p2) continue;
+
+            const isIncident = Boolean(
+              targetId && (edge.source_file_id === targetId || edge.target_file_id === targetId)
+            );
+            if (!isIncident && !selectedEdgeId) continue;
+
+            const isSelected = selectedEdgeId === edge.id;
+            const direction = edge.source_file_id === targetId
+              ? 'outgoing'
+              : edge.target_file_id === targetId
+                ? 'incoming'
+                : 'both';
+
+            const desc = resolveNetworkEdgeVisual(
+              edge,
+              isIncident || isSelected,
+              targetId,
+              camera.zoom,
+              entryCandidate?.nodeId,
+              theme,
+              direction
+            );
+            if (!desc) continue;
+
+            edgesToDraw.push({ p1, p2, edge, desc, isSelected });
           }
 
-          // If highlighted edges are specified (e.g. active dependency path or cycle group),
-          // dim non-path edges. Otherwise if architectural areas are selected, dim cross-area edges.
-          let areaAlphaMultiplier = 1.0;
-          if (highlightedEdgeIds && highlightedEdgeIds.size > 0) {
-            if (!highlightedEdgeIds.has(edge.id)) {
-              areaAlphaMultiplier = 0.08;
+          edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
+
+          for (let i = 0; i < edgesToDraw.length; i++) {
+            const { p1, p2, edge, desc, isSelected } = edgesToDraw[i];
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(p1.screenX, p1.screenY);
+            ctx.lineTo(p2.screenX, p2.screenY);
+            ctx.strokeStyle = desc.color;
+            ctx.lineWidth = desc.width;
+            ctx.globalAlpha = desc.alpha;
+            if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
+            ctx.stroke();
+
+            // Arrow
+            if (desc.showArrow || isSelected) {
+              const dx = p2.screenX - p1.screenX;
+              const dy = p2.screenY - p1.screenY;
+              const len = Math.hypot(dx, dy);
+              if (len > 24) {
+                const midX = p1.screenX + dx * 0.62;
+                const midY = p1.screenY + dy * 0.62;
+                const angle = Math.atan2(dy, dx);
+                const arrowSize = Math.max(4.5, 5.5 * Math.min(1.2, camera.zoom));
+
+                ctx.fillStyle = desc.color;
+                ctx.beginPath();
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle - Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle - Math.PI / 6)
+                );
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle + Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle + Math.PI / 6)
+                );
+                ctx.closePath();
+                ctx.fill();
+              }
             }
-          } else if (effectiveAreaSet && !activeHighlightId) {
+            ctx.restore();
+
+            renderedEdgesRef.current.fileEdges.push({
+              edge,
+              p1: { screenX: p1.screenX, screenY: p1.screenY },
+              p2: { screenX: p2.screenX, screenY: p2.screenY },
+            });
+          }
+        } else if (scope === 'area' && !isSmallRepo) {
+          // AREA SCOPE: Draw internal area edges + external edges connected to selectedAreaId
+          const activeArea = selectedAreaId;
+          const edgesToDraw = [];
+
+          for (let i = 0; i < snapshot.edges.length; i++) {
+            const edge = snapshot.edges[i];
+            const p1 = projData.projectedMap.get(edge.source_file_id);
+            const p2 = projData.projectedMap.get(edge.target_file_id);
+            if (!p1 || !p2) continue;
+
             const srcArea = getAreaIdForPath(p1.node.relative_path);
             const tgtArea = getAreaIdForPath(p2.node.relative_path);
-            if (!effectiveAreaSet.has(srcArea) && !effectiveAreaSet.has(tgtArea)) {
-              areaAlphaMultiplier = 0.08;
+            const isInternal = srcArea === activeArea && tgtArea === activeArea;
+            const isExternal = srcArea === activeArea || tgtArea === activeArea;
+
+            if (!isInternal && !isExternal) continue;
+
+            const isSelected = selectedEdgeId === edge.id;
+            const isIncident = Boolean(hoveredNodeId && (edge.source_file_id === hoveredNodeId || edge.target_file_id === hoveredNodeId));
+
+            const desc = resolveNetworkEdgeVisual(
+              edge,
+              isIncident || isSelected,
+              hoveredNodeId,
+              camera.zoom,
+              entryCandidate?.nodeId,
+              theme
+            );
+            if (!desc) continue;
+
+            let alphaMult = isInternal ? 1.0 : 0.65;
+            if (languageFilter && languageFilter !== 'all') {
+              if (!matchesLanguageFilter(p1.node, languageFilter) && !matchesLanguageFilter(p2.node, languageFilter)) {
+                alphaMult *= 0.1;
+              }
             }
+
+            edgesToDraw.push({ p1, p2, edge, desc, isSelected, alphaMult });
           }
 
-          if (languageFilter && languageFilter !== 'all') {
-            const srcMatch = matchesLanguageFilter(p1.node, languageFilter);
-            const tgtMatch = matchesLanguageFilter(p2.node, languageFilter);
-            if (!srcMatch && !tgtMatch) {
-              areaAlphaMultiplier *= 0.1;
+          edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
+
+          for (let i = 0; i < edgesToDraw.length; i++) {
+            const { p1, p2, edge, desc, isSelected, alphaMult } = edgesToDraw[i];
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(p1.screenX, p1.screenY);
+            ctx.lineTo(p2.screenX, p2.screenY);
+            ctx.strokeStyle = isSelected ? '#38bdf8' : desc.color;
+            ctx.lineWidth = isSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
+            ctx.globalAlpha = (isSelected ? 1.0 : desc.alpha) * alphaMult;
+            if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
+            ctx.stroke();
+
+            // Arrow
+            if (desc.showArrow || isSelected) {
+              const dx = p2.screenX - p1.screenX;
+              const dy = p2.screenY - p1.screenY;
+              const len = Math.hypot(dx, dy);
+              if (len > 24) {
+                const midX = p1.screenX + dx * 0.62;
+                const midY = p1.screenY + dy * 0.62;
+                const angle = Math.atan2(dy, dx);
+                const arrowSize = Math.max(4.0, 5.0 * Math.min(1.2, camera.zoom));
+
+                ctx.fillStyle = isSelected ? '#38bdf8' : desc.color;
+                ctx.beginPath();
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle - Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle - Math.PI / 6)
+                );
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle + Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle + Math.PI / 6)
+                );
+                ctx.closePath();
+                ctx.fill();
+              }
             }
+            ctx.restore();
+
+            renderedEdgesRef.current.fileEdges.push({
+              edge,
+              p1: { screenX: p1.screenX, screenY: p1.screenY },
+              p2: { screenX: p2.screenX, screenY: p2.screenY },
+            });
+          }
+        } else {
+          // SMALL REPO / DEFAULT SCOPE: Render all file edges
+          const activeHighlightId = selectedNodeId || hoveredNodeId;
+          const edgesToDraw = [];
+
+          for (let i = 0; i < snapshot.edges.length; i++) {
+            const edge = snapshot.edges[i];
+            const p1 = projData.projectedMap.get(edge.source_file_id);
+            const p2 = projData.projectedMap.get(edge.target_file_id);
+            if (!p1 || !p2) continue;
+
+            const isConnected = Boolean(
+              activeHighlightId &&
+              (edge.source_file_id === activeHighlightId || edge.target_file_id === activeHighlightId)
+            );
+            const isEdgeSelected = selectedEdgeId === edge.id;
+            const desc = resolveNetworkEdgeVisual(
+              edge,
+              isConnected || isEdgeSelected,
+              activeHighlightId,
+              camera.zoom,
+              entryCandidate?.nodeId,
+              theme
+            );
+            if (!desc) continue;
+
+            let depthMultiplier = 1.0;
+            if (!isEdgeSelected && !isConnected && (!highlightedEdgeIds || highlightedEdgeIds.size === 0)) {
+              const edgeProminence = computeEdgeDepthAttenuation(p1.projected.z, p2.projected.z, sphereRadius);
+              depthMultiplier = 0.35 + 0.65 * edgeProminence;
+            }
+
+            let areaAlphaMultiplier = 1.0;
+            if (highlightedEdgeIds && highlightedEdgeIds.size > 0) {
+              if (!highlightedEdgeIds.has(edge.id)) areaAlphaMultiplier = 0.08;
+            } else if (effectiveAreaSet && !activeHighlightId) {
+              const srcArea = getAreaIdForPath(p1.node.relative_path);
+              const tgtArea = getAreaIdForPath(p2.node.relative_path);
+              if (!effectiveAreaSet.has(srcArea) && !effectiveAreaSet.has(tgtArea)) {
+                areaAlphaMultiplier = 0.08;
+              }
+            }
+
+            if (languageFilter && languageFilter !== 'all') {
+              const srcMatch = matchesLanguageFilter(p1.node, languageFilter);
+              const tgtMatch = matchesLanguageFilter(p2.node, languageFilter);
+              if (!srcMatch && !tgtMatch) areaAlphaMultiplier *= 0.1;
+            }
+
+            edgesToDraw.push({ p1, p2, edge, desc, isEdgeSelected, areaAlphaMultiplier: areaAlphaMultiplier * depthMultiplier });
           }
 
-          edgesToDraw.push({ p1, p2, desc, isEdgeSelected, areaAlphaMultiplier: areaAlphaMultiplier * depthMultiplier });
-        }
+          edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
 
-        edgesToDraw.sort((a, b) => a.desc.priority - b.desc.priority);
+          for (let i = 0; i < edgesToDraw.length; i++) {
+            const { p1, p2, edge, desc, isEdgeSelected, areaAlphaMultiplier } = edgesToDraw[i];
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(p1.screenX, p1.screenY);
+            ctx.lineTo(p2.screenX, p2.screenY);
+            ctx.strokeStyle = isEdgeSelected ? '#38bdf8' : desc.color;
+            ctx.lineWidth = isEdgeSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
+            ctx.globalAlpha = (isEdgeSelected ? 1.0 : desc.alpha) * areaAlphaMultiplier;
+            if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
+            ctx.stroke();
 
-        for (let i = 0; i < edgesToDraw.length; i++) {
-          const { p1, p2, desc, isEdgeSelected, areaAlphaMultiplier } = edgesToDraw[i];
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(p1.screenX, p1.screenY);
-          ctx.lineTo(p2.screenX, p2.screenY);
-          ctx.strokeStyle = isEdgeSelected ? '#38bdf8' : desc.color;
-          ctx.lineWidth = isEdgeSelected ? Math.max(2.5, 3.2 / camera.zoom) : desc.width;
-          ctx.globalAlpha = (isEdgeSelected ? 1.0 : desc.alpha) * areaAlphaMultiplier;
-          if (desc.dash.length > 0) ctx.setLineDash(desc.dash);
-          ctx.stroke();
+            if (desc.showArrow || isEdgeSelected) {
+              const dx = p2.screenX - p1.screenX;
+              const dy = p2.screenY - p1.screenY;
+              const len = Math.hypot(dx, dy);
+              if (len > 24) {
+                const midX = p1.screenX + dx * 0.62;
+                const midY = p1.screenY + dy * 0.62;
+                const angle = Math.atan2(dy, dx);
+                const arrowSize = Math.max(4.0, 5.0 * Math.min(1.2, camera.zoom));
 
-          // Directional arrow pointing source -> target
-          if (desc.showArrow || isEdgeSelected) {
-            const dx = p2.screenX - p1.screenX;
-            const dy = p2.screenY - p1.screenY;
-            const len = Math.hypot(dx, dy);
-            if (len > 24) {
-              const midX = p1.screenX + dx * 0.62;
-              const midY = p1.screenY + dy * 0.62;
-              const angle = Math.atan2(dy, dx);
-              const arrowSize = Math.max(4.0, 5.0 * Math.min(1.2, camera.zoom));
-
-              ctx.fillStyle = isEdgeSelected ? '#38bdf8' : desc.color;
-              ctx.beginPath();
-              ctx.moveTo(midX, midY);
-              ctx.lineTo(
-                midX - arrowSize * Math.cos(angle - Math.PI / 6),
-                midY - arrowSize * Math.sin(angle - Math.PI / 6)
-              );
-              ctx.lineTo(
-                midX - arrowSize * Math.cos(angle + Math.PI / 6),
-                midY - arrowSize * Math.sin(angle + Math.PI / 6)
-              );
-              ctx.closePath();
-              ctx.fill();
+                ctx.fillStyle = isEdgeSelected ? '#38bdf8' : desc.color;
+                ctx.beginPath();
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle - Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle - Math.PI / 6)
+                );
+                ctx.lineTo(
+                  midX - arrowSize * Math.cos(angle + Math.PI / 6),
+                  midY - arrowSize * Math.sin(angle + Math.PI / 6)
+                );
+                ctx.closePath();
+                ctx.fill();
+              }
             }
+            ctx.restore();
+
+            renderedEdgesRef.current.fileEdges.push({
+              edge,
+              p1: { screenX: p1.screenX, screenY: p1.screenY },
+              p2: { screenX: p2.screenX, screenY: p2.screenY },
+            });
           }
-          ctx.restore();
         }
 
         // 3. Draw Nodes (sorted far-to-near for Painter's algorithm)
@@ -790,6 +1133,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             isDimmed = !connectedNodes.has(pNode.id);
           } else if (highlightedNodeIds) {
             isDimmed = !highlightedNodeIds.has(pNode.id);
+          } else if (scope === 'area' && selectedAreaId) {
+            isDimmed = getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId;
           } else if (effectiveAreaSet) {
             isDimmed = !effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
           }
@@ -798,7 +1143,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             isDimmed = !matchesLanguageFilter(pNode.node, languageFilter);
           }
 
-          const screenR = pNode.radius * camera.zoom;
+          const isOverviewMode = scope === 'overview' && !isSmallRepo;
+          const screenR = isOverviewMode
+            ? Math.max(2.8, Math.min(5.0, pNode.radius * 0.75 * camera.zoom))
+            : pNode.radius * camera.zoom;
+
           const depthShading = computeCameraDepthShading(
             pNode.projected.z,
             sphereRadius,
@@ -807,9 +1156,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           );
 
           ctx.save();
-          // Attenuate alpha based on camera-relative depth: front nodes 1.0, rear nodes 0.45
           const depthAlpha = 0.45 + 0.55 * depthShading.depth;
-          ctx.globalAlpha = isDimmed ? 0.16 : (isSelected || isHovered || isHighlighted ? 1.0 : depthAlpha);
+          ctx.globalAlpha = isDimmed
+            ? 0.12
+            : (isSelected || isHovered || isHighlighted ? 1.0 : (isOverviewMode ? depthAlpha * 0.85 : depthAlpha));
 
           const isLight = theme === 'light';
 
@@ -850,132 +1200,241 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             : isHovered
               ? (isLight ? '#0f172a' : '#f8fafc')
               : (isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(9, 13, 22, 0.85)');
-          ctx.lineWidth = isSelected || isHovered ? 1.8 : 1.0;
+          ctx.lineWidth = isSelected || isHovered ? 1.8 : (isOverviewMode ? 0.7 : 1.0);
           ctx.stroke();
           ctx.restore();
         }
 
-        // 4. Draw Node Labels (Decoupled Priority Ordering + Screen-Space Spatial Collision Hash)
+        // Draw Area Anchor Badges if in Overview mode
+        if (scope === 'overview' && !isSmallRepo) {
+          const sortedAnchors = Array.from(areaAnchorsMap.values()).sort((a, b) => b.proj.z - a.proj.z);
+          for (let i = 0; i < sortedAnchors.length; i++) {
+            const pAnchor = sortedAnchors[i];
+            const isAreaHovered = hoveredAreaId === pAnchor.area.id;
+            const isAreaSelected = selectedAreaId === pAnchor.area.id;
+            const areaColor = getAreaColor(pAnchor.area.id, theme);
+            const isLight = theme === 'light';
+
+            ctx.save();
+            ctx.globalAlpha = 0.50 + 0.50 * pAnchor.depthShading.depth;
+
+            // Outer glow ring
+            if (isAreaSelected || isAreaHovered) {
+              ctx.beginPath();
+              ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius + 4.5, 0, Math.PI * 2);
+              ctx.strokeStyle = areaColor;
+              ctx.lineWidth = isAreaSelected ? 3.0 : 2.0;
+              ctx.stroke();
+            }
+
+            // Badge fill
+            ctx.beginPath();
+            ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius, 0, Math.PI * 2);
+            ctx.fillStyle = areaColor;
+            ctx.fill();
+
+            // Badge border
+            ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.90)';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // Monogram text
+            const parts = pAnchor.area.name.split(/[-_/ ]+/).filter(Boolean);
+            const monogram = (parts.length >= 2 ? parts[0][0] + parts[1][0] : pAnchor.area.name.slice(0, 2)).toUpperCase();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `700 ${Math.round(pAnchor.radius * 0.8)}px "JetBrains Mono", ui-monospace, monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(monogram, pAnchor.screenX, pAnchor.screenY + 0.5);
+            ctx.restore();
+          }
+        }
+
+        // 4. Draw Labels
         const isLight = theme === 'light';
         const fontSize = Math.max(12, Math.min(16, Math.round(12.5 * Math.sqrt(camera.zoom))));
         const monoFont = `${fontSize}px "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
-        ctx.font = `500 ${monoFont}`;
 
-        interface CandidateLabel {
-          pNode: ProjectedNode;
-          isSelected: boolean;
-          isHovered: boolean;
-          priorityScore: number;
-          text: string;
-          labelY: number;
-          rect: ScreenRect;
-        }
+        if (scope === 'overview' && !isSmallRepo) {
+          // OVERVIEW SCOPE: Draw prominent Area Labels under front-facing anchors!
+          const areaCollisionGrid = new LabelCollisionGrid(90);
+          const frontAnchors = Array.from(areaAnchorsMap.values())
+            .filter((a) => a.isFront || a.depthShading.prominence >= 0.35)
+            .sort((a, b) => b.area.fileCount - a.area.fileCount);
 
-        const candidateLabels: CandidateLabel[] = [];
+          for (let i = 0; i < frontAnchors.length; i++) {
+            const pAnchor = frontAnchors[i];
+            const labelText = pAnchor.area.name;
+            const countText = `${pAnchor.area.fileCount} files`;
 
-        for (let i = 0; i < sortedNodes.length; i++) {
-          const pNode = sortedNodes[i];
-          const isSelected = selectedNodeId === pNode.id;
-          const isHovered = hoveredNodeId === pNode.id;
-          const isConnectedToSelected =
-            selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
-          const totalDegree =
-            pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
+            ctx.save();
+            ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const nameWidth = ctx.measureText(labelText).width;
+            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const countWidth = ctx.measureText(countText).width;
 
-          // Suppress label if language filter is active and node does not match
-          if (languageFilter && languageFilter !== 'all') {
-            if (!matchesLanguageFilter(pNode.node, languageFilter)) {
+            const boxWidth = Math.max(nameWidth, countWidth) + 14;
+            const boxHeight = 32;
+            const labelY = pAnchor.screenY + pAnchor.radius + 4;
+
+            const rect: ScreenRect = {
+              x1: pAnchor.screenX - boxWidth / 2,
+              y1: labelY - 2,
+              x2: pAnchor.screenX + boxWidth / 2,
+              y2: labelY + boxHeight,
+            };
+
+            if (!areaCollisionGrid.collides(rect)) {
+              areaCollisionGrid.insert(rect);
+
+              // Pill background
+              ctx.beginPath();
+              if (ctx.roundRect) {
+                ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
+              } else {
+                ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
+              }
+              ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.94)' : 'rgba(13, 18, 31, 0.90)';
+              ctx.fill();
+              ctx.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+
+              // Area name
+              ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'top';
+              ctx.fillText(labelText, pAnchor.screenX, labelY + 2);
+
+              // File count
+              ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+              ctx.fillText(countText, pAnchor.screenX, labelY + 16);
+            }
+            ctx.restore();
+          }
+        } else {
+          // AREA, FILE, OR SMALL REPO SCOPE: Draw Node Labels with Spatial Collision Grid
+          ctx.font = `500 ${monoFont}`;
+
+          interface CandidateLabel {
+            pNode: ProjectedNode;
+            isSelected: boolean;
+            isHovered: boolean;
+            priorityScore: number;
+            text: string;
+            labelY: number;
+            rect: ScreenRect;
+          }
+
+          const candidateLabels: CandidateLabel[] = [];
+
+          for (let i = 0; i < sortedNodes.length; i++) {
+            const pNode = sortedNodes[i];
+            const isSelected = selectedNodeId === pNode.id;
+            const isHovered = hoveredNodeId === pNode.id;
+            const isConnectedToSelected =
+              selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
+            const totalDegree =
+              pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
+
+            if (languageFilter && languageFilter !== 'all') {
+              if (!matchesLanguageFilter(pNode.node, languageFilter)) {
+                continue;
+              }
+            }
+
+            // In File scope: suppress labels for unrelated nodes
+            if (scope === 'file' && !isSelected && !isHovered && !isConnectedToSelected) {
               continue;
             }
-          }
 
-          // When a node is actively selected: suppress labels for background (unrelated) nodes
-          // unless it is selected, connected to selected, or hovered.
-          if (selectedNodeId !== null && !isSelected && !isHovered && !isConnectedToSelected) {
-            continue;
-          }
-
-          const shouldDraw = shouldDrawNodeLabel({
-            isSelected,
-            isHovered,
-            isConnectedToSelected,
-            projectedZ: pNode.projected.z,
-            totalDegree,
-            zoom: camera.zoom,
-          });
-
-          if (!shouldDraw) continue;
-
-          // Disambiguate duplicate filenames with minimal unique path suffix
-          const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
-          const screenR = pNode.radius * camera.zoom;
-          const textWidth = ctx.measureText(text).width;
-          const labelY = pNode.screenY + screenR + 4;
-          const rect: ScreenRect = {
-            x1: pNode.screenX - textWidth / 2 - 4,
-            y1: labelY - 2,
-            x2: pNode.screenX + textWidth / 2 + 4,
-            y2: labelY + fontSize + 2,
-          };
-
-          const isInFocusedArea =
-            effectiveAreaSet !== null && effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
-
-          const priorityScore = computeLabelPriorityScore({
-            isSelected,
-            isHovered,
-            isConnectedToSelected,
-            isInFocusedArea,
-            projectedZ: pNode.projected.z,
-            depthScale: pNode.projected.depthScale,
-            totalDegree,
-          });
-
-          candidateLabels.push({
-            pNode,
-            isSelected,
-            isHovered,
-            priorityScore,
-            text,
-            labelY,
-            rect,
-          });
-        }
-
-        // Sort candidates by priority score descending:
-        // selected/hovered -> directly connected -> focused area -> visible foreground -> background
-        candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
-
-        const collisionGrid = new LabelCollisionGrid(80);
-
-        for (let i = 0; i < candidateLabels.length; i++) {
-          const cand = candidateLabels[i];
-          const isPriority = cand.isSelected || cand.isHovered;
-
-          if (!isPriority) {
-            if (collisionGrid.collides(cand.rect)) {
-              continue;
+            // In Area scope: suppress labels for nodes outside selected area unless hovered
+            if (scope === 'area' && selectedAreaId) {
+              if (getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId && !isHovered) {
+                continue;
+              }
             }
+
+            const shouldDraw = shouldDrawNodeLabel({
+              isSelected,
+              isHovered,
+              isConnectedToSelected,
+              projectedZ: pNode.projected.z,
+              totalDegree,
+              zoom: camera.zoom,
+            });
+
+            if (!shouldDraw) continue;
+
+            const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
+            const screenR = pNode.radius * camera.zoom;
+            const textWidth = ctx.measureText(text).width;
+            const labelY = pNode.screenY + screenR + 4;
+            const rect: ScreenRect = {
+              x1: pNode.screenX - textWidth / 2 - 4,
+              y1: labelY - 2,
+              x2: pNode.screenX + textWidth / 2 + 4,
+              y2: labelY + fontSize + 2,
+            };
+
+            const isInFocusedArea =
+              effectiveAreaSet !== null && effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
+
+            const priorityScore = computeLabelPriorityScore({
+              isSelected,
+              isHovered,
+              isConnectedToSelected,
+              isInFocusedArea,
+              projectedZ: pNode.projected.z,
+              depthScale: pNode.projected.depthScale,
+              totalDegree,
+            });
+
+            candidateLabels.push({
+              pNode,
+              isSelected,
+              isHovered,
+              priorityScore,
+              text,
+              labelY,
+              rect,
+            });
           }
-          collisionGrid.insert(cand.rect);
 
-          ctx.save();
-          ctx.font = isPriority ? `600 ${monoFont}` : `500 ${monoFont}`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
+          candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
 
-          // Theme-adaptive halo stroke for maximum legibility
-          ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
-          ctx.lineWidth = 3.5;
-          ctx.strokeText(cand.text, cand.pNode.screenX, cand.labelY);
+          const collisionGrid = new LabelCollisionGrid(80);
 
-          ctx.fillStyle = cand.isSelected
-            ? (isLight ? '#0d9488' : '#2dd4bf')
-            : cand.isHovered
-              ? (isLight ? '#0284c7' : '#38bdf8')
-              : (isLight ? '#0f172a' : '#f1f5f9');
-          ctx.fillText(cand.text, cand.pNode.screenX, cand.labelY);
-          ctx.restore();
+          for (let i = 0; i < candidateLabels.length; i++) {
+            const cand = candidateLabels[i];
+            const isPriority = cand.isSelected || cand.isHovered;
+
+            if (!isPriority) {
+              if (collisionGrid.collides(cand.rect)) {
+                continue;
+              }
+            }
+            collisionGrid.insert(cand.rect);
+
+            ctx.save();
+            ctx.font = isPriority ? `600 ${monoFont}` : `500 ${monoFont}`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+
+            ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
+            ctx.lineWidth = 3.5;
+            ctx.strokeText(cand.text, cand.pNode.screenX, cand.labelY);
+
+            ctx.fillStyle = cand.isSelected
+              ? (isLight ? '#0d9488' : '#2dd4bf')
+              : cand.isHovered
+                ? (isLight ? '#0284c7' : '#38bdf8')
+                : (isLight ? '#0f172a' : '#f1f5f9');
+            ctx.fillText(cand.text, cand.pNode.screenX, cand.labelY);
+            ctx.restore();
+          }
         }
       } finally {
         ctx.restore();
@@ -992,7 +1451,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       selectedNodeId,
       selectedEdgeId,
       hoveredNodeId,
+      hoveredAreaId,
+      hoveredAreaEdgeId,
       selectedAreaId,
+      selectedAreaEdge,
       effectiveAreaSet,
       languageFilter,
       highlightedNodeIds,
@@ -1000,6 +1462,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       entryCandidate,
       disambiguatedLabels,
       neighborMap,
+      repoStructure,
+      areaAnchors,
+      isSmallRepo,
+      scope,
       isVisible,
       theme,
     ]
@@ -1014,7 +1480,27 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
-  }, [snapshot, positions, selectedNodeId, selectedEdgeId, hoveredNodeId, selectedAreaId, effectiveAreaSet, languageFilter, highlightedNodeIds, highlightedEdgeIds, isVisible, theme, requestRender]);
+  }, [
+    snapshot,
+    positions,
+    selectedNodeId,
+    selectedEdgeId,
+    hoveredNodeId,
+    hoveredAreaId,
+    hoveredAreaEdgeId,
+    selectedAreaId,
+    selectedAreaEdge,
+    effectiveAreaSet,
+    languageFilter,
+    highlightedNodeIds,
+    highlightedEdgeIds,
+    repoStructure,
+    isSmallRepo,
+    scope,
+    isVisible,
+    theme,
+    requestRender,
+  ]);
 
   // Clean up RAF and inertia on unmount
   useEffect(() => {
@@ -1062,8 +1548,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const findEdgeAtPoint = useCallback(
     (clientX: number, clientY: number): DependencyEdge | null => {
       const canvas = canvasRef.current;
-      const projData = projectedDataRef.current;
-      if (!canvas || !projData) return null;
+      if (!canvas) return null;
 
       const rect = canvas.getBoundingClientRect();
       const screenX = clientX - rect.left;
@@ -1073,6 +1558,27 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       let bestEdge: DependencyEdge | null = null;
       let bestDist = Infinity;
 
+      // Test against rendered edges first for exact parity with screen
+      const edgeList = renderedEdgesRef.current.fileEdges;
+      if (edgeList.length > 0) {
+        for (let i = 0; i < edgeList.length; i++) {
+          const item = edgeList[i];
+          const dist = pointToSegmentDistance(
+            { x: screenX, y: screenY },
+            { x: item.p1.screenX, y: item.p1.screenY },
+            { x: item.p2.screenX, y: item.p2.screenY }
+          );
+          if (dist <= hitTolerance && dist < bestDist) {
+            bestDist = dist;
+            bestEdge = item.edge;
+          }
+        }
+        return bestEdge;
+      }
+
+      // Fallback
+      const projData = projectedDataRef.current;
+      if (!projData) return null;
       for (let i = 0; i < snapshot.edges.length; i++) {
         const edge = snapshot.edges[i];
         const p1 = projData.projectedMap.get(edge.source_file_id);
@@ -1093,6 +1599,58 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return bestEdge;
     },
     [snapshot.edges]
+  );
+
+  const findAreaAnchorAtPoint = useCallback(
+    (clientX: number, clientY: number): RepositoryArea | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+
+      let bestArea: RepositoryArea | null = null;
+      let bestDist = Infinity;
+
+      for (const [, projAnchor] of projectedAreaAnchorsRef.current.entries()) {
+        const dist = Math.hypot(projAnchor.screenX - screenX, projAnchor.screenY - screenY);
+        const hitRadius = Math.max(projAnchor.radius + 8, 20);
+        if (dist <= hitRadius && dist < bestDist) {
+          bestDist = dist;
+          bestArea = projAnchor.area;
+        }
+      }
+      return bestArea;
+    },
+    []
+  );
+
+  const findAreaEdgeAtPoint = useCallback(
+    (clientX: number, clientY: number): AreaEdge | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+
+      const hitTolerance = 8;
+      let bestEdge: AreaEdge | null = null;
+      let bestDist = Infinity;
+
+      for (const rendered of renderedEdgesRef.current.areaEdges) {
+        const dist = pointToSegmentDistance(
+          { x: screenX, y: screenY },
+          { x: rendered.p1.screenX, y: rendered.p1.screenY },
+          { x: rendered.p2.screenX, y: rendered.p2.screenY }
+        );
+        if (dist <= hitTolerance && dist < bestDist) {
+          bestDist = dist;
+          bestEdge = rendered.edge;
+        }
+      }
+      return bestEdge;
+    },
+    []
   );
 
   function pointToSegmentDistance(
@@ -1214,12 +1772,61 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return;
     }
 
-    // Hover hit test with hysteresis (lingering commits after 100ms, fast traverse does not strobe)
-    const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-    if (hitNode) {
-      hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
+    // Hover hit test with hysteresis based on scope
+    if (scope === 'overview' && !isSmallRepo) {
+      const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
+      if (hitArea) {
+        if (hoveredAreaId !== hitArea.id) {
+          setHoveredAreaId(hitArea.id);
+          requestRender();
+        }
+        setHoveredAreaEdgeId(null);
+        hoverControllerRef.current?.handlePointerMoveOverEmpty();
+        if (canvasRef.current) canvasRef.current.style.cursor = 'pointer';
+        return;
+      } else if (hoveredAreaId !== null) {
+        setHoveredAreaId(null);
+        requestRender();
+      }
+
+      const hitAreaEdge = findAreaEdgeAtPoint(e.clientX, e.clientY);
+      if (hitAreaEdge) {
+        if (hoveredAreaEdgeId !== hitAreaEdge.id) {
+          setHoveredAreaEdgeId(hitAreaEdge.id);
+          requestRender();
+        }
+        hoverControllerRef.current?.handlePointerMoveOverEmpty();
+        if (canvasRef.current) canvasRef.current.style.cursor = 'pointer';
+        return;
+      } else if (hoveredAreaEdgeId !== null) {
+        setHoveredAreaEdgeId(null);
+        requestRender();
+      }
+
+      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+      if (hitNode) {
+        hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
+        if (canvasRef.current) canvasRef.current.style.cursor = 'pointer';
+      } else {
+        hoverControllerRef.current?.handlePointerMoveOverEmpty();
+        if (canvasRef.current) canvasRef.current.style.cursor = '';
+      }
     } else {
-      hoverControllerRef.current?.handlePointerMoveOverEmpty();
+      if (hoveredAreaId !== null) {
+        setHoveredAreaId(null);
+        requestRender();
+      }
+      if (hoveredAreaEdgeId !== null) {
+        setHoveredAreaEdgeId(null);
+        requestRender();
+      }
+
+      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+      if (hitNode) {
+        hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
+      } else {
+        hoverControllerRef.current?.handlePointerMoveOverEmpty();
+      }
     }
   };
 
@@ -1257,22 +1864,72 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     // If click below threshold: perform selection WITHOUT moving the camera
     if (!wasDragging) {
-      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-      if (hitNode) {
-        hoverControllerRef.current?.handleClickNode(hitNode.id);
-        onSelectNode(hitNode);
-        onSelectEdge(null);
-        onAnnounce?.(`Selected file ${hitNode.filename}`);
-      } else {
-        const hitEdge = findEdgeAtPoint(e.clientX, e.clientY);
-        if (hitEdge) {
-          onSelectEdge(hitEdge);
-          onSelectNode(null);
-          onAnnounce?.(`Selected relationship ${hitEdge.relationship_kind}`);
-        } else {
-          // Click empty background clears selection
+      if (scope === 'overview' && !isSmallRepo) {
+        const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
+        if (hitArea) {
+          onSelectArea?.(hitArea.id);
           onSelectNode(null);
           onSelectEdge(null);
+          onSelectAreaEdge?.(null);
+          onAnnounce?.(`Focused architectural area ${hitArea.name}`);
+          return;
+        }
+
+        const hitAreaEdge = findAreaEdgeAtPoint(e.clientX, e.clientY);
+        if (hitAreaEdge) {
+          onSelectAreaEdge?.(hitAreaEdge);
+          onSelectNode(null);
+          onSelectEdge(null);
+          onAnnounce?.(`Selected inter-area relationship between ${hitAreaEdge.sourceAreaId} and ${hitAreaEdge.targetAreaId}`);
+          return;
+        }
+
+        const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+        if (hitNode) {
+          hoverControllerRef.current?.handleClickNode(hitNode.id);
+          onSelectNode(hitNode);
+          onSelectEdge(null);
+          onSelectAreaEdge?.(null);
+          onAnnounce?.(`Selected file ${hitNode.filename}`);
+          return;
+        }
+
+        onSelectNode(null);
+        onSelectEdge(null);
+        onSelectAreaEdge?.(null);
+      } else {
+        const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+        if (hitNode) {
+          hoverControllerRef.current?.handleClickNode(hitNode.id);
+          onSelectNode(hitNode);
+          onSelectEdge(null);
+          onSelectAreaEdge?.(null);
+          onAnnounce?.(`Selected file ${hitNode.filename}`);
+        } else {
+          const hitEdge = findEdgeAtPoint(e.clientX, e.clientY);
+          if (hitEdge) {
+            onSelectEdge(hitEdge);
+            onSelectNode(null);
+            onSelectAreaEdge?.(null);
+            onAnnounce?.(`Selected relationship ${hitEdge.relationship_kind}`);
+          } else {
+            const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
+            if (hitArea && hitArea.id !== selectedAreaId) {
+              onSelectArea?.(hitArea.id);
+              onSelectNode(null);
+              onSelectEdge(null);
+              onSelectAreaEdge?.(null);
+              onAnnounce?.(`Switched to area ${hitArea.name}`);
+            } else {
+              if (selectedNodeId) {
+                onSelectNode(null);
+              } else if (selectedAreaId) {
+                onSelectArea?.(null);
+              }
+              onSelectEdge(null);
+              onSelectAreaEdge?.(null);
+            }
+          }
         }
       }
     } else if (previousMode === 'rotating') {
@@ -1413,7 +2070,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     }
 
     if (e.key === 'Escape') {
-      onSelectNode(null);
+      if (selectedNodeId) {
+        onSelectNode(null);
+      } else if (selectedAreaEdge) {
+        onSelectAreaEdge?.(null);
+      } else if (selectedAreaId) {
+        onSelectArea?.(null);
+      }
       onSelectEdge(null);
       return;
     }
@@ -1544,11 +2207,80 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ? gestureRef.current.mode === 'panning'
             ? 'move'
             : 'grabbing'
-          : hoveredNodeId
+          : hoveredAreaId || hoveredAreaEdgeId || hoveredNodeId
             ? 'pointer'
             : 'grab',
       }}
     >
+      {/* Interactive Hierarchical Breadcrumb Navigation */}
+      <div className="network-breadcrumb-bar" role="navigation" aria-label="Graph Level Navigation">
+        <button
+          type="button"
+          className={`crumb-btn ${scope === 'overview' ? 'active' : ''}`}
+          onClick={() => {
+            onSelectArea?.(null);
+            onSelectNode(null);
+            onSelectAreaEdge?.(null);
+          }}
+          title="Return to Repository Overview"
+        >
+          Overview
+        </button>
+
+        {selectedAreaId && (
+          <>
+            <span className="crumb-sep">/</span>
+            <button
+              type="button"
+              className={`crumb-btn ${scope === 'area' ? 'active' : ''}`}
+              onClick={() => {
+                onSelectNode(null);
+                onSelectAreaEdge?.(null);
+              }}
+              title={`Area: ${selectedAreaId}`}
+            >
+              Area: {selectedAreaId}
+            </button>
+          </>
+        )}
+
+        {selectedNodeId && (
+          <>
+            <span className="crumb-sep">/</span>
+            <span className="crumb-current">
+              {snapshot.nodes.find((n) => n.id === selectedNodeId)?.filename || 'File'}
+            </span>
+            <button
+              type="button"
+              className="crumb-clear-btn"
+              onClick={() => onSelectNode(null)}
+              title="Deselect file"
+              aria-label="Deselect file"
+            >
+              <X size={12} />
+            </button>
+          </>
+        )}
+
+        {selectedAreaEdge && !selectedNodeId && (
+          <>
+            <span className="crumb-sep">/</span>
+            <span className="crumb-current">
+              {selectedAreaEdge.sourceAreaId} → {selectedAreaEdge.targetAreaId} ({selectedAreaEdge.edgeCount})
+            </span>
+            <button
+              type="button"
+              className="crumb-clear-btn"
+              onClick={() => onSelectAreaEdge?.(null)}
+              title="Deselect area relationship"
+              aria-label="Deselect area relationship"
+            >
+              <X size={12} />
+            </button>
+          </>
+        )}
+      </div>
+
       <canvas
         ref={canvasRef}
         tabIndex={0}
@@ -1592,7 +2324,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           aria-label="Network Graph Legend and Architectural Guide"
         >
           <div className="graph-legend-header">
-            <h4>Codebase Orb Guide</h4>
+            <h4>Codebase Architecture Guide</h4>
             <button
               type="button"
               className="graph-legend-close"
@@ -1603,10 +2335,25 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             </button>
           </div>
           <p className="legend-desc">
-            Files in the same directory cluster in the same spherical sector. Connected lines represent code imports.
+            PreBase organizes the codebase into 3D architectural zones on the sphere. Connections aggregate inter-area dependencies.
           </p>
           <div className="legend-section">
-            <span className="legend-label">File Colors</span>
+            <span className="legend-label">Exploration Levels</span>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#6366f1' }} />
+              <span><strong>Overview:</strong> Architectural areas &amp; component relationships</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#38bdf8' }} />
+              <span><strong>Area View:</strong> Internal files &amp; external boundaries</span>
+            </div>
+            <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#2dd4bf' }} />
+              <span><strong>File View:</strong> Immediate dependencies &amp; dependents</span>
+            </div>
+          </div>
+          <div className="legend-section">
+            <span className="legend-label">File Types</span>
             <div className="legend-row">
               <span className="legend-swatch" style={{ background: '#38bdf8' }} />
               <span>TypeScript / JavaScript</span>
@@ -1616,12 +2363,16 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               <span>Rust / Systems</span>
             </div>
             <div className="legend-row">
+              <span className="legend-swatch" style={{ background: '#3572A5' }} />
+              <span>Python / Scripts</span>
+            </div>
+            <div className="legend-row">
               <span className="legend-swatch" style={{ background: '#a855f7' }} />
-              <span>Styles & CSS</span>
+              <span>Styles &amp; CSS</span>
             </div>
             <div className="legend-row">
               <span className="legend-swatch" style={{ background: '#eab308' }} />
-              <span>Config & Data</span>
+              <span>Config &amp; Data</span>
             </div>
             {entryCandidate && (
               <div className="legend-row">
@@ -1631,22 +2382,23 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             )}
           </div>
           <div className="legend-section">
-            <span className="legend-label">Connections</span>
+            <span className="legend-label">Dependency Direction</span>
             <div className="legend-row">
-              <span className="legend-line solid" />
-              <span>Solid: Direct static import (arrow points to imported file)</span>
+              <span className="legend-swatch" style={{ background: '#2dd4bf' }} />
+              <span>Outgoing: Files this component depends on</span>
             </div>
             <div className="legend-row">
-              <span className="legend-line dashed" />
-              <span>Dashed: Dynamic or type-only dependency</span>
+              <span className="legend-swatch" style={{ background: '#a78bfa' }} />
+              <span>Incoming: Components that import this file</span>
             </div>
           </div>
           <div className="legend-section">
             <span className="legend-label">Controls</span>
             <div className="legend-keys">
-              <span><strong>Drag:</strong> Rotate orb</span>
+              <span><strong>Drag:</strong> Rotate 3D orb continuously</span>
               <span><strong>Shift+drag:</strong> Pan</span>
               <span><strong>Scroll:</strong> Zoom in/out</span>
+              <span><strong>Click area:</strong> Drill into architectural area</span>
               <span><strong>Click file:</strong> Inspect relations</span>
             </div>
           </div>

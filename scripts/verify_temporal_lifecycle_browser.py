@@ -64,6 +64,13 @@ def mask_credentials(text: str) -> str:
     text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
     return text
 
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def log(msg):
     print(f"\x1b[36m[TEMPORAL/LIFECYCLE]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 

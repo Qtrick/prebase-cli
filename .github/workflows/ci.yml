@@ -140,6 +140,9 @@ jobs:
       - name: Run Behavioral Regression Real Browser Verification
         run: python3 scripts/verify_behavioral_regression_browser.py
 
+      - name: Run Unrestricted 3D Rotation & Native Zoom Browser Verification
+        run: python3 scripts/verify_unrestricted_rotation_and_zoom_browser.py
+
       - name: Run Performance Benchmarks
         run: ./scripts/benchmark.sh
 

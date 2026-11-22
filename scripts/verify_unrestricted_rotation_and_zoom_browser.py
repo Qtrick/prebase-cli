@@ -22,6 +22,7 @@ import time
 import json
 import signal
 import subprocess
+import re
 import socket
 import tempfile
 import shutil
@@ -33,8 +34,25 @@ PORT = 19991
 SCREENSHOT_DIR = os.path.join(ROOT_DIR, "docs", "screenshots")
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
+
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def log(msg):
-    print(f"\x1b[35m[PHASE-16-VERIFY]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[35m[PHASE-16-VERIFY]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 def setup_rich_test_repo():
     repo_dir = tempfile.mkdtemp(prefix="prebase-phase16-")
@@ -114,14 +132,18 @@ def main():
                 break
             time.sleep(0.1)
 
-        assert startup_url and bootstrap_token, f"Failed to capture startup URL with bootstrap token: {startup_url}"
+        assert startup_url and bootstrap_token, f"Failed to capture startup URL with bootstrap token: {mask_credentials(str(startup_url))}"
         log(f"Server started at {startup_url}")
         time.sleep(0.5)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 800})
-            page.goto(startup_url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                page.goto(startup_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception as e:
+                sanitized_err = mask_credentials(str(e))
+                raise RuntimeError(f"Browser navigation failed: {sanitized_err}") from None
             page.wait_for_selector(".network-canvas", timeout=10000)
             page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=10000)
             time.sleep(0.5)

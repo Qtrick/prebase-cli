@@ -62,14 +62,14 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
   // 1. Label Hierarchy & Visual Prominence Invariants
   // =========================================================================
   describe('1. Label Hierarchy & Visual Prominence Determination', () => {
-    describe('Hemisphere Boundary Thresholds (projectedZ >= -15)', () => {
-      it('treats projectedZ = -14.99 as front hemisphere and -15.01 as back hemisphere', () => {
+    describe('Hemisphere Boundary Thresholds (projectedZ <= 15)', () => {
+      it('treats projectedZ = 14.99 as front hemisphere and 15.01 as back hemisphere', () => {
         // Hub node with degree 4 in overview (zoom = 1.0)
         const frontBoundaryNode = shouldDrawNodeLabel({
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -14.99,
+          projectedZ: 14.99,
           totalDegree: 4,
           zoom: 1.0,
         });
@@ -79,7 +79,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -15.0,
+          projectedZ: 15.0,
           totalDegree: 4,
           zoom: 1.0,
         });
@@ -89,7 +89,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -15.01,
+          projectedZ: 15.01,
           totalDegree: 4,
           zoom: 1.0,
         });
@@ -103,7 +103,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 10,
+          projectedZ: -10,
           totalDegree: 4,
           zoom: 1.0,
         });
@@ -113,7 +113,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 50,
+          projectedZ: -50,
           totalDegree: 12,
           zoom: 1.25,
         });
@@ -125,7 +125,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 20,
+          projectedZ: -20,
           totalDegree: 3,
           zoom: 1.0,
         });
@@ -135,7 +135,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 30,
+          projectedZ: -30,
           totalDegree: 0,
           zoom: 1.3,
         });
@@ -147,7 +147,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -35,
+          projectedZ: 35,
           totalDegree: 15,
           zoom: 1.0,
         });
@@ -161,19 +161,19 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 5,
+          projectedZ: -5,
           totalDegree: 2,
           zoom: 1.6,
         });
         expect(moderateFrontNode).toBe(true);
       });
 
-      it('reveals low-degree front nodes only if they are positioned strongly forward (z > 20)', () => {
+      it('reveals low-degree front nodes only if they are positioned strongly forward (z < -20)', () => {
         const forwardLeafNode = shouldDrawNodeLabel({
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 21,
+          projectedZ: -21,
           totalDegree: 1,
           zoom: 1.8,
         });
@@ -183,7 +183,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: 19,
+          projectedZ: -19,
           totalDegree: 1,
           zoom: 1.8,
         });
@@ -195,7 +195,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -18,
+          projectedZ: 18,
           totalDegree: 6,
           zoom: 2.0,
         });
@@ -209,19 +209,19 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -10,
+          projectedZ: 10,
           totalDegree: 0,
           zoom: 2.5,
         });
         expect(zeroDegreeFrontNode).toBe(true);
       });
 
-      it('reveals shallow back-hemisphere nodes (z > -40) but suppresses deep back nodes (z <= -40)', () => {
+      it('reveals shallow back-hemisphere nodes (z < 40) but suppresses deep back nodes (z >= 40)', () => {
         const shallowBackNode = shouldDrawNodeLabel({
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -38,
+          projectedZ: 38,
           totalDegree: 1,
           zoom: 2.8,
         });
@@ -231,7 +231,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -42,
+          projectedZ: 42,
           totalDegree: 5,
           zoom: 2.8,
         });
@@ -245,7 +245,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: true,
           isHovered: false,
           isConnectedToSelected: false,
-          projectedZ: -120,
+          projectedZ: 120,
           totalDegree: 0,
           zoom: 0.2,
         });
@@ -257,7 +257,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: true,
           isConnectedToSelected: false,
-          projectedZ: -95,
+          projectedZ: 95,
           totalDegree: 0,
           zoom: 0.4,
         });
@@ -269,7 +269,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: true,
-          projectedZ: 5,
+          projectedZ: -5,
           totalDegree: 1,
           zoom: 0.6,
         });
@@ -281,7 +281,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: true,
-          projectedZ: -30,
+          projectedZ: 30,
           totalDegree: 1,
           zoom: 1.15,
         });
@@ -291,7 +291,7 @@ describe('PreBase UI/UX & Motion Design Behavioral Regression Suite', () => {
           isSelected: false,
           isHovered: false,
           isConnectedToSelected: true,
-          projectedZ: -30,
+          projectedZ: 30,
           totalDegree: 1,
           zoom: 1.25,
         });

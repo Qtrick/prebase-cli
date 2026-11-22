@@ -1,4 +1,5 @@
 import { DependencyEdge } from '../../../types/graph';
+import { AreaEdge } from '../../../utils/repositoryAreas';
 
 export interface EdgeVisualDescriptor {
   color: string;
@@ -9,19 +10,73 @@ export interface EdgeVisualDescriptor {
   showArrow: boolean;
 }
 
+export function resolveAreaEdgeVisual(
+  areaEdge: AreaEdge,
+  isSelected: boolean,
+  isHovered: boolean,
+  zoom: number,
+  theme: 'dark' | 'light' = 'dark'
+): EdgeVisualDescriptor {
+  const isLight = theme === 'light';
+  const baseWeight = Math.min(4.5, Math.max(1.8, 1.2 + 0.7 * Math.log2(1 + areaEdge.edgeCount)));
+
+  if (isSelected) {
+    return {
+      color: isLight ? '#0284c7' : '#38bdf8',
+      width: Math.max(3.0, (baseWeight + 1.5) / zoom),
+      alpha: 1.0,
+      dash: [],
+      priority: 150,
+      showArrow: true,
+    };
+  }
+
+  if (isHovered) {
+    return {
+      color: isLight ? '#4f46e5' : '#818cf8',
+      width: Math.max(2.5, (baseWeight + 1.0) / zoom),
+      alpha: 0.95,
+      dash: [],
+      priority: 120,
+      showArrow: true,
+    };
+  }
+
+  return {
+    color: isLight ? 'rgba(79, 70, 229, 0.60)' : 'rgba(129, 140, 248, 0.60)',
+    width: Math.max(1.6, baseWeight / Math.max(0.6, zoom)),
+    alpha: 0.60,
+    dash: [],
+    priority: 50,
+    showArrow: zoom >= 0.45,
+  };
+}
+
 export function resolveNetworkEdgeVisual(
   edge: DependencyEdge,
   isConnectedToHighlight: boolean,
   activeHighlightId: string | null | undefined,
   zoom: number,
   entryNodeId?: string | null,
-  theme: 'dark' | 'light' = 'dark'
+  theme: 'dark' | 'light' = 'dark',
+  direction?: 'outgoing' | 'incoming' | 'both'
 ): EdgeVisualDescriptor | null {
   const isLight = theme === 'light';
 
   if (isConnectedToHighlight) {
+    const isOutgoing = direction === 'outgoing';
+    const isIncoming = direction === 'incoming';
+
+    // Outgoing dependencies: Electric Cyan / Teal
+    // Incoming dependencies: Soft Violet / Purple
+    const highlightColor = isOutgoing
+      ? (isLight ? '#0d9488' : '#2dd4bf')
+      : isIncoming
+        ? (isLight ? '#7c3aed' : '#a78bfa')
+        : (isLight ? '#0d9488' : '#2dd4bf');
+
     return {
-      color: isLight ? '#0d9488' : '#2dd4bf',
+      color: highlightColor,
       width: Math.max(2.0, 2.4 / zoom),
       alpha: 1.0,
       dash: edge.relationship_kind === 'DynamicImport' ? [4, 4] : [],

@@ -30,6 +30,7 @@ import { TemporalCanvas } from '../graphs/temporal/TemporalCanvas';
 import { SearchBox } from '../search/SearchBox';
 import { Inspector } from '../inspector/Inspector';
 import { CommitInspector } from '../inspector/CommitInspector';
+import { AreaEdge } from '../utils/repositoryAreas';
 import {
   Share2,
   Clock,
@@ -219,6 +220,7 @@ export const App: React.FC = () => {
   const selectedNodeRef = useRef(selectedNode);
   selectedNodeRef.current = selectedNode;
   const [selectedEdge, setSelectedEdge] = useState<DependencyEdge | null>(null);
+  const [selectedAreaEdge, setSelectedAreaEdge] = useState<AreaEdge | null>(null);
   const [selectedAreaIds, setSelectedAreaIds] = useState<string[]>([]);
   const selectedAreaId = selectedAreaIds.length === 1 ? selectedAreaIds[0] : null;
   const [selectedLanguageFilter, setSelectedLanguageFilter] = useState<'all' | 'typescript' | 'rust' | 'python'>('all');
@@ -957,6 +959,8 @@ export const App: React.FC = () => {
       setSelectedNode(node);
       if (node) {
         setSelectedEdge(null);
+        setSelectedAreaEdge(null);
+        setSelectedCycleGroup(null);
       }
       if (node && options?.reveal) {
         setRevealRequest({
@@ -981,14 +985,25 @@ export const App: React.FC = () => {
     setSelectedEdge(edge);
     if (edge) {
       setSelectedNode(null);
+      setSelectedAreaEdge(null);
     }
   }, []);
 
   const handleSelectArea = useCallback((areaId: string | null) => {
     setSelectedAreaIds(areaId ? [areaId] : []);
+    setSelectedAreaEdge(null);
     if (areaId) {
       setSelectedNode(null);
       setSelectedEdge(null);
+    }
+  }, []);
+
+  const handleSelectAreaEdge = useCallback((edge: AreaEdge | null) => {
+    setSelectedAreaEdge(edge);
+    if (edge) {
+      setSelectedNode(null);
+      setSelectedEdge(null);
+      setSelectedAreaIds((prev) => (prev.length === 1 ? prev : [edge.sourceAreaId]));
     }
   }, []);
 
@@ -1000,10 +1015,12 @@ export const App: React.FC = () => {
     );
     setSelectedNode(null);
     setSelectedEdge(null);
+    setSelectedAreaEdge(null);
   }, []);
 
   const handleClearAreas = useCallback(() => {
     setSelectedAreaIds([]);
+    setSelectedAreaEdge(null);
   }, []);
 
   const handleExportCanvasImage = useCallback(() => {
@@ -1011,8 +1028,8 @@ export const App: React.FC = () => {
       activeTab === 'temporal'
         ? 'canvas.temporal-canvas'
         : networkViewMode === '2d'
-        ? 'canvas.relationship-canvas'
-        : 'canvas.network-canvas';
+          ? 'canvas.relationship-canvas'
+          : 'canvas.network-canvas';
     const canvas =
       (document.querySelector(`main.main-content ${activeCanvasSelector}`) as HTMLCanvasElement | null) ||
       (document.querySelector('main.main-content canvas') as HTMLCanvasElement | null);
@@ -1023,8 +1040,8 @@ export const App: React.FC = () => {
         activeTab === 'temporal'
           ? 'git-temporal'
           : networkViewMode === '2d'
-          ? 'relationship-2d'
-          : 'network-3d';
+            ? 'relationship-2d'
+            : 'network-3d';
       const fileName = `prebase-${mode}-${timestamp}.png`;
 
       if (canvas.toBlob) {
@@ -1092,7 +1109,6 @@ export const App: React.FC = () => {
               className="theme-toggle-btn"
               onClick={toggleTheme}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
               {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
             </button>
@@ -1178,11 +1194,11 @@ export const App: React.FC = () => {
                 onKeyDown={
                   reconciliationFailed
                     ? (e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleManualReconcile();
-                        }
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleManualReconcile();
                       }
+                    }
                     : undefined
                 }
                 aria-label={statusInfo.text}
@@ -1441,7 +1457,6 @@ export const App: React.FC = () => {
               className="clear-filter-btn"
               onClick={() => setTemporalFilterPath(null)}
               title="Clear file filter"
-              aria-label="Clear file filter and show all commit history"
             >
               <X size={13} />
               <span>Show All History</span>
@@ -1491,6 +1506,9 @@ export const App: React.FC = () => {
                       selectedEdgeId={selectedEdge?.id || null}
                       selectedAreaId={selectedAreaId}
                       selectedAreaIds={selectedAreaIds}
+                      onSelectArea={handleSelectArea}
+                      selectedAreaEdge={selectedAreaEdge}
+                      onSelectAreaEdge={handleSelectAreaEdge}
                       languageFilter={selectedLanguageFilter}
                       highlightedNodeIds={highlightedNodeIds}
                       highlightedEdgeIds={highlightedEdgeIds}
@@ -1652,6 +1670,8 @@ export const App: React.FC = () => {
           selectedEdge={selectedEdge}
           selectedAreaId={selectedAreaId}
           selectedAreaIds={selectedAreaIds}
+          selectedAreaEdge={selectedAreaEdge}
+          onSelectAreaEdge={handleSelectAreaEdge}
           onSelectArea={handleSelectArea}
           onToggleArea={handleToggleArea}
           onClearAreas={handleClearAreas}
@@ -1661,6 +1681,7 @@ export const App: React.FC = () => {
             setSelectedNode(null);
             setSelectedEdge(null);
             setSelectedAreaIds([]);
+            setSelectedAreaEdge(null);
             setSelectedCycleGroup(null);
             setActiveDependencyPath(null);
           }}

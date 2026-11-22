@@ -56,6 +56,13 @@ def mask_credentials(text: str) -> str:
     text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
     return text
 
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def log(msg):
     print(f"\x1b[36m[REGRESSION-TEST]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
@@ -196,11 +203,17 @@ def main():
             page = context.new_page()
 
             log("Navigating to bootstrap URL...")
-            page.goto(bootstrap_url, wait_until="networkidle")
+            try:
+                page.goto(bootstrap_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception as e:
+                sanitized_err = mask_credentials(str(e))
+                fail(f"Browser navigation failed: {sanitized_err}")
 
-            # Wait for main UI to mount
+            # Wait for main UI to mount, network canvas, and status ready
             expect(page.locator(".app-shell")).to_be_visible(timeout=10000)
-            success("Application shell mounted successfully.")
+            page.wait_for_selector(".network-canvas", timeout=15000)
+            page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)
+            success("Application shell mounted and repository indexed.")
 
             # =========================================================================
             # SECTION 1: Responsive Toolbar & Search Visibility Across 4 Viewports

@@ -36,6 +36,13 @@ def mask_credentials(text: str) -> str:
     text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
     return text
 
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def capture_failure_artifacts(prefix: str, page, log_file_path: str, exc: Exception):
     log("FAIL-CAPTURE", f"Capturing sanitized failure artifacts for '{prefix}' to {FAILURE_ARTIFACT_DIR}...")
     try:
@@ -60,7 +67,7 @@ def capture_failure_artifacts(prefix: str, page, log_file_path: str, exc: Except
             "timestamp": time.time(),
             "prefix": prefix,
             "error": mask_credentials(str(exc)),
-            "current_url": page.url if page else None,
+            "current_url": mask_credentials(page.url) if page else None,
         }
         if page:
             try:

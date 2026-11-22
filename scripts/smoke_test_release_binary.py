@@ -37,16 +37,36 @@ if sys.version_info < (3, 10) or sys.version_info >= (3, 14):
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def mask_credentials(text: str) -> str:
+    """Masks bootstrap tokens, session cookies, and bearer tokens in logs and traces."""
+    if not text:
+        return text
+    text = re.sub(r'bootstrap=[A-Za-z0-9_-]+', 'bootstrap=[REDACTED]', text)
+    text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
+    text = re.sub(r'x-prebase-session:\s*[^\r\n]+', 'x-prebase-session: [REDACTED]', text)
+    text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
+    return text
+
+
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+
+sys.excepthook = sanitized_excepthook
+
+
 def log(msg):
-    print(f"\x1b[36m[SMOKE]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[36m[SMOKE]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 
 def success(msg):
-    print(f"\x1b[32m[PASS]\x1b[0m {msg}", flush=True)
+    print(f"\x1b[32m[PASS]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
 
 def error(msg):
-    print(f"\x1b[31m[FAIL]\x1b[0m {msg}", file=sys.stderr, flush=True)
+    print(f"\x1b[31m[FAIL]\x1b[0m {mask_credentials(str(msg))}", file=sys.stderr, flush=True)
 
 
 def is_port_in_use(port):

@@ -18,19 +18,36 @@
 - **Synchronous Prevention**: Calling `e.preventDefault()` inside the canvas wheel handler stops browser-level page scaling (`window.visualViewport.scale` remains locked at `1.0`), smoothly mapping zoom deltas into the graph camera's exponential zoom scale within `[0.15, 4.0]`.
 - **Keyboard Zoom & HUD Buttons**: The floating controls HUD provides explicit Zoom In (`#zoomIn`, `+`) and Zoom Out (`#zoomOut`, `-`) buttons with 1.25x scaling steps.
 
-### 1.3 Label Hierarchy & Visual Clarity
-- **Overview State**: Avoid displaying every label at once. Prioritize:
-  1. Selected node (always visible, highlighted).
-  2. Hovered node (immediate high-contrast label).
-  3. Structural hubs (nodes with high connectivity degree >= 4).
-- **Zoomed State**: Lower-degree nodes progressively reveal labels as zoom increases (> 1.2).
-- **Legibility Halo**: All labels render a crisp halo stroke (`#080b12` in dark mode, `#ffffff` in light mode) ensuring text is legible over intersecting edges and nodes.
+### 1.3 Hierarchical Spherical Layout Algorithm
+- **Fibonacci Golden-Spiral Area Anchors**: Architectural areas are assigned anchor positions on the sphere shell using deterministic spherical Fibonacci point distribution:
+  $$y_i = 1 - \frac{2i}{K - 1}, \quad \theta_i = \pi (3 - \sqrt{5}) \cdot i, \quad x_i = \sqrt{1 - y_i^2} \cos(\theta_i), \quad z_i = \sqrt{1 - y_i^2} \sin(\theta_i)$$
+  This guarantees maximal pairwise angular separation between repository areas across the sphere surface.
+- **Orthonormal Polar Tangent Bases**: For each area anchor $\mathbf{C}_k$, an orthonormal tangent plane basis $(\hat{\mathbf{t}}_1, \hat{\mathbf{t}}_2)$ is derived perpendicular to the normal vector $\hat{\mathbf{n}}_k = \mathbf{C}_k / \|\mathbf{C}_k\|$. Member files are distributed in compact spherical geodesic caps scaled by $\sqrt{N_k / N_{\text{total}}}$ using Vogel polar spiral offsets.
+- **Centroid Preservation & Incremental Stability**: All node positions are projected back onto the true spherical shell radius ($R_{\text{shell}}$), guaranteeing uniform radius and zero center-lock pan drift ($< 1.5\text{px}$). Live changes pin existing node coordinates to prevent disorienting layout thrashing.
 
-### 1.4 Selection & Relationship Highlighting
-- Single click on a node selects it without altering camera angles.
-- Direct dependencies (outgoing imports) and dependents (incoming callers) remain illuminated with clear directional distinction.
-- Unrelated nodes and edges fade to an unobtrusive depth alpha (0.15–0.25).
-- Clicking empty canvas clears selection and restores full repository brightness.
+### 1.4 Three-Level Progressive Disclosure & Label Collision Grid
+- **Overview Scope (Level 1)**:
+  - Macro-architecture mode.
+  - Displays prominent Area Anchor Badges with monogram symbols, glow rings, and collision-avoiding area labels.
+  - Suppresses individual file-to-file edges and raw file labels. Only high-level aggregated inter-area dependency bundles are rendered with directional flow arrows.
+  - Uses `LabelCollisionGrid` (a 64px bucket spatial hash grid) to perform screen-space bounding box overlap checks before drawing labels, completely eliminating text collisions.
+  - Small repository fallback: Repositories with $\le 12$ files or $\le 1$ area directly render all files and edges.
+- **Area Scope (Level 2)**:
+  - Focused area mode.
+  - Displays member file nodes at full luminance and renders internal file dependencies and external boundary connections.
+  - Other architectural areas smoothly dim to unobtrusive depth alpha (0.12).
+  - Breadcrumb at top-left (`Overview > Area: <name>`) allows instant 1-click return to Overview.
+- **File Scope (Level 3)**:
+  - Isolated dependency neighborhood.
+  - Outgoing dependencies illuminate in Electric Cyan (`#2dd4bf`), incoming dependents illuminate in Soft Violet (`#a78bfa`).
+  - Irrelevant nodes and edges fade out.
+  - Breadcrumb: `Overview > Area: <name> > <filename> [x]`.
+
+### 1.5 Selection, Hit-Testing & Relationship Highlighting
+- Single click on an Area Anchor transitions smoothly into Area Scope.
+- Single click on an aggregated Area Edge opens the detailed Inter-Area Relationship View in the Inspector, displaying all contributing file pairs.
+- Single click on a file node selects it into File Scope without altering camera angles.
+- Clicking empty canvas clears selection and restores parent scope.
 - Selecting nodes from search or inspector preserves camera angles with 0ms jump; explicit "Reveal in 3D" smoothly orbits the camera to bring offscreen targets into view.
 
 ---

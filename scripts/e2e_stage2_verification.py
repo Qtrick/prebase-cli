@@ -61,6 +61,13 @@ def mask_credentials(text: str) -> str:
     text = re.sub(r'Bearer\s+[A-Za-z0-9_-]+', 'Bearer [REDACTED]', text)
     return text
 
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def log(msg):
     print(f"\x1b[36m[STAGE 2 E2E]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
@@ -165,8 +172,8 @@ def main():
                     time.sleep(0.1)
 
             if not server_up and os.path.exists(log_file_path):
-                with open(log_file_path, "r") as f:
-                    print("LOG OUTPUT:\n", f.read())
+                with open(log_file_path, "r", encoding="utf-8", errors="replace") as f:
+                    print("LOG OUTPUT:\n", mask_credentials(f.read()))
             assert server_up, "PreBase server did not become healthy"
             success("Server listening and healthy in 2D mode.")
 

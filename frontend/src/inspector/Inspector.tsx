@@ -14,6 +14,7 @@ import {
   deriveRepositoryStructure,
   getAreaIdForPath,
   AreaEdge,
+  AreaEdgeContributingFilePair,
 } from '../utils/repositoryAreas';
 import { useCopyFeedback } from '../utils/clipboard';
 import { PathExplorer } from './PathExplorer';
@@ -53,6 +54,8 @@ interface InspectorProps {
   onSelectArea?: (areaId: string | null) => void;
   onToggleArea?: (areaId: string) => void;
   onClearAreas?: () => void;
+  selectedAreaEdge?: AreaEdge | null;
+  onSelectAreaEdge?: (edge: AreaEdge | null) => void;
   selectedCycleGroup?: CycleGroup | null;
   onSelectCycleGroup?: (cg: CycleGroup | null) => void;
   isPathExplorerOpen?: boolean;
@@ -125,6 +128,8 @@ export const Inspector: React.FC<InspectorProps> = ({
   onSelectArea,
   onToggleArea,
   onClearAreas,
+  selectedAreaEdge,
+  onSelectAreaEdge,
   selectedCycleGroup = null,
   onSelectCycleGroup,
   isPathExplorerOpen = false,
@@ -159,14 +164,21 @@ export const Inspector: React.FC<InspectorProps> = ({
   const [isDiagnosticsExpanded, setIsDiagnosticsExpanded] = useState<boolean>(false);
   const { copied: copiedPath, copy: copyPath } = useCopyFeedback();
   const { copied: copiedCode, copy: copyCode } = useCopyFeedback();
-  const [focusedAreaEdge, setFocusedAreaEdge] = useState<AreaEdge | null>(null);
+  const [internalFocusedAreaEdge, setInternalFocusedAreaEdge] = useState<AreaEdge | null>(null);
+  const focusedAreaEdge = selectedAreaEdge !== undefined ? selectedAreaEdge : internalFocusedAreaEdge;
+  const setFocusedAreaEdge = (edge: AreaEdge | null) => {
+    setInternalFocusedAreaEdge(edge);
+    onSelectAreaEdge?.(edge);
+  };
 
   const requestTokenRef = useRef(0);
 
   // Clear focused area edge when area changes or selection clears
   useEffect(() => {
-    setFocusedAreaEdge(null);
-  }, [selectedAreaId]);
+    if (selectedAreaEdge === undefined) {
+      setInternalFocusedAreaEdge(null);
+    }
+  }, [selectedAreaId, selectedAreaEdge]);
 
   const handleCopyPath = (path: string) => {
     void copyPath(path);
@@ -283,10 +295,10 @@ export const Inspector: React.FC<InspectorProps> = ({
   }
 
   // 1A. DETAILED INTER-AREA RELATIONSHIP VIEW
-  if (!selectedNode && !selectedEdge && selectedAreaId && focusedAreaEdge) {
+  if (!selectedNode && !selectedEdge && focusedAreaEdge) {
     const srcArea = repoStructure?.areaMap.get(focusedAreaEdge.sourceAreaId);
     const tgtArea = repoStructure?.areaMap.get(focusedAreaEdge.targetAreaId);
-    const isOutgoing = focusedAreaEdge.sourceAreaId === selectedAreaId;
+    const isOutgoing = selectedAreaId ? focusedAreaEdge.sourceAreaId === selectedAreaId : true;
 
     return (
       <aside className={`inspector-panel ${isCollapsed ? 'collapsed' : ''}`}>
@@ -308,7 +320,11 @@ export const Inspector: React.FC<InspectorProps> = ({
             )}
             <button
               className="close-btn"
-              onClick={() => setFocusedAreaEdge(null)}
+              onClick={() => {
+                const returnAreaId = isOutgoing ? focusedAreaEdge.sourceAreaId : focusedAreaEdge.targetAreaId;
+                onSelectArea?.(returnAreaId);
+                setFocusedAreaEdge(null);
+              }}
               title="Return to area overview"
               aria-label="Return to area overview"
             >
@@ -321,7 +337,11 @@ export const Inspector: React.FC<InspectorProps> = ({
           <button
             type="button"
             className="area-back-btn"
-            onClick={() => setFocusedAreaEdge(null)}
+            onClick={() => {
+              const returnAreaId = isOutgoing ? focusedAreaEdge.sourceAreaId : focusedAreaEdge.targetAreaId;
+              onSelectArea?.(returnAreaId);
+              setFocusedAreaEdge(null);
+            }}
           >
             <ArrowLeft size={13} style={{ marginRight: '4px' }} />
             Back to area ({isOutgoing ? srcArea?.name : tgtArea?.name})
@@ -357,7 +377,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               <h4>Contributing Dependencies ({focusedAreaEdge.contributingFilePairs.length})</h4>
             </div>
             <ul className="relation-list">
-              {focusedAreaEdge.contributingFilePairs.map((pair, idx) => {
+              {focusedAreaEdge.contributingFilePairs.map((pair: AreaEdgeContributingFilePair, idx: number) => {
                 const srcNode = snapshot?.nodes.find((n) => n.id === pair.sourceFileId);
                 const tgtNode = snapshot?.nodes.find((n) => n.id === pair.targetFileId);
                 return (

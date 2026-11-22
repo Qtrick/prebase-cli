@@ -42,16 +42,51 @@ Visual complexity is concentrated within the interactive graphs (3D Network Orb,
 |---|---|---|---|
 | `--accent-brand` | `#6366f1` | `#4f46e5` | Electric Indigo brand accent, active navigation glow |
 | `--accent-brand-bright` | `#818cf8` | `#6366f1` | Bright indigo hover and focus highlights |
-| `--accent-teal` | `#2dd4bf` | `#0d9488` | Selection halo, 3D orbit target focus |
+| `--accent-teal` | `#2dd4bf` | `#0d9488` | Selection halo, 3D orbit target focus, outgoing dependencies |
 | `--accent-sky` | `#38bdf8` | `#0284c7` | Information, direct dependencies, area hub badge |
 | `--accent-amber` | `#f59e0b` | `#d97706` | Warnings, git dirty state, entry point candidates |
 | `--accent-rose` | `#f43f5e` | `#e11d48` | Errors, cycle alerts, broken connections |
 | `--accent-emerald` | `#10b981` | `#059669` | Index ready, additions, clean state |
+| `--accent-violet` | `#a78bfa` | `#7c3aed` | Incoming dependents (callers) in file inspection |
+
+### 2.4 Architectural Area Palette & Visual Semantics
+The 3D Network Graph maps architectural areas to 12 deterministic, accessible color tokens providing distinct chroma and luminance in both dark and light themes:
+- `Indigo` (`#6366f1` / `#4f46e5`), `Cyan` (`#06b6d4` / `#0891b2`), `Amber` (`#f59e0b` / `#d97706`), `Emerald` (`#10b981` / `#059669`)
+- `Rose` (`#f43f5e` / `#e11d48`), `Sky` (`#0ea5e9` / `#0284c7`), `Violet` (`#8b5cf6` / `#7c3aed`), `Orange` (`#f97316` / `#ea580c`)
+- `Teal` (`#14b8a6` / `#0d9488`), `Pink` (`#ec4899` / `#db2777`), `Lime` (`#84cc16` / `#65a30d`), `Purple` (`#a855f7` / `#9333ea`)
+
+**Directional Dependency Visual Semantics**:
+- **Outgoing Dependencies (Imports / Callees)**: Rendered in Electric Cyan/Teal (`#2dd4bf` dark / `#0d9488` light) with forward-pointing arrowheads.
+- **Incoming Dependents (Importers / Callers)**: Rendered in Soft Violet (`#a78bfa` dark / `#7c3aed` light) with backward-pointing arrows.
+- **Dynamic Imports**: Rendered with dashed stroke geometry (`[4, 4]`).
+- **Inter-Area Aggregated Edges**: Bundled edges between architectural areas scale logarithmically by connection count:
+  $$\text{width} = 1.5 + 1.8 \cdot \ln(1 + N)$$
+  with gradient shading from source area color to target area color and animated flow indicators.
 
 ---
 
-## 3. Layout Architecture & Workspace Space
+## 3. Layout Architecture & Progressive Disclosure
 
+### 3.1 Three-Level Progressive Disclosure Model
+To prevent visual hairballs and information overload, PreBase employs a strict 3-tier progressive disclosure state machine:
+1. **Overview Scope (Level 1)**:
+   - Visualizes the macro-architecture of the repository.
+   - Files are clustered into compact spherical geodesic caps around golden-ratio Fibonacci area anchors.
+   - Displays prominent Area Anchor Badges with monograms, glow rings, and collision-avoiding labels (`LabelCollisionGrid`).
+   - Suppresses individual file-to-file edges and raw file labels. Only high-level aggregated inter-area dependency bundles are rendered with directional flow arrows.
+   - Small repository fallback: Repositories with $\le 12$ files or $\le 1$ area directly render all files and edges.
+2. **Area Scope (Level 2)**:
+   - Activated by clicking an Area Anchor badge or area card in the Inspector.
+   - The selected area's member files illuminate at full brightness with local internal edges and cross-area boundary edges.
+   - Non-member areas smoothly dim to background depth alpha (`0.12`).
+   - Interactive breadcrumb (`Overview > Area: <name>`) allows 1-click return to Overview.
+3. **File Scope (Level 3)**:
+   - Activated by clicking a file node or selecting from Search/Inspector.
+   - Immediately isolates the 1-hop neighborhood: outgoing dependencies illuminate in Cyan, incoming dependents illuminate in Violet.
+   - Irrelevant edges and nodes fade out, providing instant architectural context for the selected module.
+   - Breadcrumb displays full ancestry: `Overview > Area: <name> > <filename> [x]`.
+
+### 3.2 Workspace Layout
 - **Sidebar (224px Compact Width)**:
   - **Brand Header**: Minimal PreBase brand logo with version badge and theme toggle (`Dark`/`Light`).
   - **Unified Repository Identity Card (`.repo-identity-card`)**: Integrates repository folder icon, repository name, relative directory path, and a nested branch pill (`.repo-branch-pill`) displaying active branch and commit hash cleanly.
@@ -60,12 +95,14 @@ Visual complexity is concentrated within the interactive graphs (3D Network Orb,
 - **Workspace Canvas**:
   - Maximum available viewport area.
   - Floating top toolbar with view switcher (`3D Overview` / `2D Relationships`), instant search, and filters.
+  - Interactive breadcrumbs at top-left with scope badges and clear buttons.
   - Floating glassmorphic HUD toolbar (`.view-controls`) providing quick access to Zoom In (`#zoomIn`), Zoom Out (`#zoomOut`), Fit View (`#fitView`), Reset Camera (`#resetCam`), and Center-Lock toggle (`#centerLock`).
 - **Inspector Panel (340px Width)**:
   - Collapsible toggle (`Ctrl+B` / `Cmd+B` / button) to instantly expand canvas width to full screen.
   - **Overview Metric Strip**: 4-column horizontal stat strip displaying `FILES`, `ANALYZED`, `CONNECTIONS`, and `AREAS` in tabular numbers with micro labels.
   - **Entry Recommendations ("Start here")**: Compact rows featuring semantic badges (`Crate Root` in amber, `Core Dependency` in indigo, `Area Hub` in sky).
   - **Architectural Areas**: High-density interactive cards displaying file counts, internal connections, and outgoing relationships.
+  - **Inter-Area Connection Detail**: Dedicated drill-down view listing contributing file pairs with direct file inspection triggers and return-to-area navigation.
 
 ---
 

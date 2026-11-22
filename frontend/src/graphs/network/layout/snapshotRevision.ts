@@ -73,6 +73,7 @@ export function processSnapshotRevision(
 
   const layoutNodes = sortedNodes.map((n) => ({
     id: n.id,
+    areaId: getAreaIdForPath(n.relative_path),
     val: (n.direct_dependency_count || 0) + (n.direct_dependent_count || 0) + 1,
     isEntry: entryNodeId !== null && n.id === entryNodeId,
   }));

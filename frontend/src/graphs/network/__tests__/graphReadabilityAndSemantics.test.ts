@@ -483,12 +483,13 @@ describe('Graph Readability & Semantic Precision Suite', () => {
     });
 
     it('scores selected, hovered, and foreground nodes with higher priority than background nodes', () => {
+      // In camera space: negative Z is nearer/foreground, positive Z is farther/background.
       const selectedScore = computeLabelPriorityScore({
         isSelected: true,
         isHovered: false,
         isConnectedToSelected: false,
         isInFocusedArea: false,
-        projectedZ: -30, // even in background!
+        projectedZ: 30, // even in background!
         depthScale: 0.8,
         totalDegree: 2,
       });
@@ -498,7 +499,7 @@ describe('Graph Readability & Semantic Precision Suite', () => {
         isHovered: false,
         isConnectedToSelected: false,
         isInFocusedArea: false,
-        projectedZ: -80,
+        projectedZ: 80, // background (+z)
         depthScale: 0.7,
         totalDegree: 10,
       });
@@ -508,7 +509,7 @@ describe('Graph Readability & Semantic Precision Suite', () => {
         isHovered: false,
         isConnectedToSelected: false,
         isInFocusedArea: false,
-        projectedZ: 80,
+        projectedZ: -80, // foreground (-z)
         depthScale: 1.2,
         totalDegree: 2,
       });
