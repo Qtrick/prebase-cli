@@ -249,10 +249,22 @@ def main():
                         # Test 1: 2D mode
                         page.goto(app_url_2d, wait_until="domcontentloaded", timeout=15000)
                         page.wait_for_selector(".relationship-container", timeout=10000)
-                        page.wait_for_function(
-                            "() => window.__prebaseRelationshipDebug && window.__prebaseRelationshipDebug.renderedNodeCount > 0",
-                            timeout=10000
-                        )
+
+                        # Deterministic CSP-compatible polling loop for 2D relationship layout (avoids eval-based wait_for_function)
+                        deadline = time.time() + 10.0
+                        rel_debug = None
+                        while time.time() < deadline:
+                            try:
+                                dbg = page.evaluate("() => window.__prebaseRelationshipDebug || null")
+                                if dbg and dbg.get("renderedNodeCount", 0) > 0:
+                                    rel_debug = dbg
+                                    break
+                            except Exception:
+                                pass
+                            time.sleep(0.1)
+
+                        assert rel_debug is not None, "window.__prebaseRelationshipDebug must be active when 2D canvas renders"
+                        assert rel_debug.get("renderedNodeCount", 0) > 0, "2D relationship layout must have rendered nodes within 10s"
                         dom_output = page.content()
 
                         assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"
@@ -262,9 +274,6 @@ def main():
                         assert "relationship-canvas" in dom_output, "DOM missing .relationship-canvas"
 
                         # Coordinate geometry and focus node verification
-                        rel_debug = page.evaluate("() => window.__prebaseRelationshipDebug || null")
-                        assert rel_debug is not None, "window.__prebaseRelationshipDebug must be active when 2D canvas renders"
-                        assert rel_debug.get("renderedNodeCount", 0) > 0, "2D relationship layout must have rendered nodes"
                         nodes = rel_debug.get("nodes", [])
                         focus_nodes = [n for n in nodes if n.get("role") == "focus"]
                         assert len(focus_nodes) == 1, "Must contain exactly 1 focus node in 2D layout"

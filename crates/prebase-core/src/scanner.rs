@@ -13,6 +13,8 @@ pub enum ScanError {
     NotADirectory(PathBuf),
     #[error("Failed to canonicalize path {0}: {1}")]
     CanonicalizeFailed(PathBuf, std::io::Error),
+    #[error("Not a software project (not a Git repository or project manifest): '{0}'. Navigate to a valid Git repository or project directory (with a manifest like Cargo.toml, package.json, pyproject.toml, go.mod, etc.) or provide an explicit project path (e.g. prebase /path/to/project).")]
+    NoProjectFound(PathBuf),
     #[error("Filesystem IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -53,6 +55,162 @@ pub struct RepositoryScanner {
     config: ScannerConfig,
 }
 
+pub const CANONICAL_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "Pipfile",
+    "requirements.txt",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "Gemfile",
+    "composer.json",
+    "CMakeLists.txt",
+    "Makefile",
+    "meson.build",
+    "Package.swift",
+    "mix.exs",
+    "rebar.config",
+    "pubspec.yaml",
+    "build.zig",
+    "stack.yaml",
+    "cabal.project",
+    "deno.json",
+    "deno.jsonc",
+    "tsconfig.json",
+    "jsconfig.json",
+];
+
+fn get_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .and_then(|p| p.canonicalize().ok().or(Some(p)))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .and_then(|p| p.canonicalize().ok().or(Some(p)))
+    }
+}
+
+pub fn is_git_root(dir: &Path) -> bool {
+    let git = dir.join(".git");
+    git.is_dir() || git.is_file()
+}
+
+pub fn has_canonical_manifest(dir: &Path) -> bool {
+    CANONICAL_MANIFESTS.iter().any(|m| dir.join(m).is_file())
+}
+
+pub fn is_home_or_system_directory(dir: &Path) -> bool {
+    if dir.parent().is_none() {
+        return true;
+    }
+    if let Some(home) = get_home_dir() {
+        if dir == home {
+            return true;
+        }
+        for sub in &[
+            "Downloads",
+            "Desktop",
+            "Documents",
+            "Music",
+            "Pictures",
+            "Videos",
+            "Movies",
+        ] {
+            if dir == home.join(sub) {
+                return true;
+            }
+        }
+    }
+    let dir_str = dir.to_string_lossy();
+    let norm = dir_str.trim_end_matches('/');
+    matches!(
+        norm,
+        "" | "/"
+            | "/tmp"
+            | "/var"
+            | "/usr"
+            | "/bin"
+            | "/sbin"
+            | "/etc"
+            | "/opt"
+            | "/Library"
+            | "/System"
+            | "/private"
+            | "/private/tmp"
+            | "/private/var"
+            | "/private/etc"
+    )
+}
+
+pub fn is_empty_dir(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => !entries.any(|entry| {
+            if let Ok(e) = entry {
+                let name = e.file_name();
+                let name_str = name.to_string_lossy();
+                name_str != ".DS_Store" && name_str != "desktop.ini" && name_str != "Thumbs.db"
+            } else {
+                false
+            }
+        }),
+        Err(_) => true,
+    }
+}
+
+pub fn has_project_indicators(dir: &Path) -> bool {
+    let walker = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(3))
+        .hidden(true)
+        .git_ignore(false)
+        .build();
+
+    for e in walker.flatten() {
+        let path = e.path();
+        if path == dir {
+            continue;
+        }
+        if path.is_file() {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if CANONICAL_MANIFESTS.contains(&file_name) {
+                    return true;
+                }
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_lower = format!(".{}", ext.to_lowercase());
+                if matches!(
+                    ext_lower.as_str(),
+                    ".js"
+                        | ".jsx"
+                        | ".ts"
+                        | ".tsx"
+                        | ".mjs"
+                        | ".cjs"
+                        | ".mts"
+                        | ".cts"
+                        | ".rs"
+                        | ".py"
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl RepositoryScanner {
     pub fn new(target_path: &Path, config: ScannerConfig) -> Result<Self, ScanError> {
         let root = Self::discover_root(target_path)?;
@@ -91,30 +249,89 @@ impl RepositoryScanner {
             return Err(ScanError::NotADirectory(canonical));
         }
 
-        // If target directory has its own .git, use it
-        if canonical.join(".git").exists() {
+        // Reject arbitrary / home / system directories immediately
+        if is_home_or_system_directory(&canonical) {
+            return Err(ScanError::NoProjectFound(canonical));
+        }
+
+        // If target directory has its own .git (standard repo, worktree, or submodule), use it directly
+        if is_git_root(&canonical) {
             return Ok(canonical);
         }
 
-        // If invoked with an explicit path argument other than "." or current working directory,
-        // respect the explicit path as the target repository root.
+        // Reject empty directories (after checking git root)
+        if is_empty_dir(&canonical) {
+            return Err(ScanError::NoProjectFound(canonical));
+        }
+
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        let is_explicit = canonical != canonical_cwd;
 
-        if canonical != canonical_cwd {
-            return Ok(canonical);
+        if is_explicit {
+            // Explicit project path preservation:
+            // 1. Direct manifest check
+            if has_canonical_manifest(&canonical) {
+                return Ok(canonical);
+            }
+
+            // 2. Walk up parents to nearest project root (manifest or git)
+            let mut current = canonical.as_path();
+            while let Some(parent) = current.parent() {
+                if is_home_or_system_directory(current) {
+                    break;
+                }
+                if is_git_root(current) || has_canonical_manifest(current) {
+                    return Ok(current.to_path_buf());
+                }
+                current = parent;
+            }
+
+            // 3. Fallback for explicit directories containing project indicators (e.g. manifests or code in subpackages)
+            if has_project_indicators(&canonical) {
+                return Ok(canonical);
+            }
+
+            return Err(ScanError::NoProjectFound(canonical));
         }
 
-        // Otherwise, when invoked in current dir, walk up to find the enclosing git repository
+        // Default invocation (running in current working directory or subdirectory):
+        // 1. Walk up to enclosing Git repository root
         let mut current = canonical.as_path();
         while let Some(parent) = current.parent() {
-            if current.join(".git").exists() {
+            if is_home_or_system_directory(current) {
+                break;
+            }
+            if is_git_root(current) {
                 return Ok(current.to_path_buf());
             }
             current = parent;
         }
 
-        Ok(canonical)
+        // 2. If not in a Git repo, walk up to enclosing project with canonical manifest
+        let mut manifest_root = if has_canonical_manifest(&canonical) {
+            Some(canonical.clone())
+        } else {
+            None
+        };
+
+        let mut current = canonical.as_path();
+        while let Some(parent) = current.parent() {
+            if is_home_or_system_directory(current) {
+                break;
+            }
+            if has_canonical_manifest(current) {
+                manifest_root = Some(current.to_path_buf());
+                break;
+            }
+            current = parent;
+        }
+
+        if let Some(root) = manifest_root {
+            return Ok(root);
+        }
+
+        Err(ScanError::NoProjectFound(canonical))
     }
 
     pub fn is_excluded_relative_path(rel_path: &str) -> bool {
@@ -560,5 +777,111 @@ mod tests {
         assert!(!rel_paths.contains(&"src/.env".to_string()));
 
         assert!(excluded_count >= 6);
+    }
+
+    #[test]
+    fn test_discover_root_git_repo_and_submodule() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // 1. Standard Git repository (.git is a directory)
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path().join("standard_repo");
+        fs::create_dir_all(repo_root.join(".git")).unwrap();
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        fs::write(repo_root.join("src/main.rs"), "fn main() {}").unwrap();
+
+        let discovered = RepositoryScanner::discover_root(&repo_root).unwrap();
+        assert_eq!(discovered, repo_root.canonicalize().unwrap());
+
+        // Subdirectory discovery inside Git repo
+        let sub_discovered = RepositoryScanner::discover_root(&repo_root.join("src")).unwrap();
+        assert_eq!(sub_discovered, repo_root.canonicalize().unwrap());
+
+        // 2. Git worktree / submodule (.git is a regular file)
+        let worktree_root = dir.path().join("worktree_repo");
+        fs::create_dir_all(worktree_root.join("src")).unwrap();
+        fs::write(
+            worktree_root.join(".git"),
+            "gitdir: /path/to/main/.git/worktrees/wt\n",
+        )
+        .unwrap();
+        fs::write(worktree_root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+
+        let wt_discovered = RepositoryScanner::discover_root(&worktree_root).unwrap();
+        assert_eq!(wt_discovered, worktree_root.canonicalize().unwrap());
+
+        let wt_sub_discovered =
+            RepositoryScanner::discover_root(&worktree_root.join("src")).unwrap();
+        assert_eq!(wt_sub_discovered, worktree_root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_discover_root_canonical_manifest_projects() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // Test various canonical manifests
+        for manifest in &[
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "go.mod",
+            "pom.xml",
+            "build.gradle",
+            "Gemfile",
+            "CMakeLists.txt",
+        ] {
+            let proj_root = dir.path().join(format!("proj_{manifest}"));
+            fs::create_dir_all(proj_root.join("src")).unwrap();
+            fs::write(proj_root.join(manifest), "# project manifest\n").unwrap();
+            fs::write(proj_root.join("src/index.txt"), "hello").unwrap();
+
+            // Direct discovery
+            let discovered = RepositoryScanner::discover_root(&proj_root).unwrap();
+            assert_eq!(
+                discovered,
+                proj_root.canonicalize().unwrap(),
+                "failed for {manifest}"
+            );
+
+            // Subdirectory discovery
+            let sub_discovered = RepositoryScanner::discover_root(&proj_root.join("src")).unwrap();
+            assert_eq!(
+                sub_discovered,
+                proj_root.canonicalize().unwrap(),
+                "failed sub discovery for {manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_discover_root_rejects_empty_and_arbitrary_dirs() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // 1. Empty directory
+        let empty_dir = dir.path().join("empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+        let res_empty = RepositoryScanner::discover_root(&empty_dir);
+        assert!(
+            matches!(res_empty, Err(ScanError::NoProjectFound(_))),
+            "empty directory must be rejected"
+        );
+
+        // 2. Arbitrary directory with non-code/non-manifest files
+        let arb_dir = dir.path().join("arbitrary");
+        fs::create_dir_all(&arb_dir).unwrap();
+        fs::write(arb_dir.join("photo.jpg"), "fake jpg").unwrap();
+        fs::write(arb_dir.join("notes.txt"), "just notes").unwrap();
+        let res_arb = RepositoryScanner::discover_root(&arb_dir);
+        assert!(
+            matches!(res_arb, Err(ScanError::NoProjectFound(_))),
+            "arbitrary non-project directory must be rejected"
+        );
     }
 }

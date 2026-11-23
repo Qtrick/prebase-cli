@@ -92,6 +92,16 @@ def test_help_and_version():
         fail(f"--version failed: {res.stderr}")
     success("prebase --version output verified.")
 
+    # Verify --help and --version work everywhere (even in an empty directory without a project)
+    with tempfile.TemporaryDirectory() as empty_dir:
+        res_h = subprocess.run([BIN, "--help"], cwd=empty_dir, capture_output=True, text=True)
+        if res_h.returncode != 0:
+            fail(f"--help failed when run from empty directory: {res_h.stderr}")
+        res_v = subprocess.run([BIN, "--version"], cwd=empty_dir, capture_output=True, text=True)
+        if res_v.returncode != 0:
+            fail(f"--version failed when run from empty directory: {res_v.stderr}")
+    success("prebase --help and --version verified everywhere (including non-project directories).")
+
 def test_invalid_path():
     log("Testing launch against non-existent repository path...")
     bogus_path = os.path.join(tempfile.gettempdir(), "non_existent_prebase_path_xyz123")
@@ -101,24 +111,177 @@ def test_invalid_path():
     success("Non-existent repository path rejected gracefully with error.")
 
 def test_empty_directory():
-    log("Testing launch against empty directory...")
+    log("Testing rejection of empty and non-project directories...")
+    # 1. Targeting an empty directory via explicit path argument
+    with tempfile.TemporaryDirectory() as empty_dir:
+        res = subprocess.run([BIN, "--no-open", "map", empty_dir], capture_output=True, text=True)
+        if res.returncode == 0:
+            fail("Expected nonzero exit code when targeting an empty directory")
+        err_lower = res.stderr.lower()
+        if not any(kw in err_lower for kw in ["project", "repository", "manifest", "not a", "cd", "path"]):
+            fail(f"Expected actionable stderr message on empty directory, got: {res.stderr}")
+        success("Empty directory path argument rejected with actionable stderr and nonzero exit code.")
+
+        # 2. Running inside an empty directory without path argument
+        res_cwd = subprocess.run([BIN, "--no-open", "map"], cwd=empty_dir, capture_output=True, text=True)
+        if res_cwd.returncode == 0:
+            fail("Expected nonzero exit code when running inside an empty directory without a project")
+        err_cwd_lower = res_cwd.stderr.lower()
+        if not any(kw in err_cwd_lower for kw in ["project", "repository", "manifest", "not a", "cd", "path"]):
+            fail(f"Expected actionable stderr message when running inside empty directory, got: {res_cwd.stderr}")
+        success("Execution within empty directory rejected with actionable stderr and nonzero exit code.")
+
+        # 3. Arbitrary directory with non-project files (e.g., notes.txt, sample.jpg)
+        with tempfile.TemporaryDirectory() as arbitrary_dir:
+            with open(os.path.join(arbitrary_dir, "notes.txt"), "w") as f:
+                f.write("Just some personal notes, not a software project\n")
+            with open(os.path.join(arbitrary_dir, "sample.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0")
+
+            res_arb = subprocess.run([BIN, "analyze", arbitrary_dir], capture_output=True, text=True)
+            if res_arb.returncode == 0:
+                fail("Expected nonzero exit code for arbitrary non-project directory")
+            err_arb_lower = res_arb.stderr.lower()
+            if not any(kw in err_arb_lower for kw in ["project", "repository", "manifest", "not a", "cd", "path"]):
+                fail(f"Expected actionable stderr message on non-project directory, got: {res_arb.stderr}")
+            success("Arbitrary non-project directory rejected with actionable stderr and nonzero exit code.")
+
+def test_git_repository_discovery():
+    log("Testing Git repository discovery (standard repo, worktree, and submodule)...")
     with tempfile.TemporaryDirectory() as temp_dir:
-        port = 19981
-        proc = subprocess.Popen(
-            [BIN, "--port", str(port), "--no-open", "map", temp_dir],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        time.sleep(1.2)
-        try:
-            status, _ = http_get(f"http://127.0.0.1:{port}/api/v1/health")
-            if status != 200:
-                fail(f"Health check failed on empty directory: {status}")
-            success("Empty directory handled gracefully by local server.")
-        finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+        # Standard Git repository
+        repo_dir = os.path.join(temp_dir, "repo")
+        os.makedirs(repo_dir)
+        subprocess.check_call(["git", "init", "-b", "main"], cwd=repo_dir, stdout=subprocess.DEVNULL)
+        src_file = os.path.join(repo_dir, "index.ts")
+        with open(src_file, "w") as f:
+            f.write("export const message = 'hello git';\n")
+
+        res = subprocess.run([BIN, "analyze", repo_dir], capture_output=True, text=True)
+        if res.returncode != 0:
+            fail(f"Failed to analyze standard Git repository: {res.stderr}")
+        if "PreBase Repository Intelligence" not in res.stdout:
+            fail(f"Unexpected analyze output for Git repo: {res.stdout}")
+        success("Standard Git repository recognized and analyzed.")
+
+        # Git worktree / submodule with .git file pointing to gitdir
+        fake_gitdir = os.path.join(temp_dir, "fake_gitdir")
+        os.makedirs(os.path.join(fake_gitdir, "objects"))
+        os.makedirs(os.path.join(fake_gitdir, "refs"))
+        with open(os.path.join(fake_gitdir, "HEAD"), "w") as f:
+            f.write("ref: refs/heads/main\n")
+
+        worktree_dir = os.path.join(temp_dir, "worktree")
+        os.makedirs(worktree_dir)
+        with open(os.path.join(worktree_dir, ".git"), "w") as f:
+            f.write(f"gitdir: {fake_gitdir}\n")
+        with open(os.path.join(worktree_dir, "main.rs"), "w") as f:
+            f.write("fn main() {}\n")
+
+        res_wt = subprocess.run([BIN, "analyze", worktree_dir], capture_output=True, text=True)
+        if res_wt.returncode != 0:
+            fail(f"Failed to analyze Git worktree/submodule: {res_wt.stderr}")
+        success("Git worktree/submodule with .git file recognized and analyzed.")
+
+def test_non_git_manifest_projects():
+    log("Testing non-Git project discovery via canonical manifests...")
+    manifest_fixtures = [
+        ("package.json", '{"name": "test-pkg", "version": "1.0.0"}', "src/index.js", "console.log('hi');"),
+        ("Cargo.toml", '[package]\nname = "test-rs"\nversion = "0.1.0"\nedition = "2021"\n', "src/main.rs", "fn main() {}"),
+        ("pyproject.toml", '[project]\nname = "test-py"\nversion = "0.1.0"\n', "app.py", "print('hi')"),
+        ("go.mod", "module example.com/test-go\n\ngo 1.20\n", "main.go", "package main\nfunc main() {}\n"),
+        ("pom.xml", "<project><modelVersion>4.0.0</modelVersion><groupId>com.test</groupId><artifactId>app</artifactId><version>1.0</version></project>", "src/App.java", "class App {}"),
+        ("build.gradle", "plugins { id 'java' }\n", "src/Main.java", "class Main {}"),
+        ("Gemfile", "source 'https://rubygems.org'\n", "app.rb", "puts 'hello'"),
+    ]
+
+    for manifest_name, manifest_content, src_rel, src_content in manifest_fixtures:
+        with tempfile.TemporaryDirectory() as proj_dir:
+            manifest_path = os.path.join(proj_dir, manifest_name)
+            with open(manifest_path, "w") as f:
+                f.write(manifest_content)
+
+            full_src_path = os.path.join(proj_dir, src_rel)
+            os.makedirs(os.path.dirname(full_src_path), exist_ok=True)
+            with open(full_src_path, "w") as f:
+                f.write(src_content)
+
+            res = subprocess.run([BIN, "analyze", proj_dir], capture_output=True, text=True)
+            if res.returncode != 0:
+                fail(f"Failed to recognize non-Git project with {manifest_name}: {res.stderr}")
+            if "PreBase Repository Intelligence" not in res.stdout:
+                fail(f"Expected repository intelligence for {manifest_name}, got: {res.stdout}")
+            success(f"Non-Git project recognized via manifest: {manifest_name}")
+
+def test_project_subdirectory_discovery():
+    log("Testing root discovery when launched from nested project subdirectories...")
+    # 1. Inside a Git repository subdirectory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo_dir = os.path.join(temp_dir, "my_repo")
+        os.makedirs(repo_dir)
+        subprocess.check_call(["git", "init", "-b", "main"], cwd=repo_dir, stdout=subprocess.DEVNULL)
+        deep_subdir = os.path.join(repo_dir, "crates", "subcrate", "src", "deep")
+        os.makedirs(deep_subdir)
+        with open(os.path.join(deep_subdir, "lib.rs"), "w") as f:
+            f.write("pub fn deep() -> i32 { 42 }\n")
+
+        # Run analyze from deep subdirectory without passing a path argument
+        res = subprocess.run([BIN, "analyze"], cwd=deep_subdir, capture_output=True, text=True)
+        if res.returncode != 0:
+            fail(f"Failed to discover Git root from subdirectory {deep_subdir}: {res.stderr}")
+        if "PreBase Repository Intelligence" not in res.stdout:
+            fail(f"Analyze failed from subdirectory: {res.stdout}")
+        success("Git repository root discovered when launched from deep subdirectory.")
+
+    # 2. Inside a non-Git manifest project subdirectory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        proj_dir = os.path.join(temp_dir, "my_node_proj")
+        os.makedirs(proj_dir)
+        with open(os.path.join(proj_dir, "package.json"), "w") as f:
+            f.write('{"name": "deep-proj"}')
+        nested_dir = os.path.join(proj_dir, "packages", "core", "src")
+        os.makedirs(nested_dir)
+        with open(os.path.join(nested_dir, "index.ts"), "w") as f:
+            f.write("export const nested = true;\n")
+
+        # Run analyze from nested subdirectory without path argument
+        res_non_git = subprocess.run([BIN, "analyze"], cwd=nested_dir, capture_output=True, text=True)
+        if res_non_git.returncode != 0:
+            fail(f"Failed to discover non-Git project root from subdirectory {nested_dir}: {res_non_git.stderr}")
+        success("Non-Git manifest project root discovered when launched from nested subdirectory.")
+
+def test_explicit_path_arguments():
+    log("Testing explicit path argument preservation and override...")
+    with tempfile.TemporaryDirectory() as empty_dir, tempfile.TemporaryDirectory() as proj_dir:
+        # Create a valid project in proj_dir
+        with open(os.path.join(proj_dir, "Cargo.toml"), "w") as f:
+            f.write('[package]\nname = "explicit-test"\nversion = "0.1.0"\n')
+        src_dir = os.path.join(proj_dir, "src")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, "lib.rs"), "w") as f:
+            f.write("pub const X: u32 = 100;\n")
+
+        # Run from empty_dir (CWD has no project), but supply explicit path to proj_dir
+        res = subprocess.run([BIN, "analyze", proj_dir], cwd=empty_dir, capture_output=True, text=True)
+        if res.returncode != 0:
+            fail(f"Explicit path argument failed when invoked from empty CWD: {res.stderr}")
+        if "PreBase Repository Intelligence" not in res.stdout:
+            fail(f"Unexpected analyze output with explicit path: {res.stdout}")
+        success("Explicit project path argument preserved when launched from empty directory.")
+
+        # Run files --json from empty_dir with explicit path
+        res_files = subprocess.run([BIN, "files", "--json", proj_dir], cwd=empty_dir, capture_output=True, text=True)
+        if res_files.returncode != 0:
+            fail(f"Explicit path argument failed for files --json: {res_files.stderr}")
+        files = json.loads(res_files.stdout)
+        assert any("src/lib.rs" in f["path"] for f in files)
+        success("Explicit path argument correctly analyzed for files command.")
+
+        # Run from within valid proj_dir, but pass explicit path pointing to empty_dir -> must reject empty_dir!
+        res_bad = subprocess.run([BIN, "analyze", empty_dir], cwd=proj_dir, capture_output=True, text=True)
+        if res_bad.returncode == 0:
+            fail("Expected nonzero exit when explicitly targeting empty dir from within a project")
+        success("Explicit non-project path rejected even when current working directory is a valid project.")
 
 def test_terminal_analyze():
     log("Testing prebase analyze...")
@@ -365,6 +528,10 @@ if __name__ == "__main__":
     test_help_and_version()
     test_invalid_path()
     test_empty_directory()
+    test_git_repository_discovery()
+    test_non_git_manifest_projects()
+    test_project_subdirectory_discovery()
+    test_explicit_path_arguments()
     test_terminal_analyze()
     test_terminal_files()
     test_terminal_search()

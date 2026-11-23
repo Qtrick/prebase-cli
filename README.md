@@ -106,26 +106,57 @@ Launched directly from your terminal, PreBase discovers your repository, analyze
 git clone https://github.com/Qtrick/prebase-cli.git
 cd prebase-cli
 
-# 2. Build full distribution (frontend + release binary)
+# 2. Build full distribution (frontend + release binary) without installing
 ./scripts/build.sh
 
-# The single standalone binary is located at:
+# The compiled standalone binary is located at:
 # target/release/prebase
 ```
 
 ### Installation
 
-Install PreBase into your local user binary directory (`$HOME/.local/bin` by default):
+PreBase provides both a user installation script (`scripts/install.sh`) and unified flags on `scripts/build.sh`. Both ensure that fresh frontend distribution assets are compiled and embedded into the Rust release binary before installing.
+
+#### 1. Standard User Installation (Copy to PATH)
+
+Installs the standalone executable into `$HOME/.local/bin` (or custom directory):
 
 ```bash
-# From cloned repository
+# Installs to $HOME/.local/bin/prebase (default)
 ./scripts/install.sh
+# Or equivalently via build.sh:
+./scripts/build.sh --install
 
-# Or install to a custom directory prefix (e.g., /usr/local/bin)
+# Install to a specific executable directory (--bin-dir)
+./scripts/install.sh --bin-dir ~/.local/bin
+
+# Install to a system or prefix root (--prefix installs into <PREFIX>/bin)
 ./scripts/install.sh --prefix /usr/local
 ```
 
-Ensure `$HOME/.local/bin` is in your shell `PATH` (e.g. `export PATH="$HOME/.local/bin:$PATH"`).
+> **Directory Option Distinction**:
+> - `--bin-dir <DIR>`: Specifies the **exact destination directory** for the executable (installs to `<DIR>/prebase`).
+> - `--prefix <PREFIX>`: Specifies the **installation prefix root** (installs to `<PREFIX>/bin/prebase`).
+>
+> If neither option is passed, installation defaults to `$HOME/.local/bin` (or `$PREBASE_BIN_DIR` / `$PREBASE_PREFIX/bin` if defined in your environment).
+
+#### 2. Development Symlink Installation
+
+For active local development, create a development symlink instead of copying the executable. Whenever you recompile the Rust binary (`cargo build --release` or `./scripts/build.sh`), your system command is immediately updated:
+
+```bash
+# Creates or updates ~/.local/bin/prebase -> <prebase_root>/target/release/prebase
+./scripts/build.sh --link
+# Or via install.sh:
+./scripts/install.sh --link
+```
+
+#### 3. PATH Verification & Shell Configuration
+
+The installation scripts automatically verify command resolution using `command -v prebase` and detect potential issues:
+- **Missing from PATH**: If your target bin directory is not in your shell `$PATH`, actionable configuration commands for both **Zsh** (`~/.zshrc`) and **Bash** (`~/.bashrc`) are displayed.
+- **PATH Shadowing Detection**: If another `prebase` binary earlier in your `$PATH` precedes the newly installed binary, a warning is printed displaying the conflicting path and guidance to fix your PATH order.
+- **Atomic & Safe**: Executable files are installed using atomic replacement (`0755` permissions) and safe symlink replacement, avoiding partial file writes or unintended traversal of unrelated user files.
 
 ---
 
