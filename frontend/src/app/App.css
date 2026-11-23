@@ -367,23 +367,56 @@ body,
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  container-type: inline-size;
+  container-name: workspace;
 }
 
-.workspace-header {
-  position: absolute;
-  top: 12px;
-  left: 14px;
-  right: 14px;
+/* Unified Workspace Chrome in normal document flow */
+.workspace-chrome {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  z-index: 20;
+  min-width: 0;
+  position: relative;
+}
+
+.primary-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
-  z-index: 20;
-  pointer-events: none;
+  gap: 10px 14px;
+  min-height: 48px;
+  padding: 8px 16px;
   flex-wrap: wrap;
+  min-width: 0;
+  position: static;
+  top: auto;
+  left: auto;
+  right: auto;
+  pointer-events: auto;
 }
 
-.workspace-header>* {
+.primary-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 240px;
+  min-width: 180px;
+  max-width: 360px;
+}
+
+.primary-toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.workspace-header {
   pointer-events: auto;
 }
 
@@ -443,6 +476,14 @@ body,
   color: #ffffff;
   font-weight: 600;
   box-shadow: 0 1px 4px rgba(99, 102, 241, 0.4);
+}
+
+.mode-full-label {
+  display: inline;
+}
+
+.mode-short-label {
+  display: none;
 }
 
 [data-theme="light"] .mode-btn.active {
@@ -688,7 +729,24 @@ body,
   background: var(--bg-selected);
 }
 
-/* Graph Breadcrumb Bar */
+/* Graph Breadcrumb Bar & Contextual Navigation */
+.context-nav-bar {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 4px 16px;
+  background: rgba(13, 18, 31, 0.45);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
+  user-select: none;
+  min-width: 0;
+  overflow: hidden;
+}
+
+[data-theme="light"] .context-nav-bar {
+  background: rgba(240, 243, 248, 0.65);
+}
+
 .network-breadcrumb-bar {
   position: absolute;
   top: 14px;
@@ -709,12 +767,37 @@ body,
   animation: fadeIn 0.18s ease-out;
 }
 
-[data-theme="light"] .network-breadcrumb-bar {
+.network-breadcrumb-bar.in-flow {
+  position: static;
+  top: auto;
+  left: auto;
+  z-index: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  font-size: 12px;
+  animation: none;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+[data-theme="light"] .network-breadcrumb-bar:not(.in-flow) {
   background: rgba(255, 255, 255, 0.90);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
 }
 
 .crumb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: transparent;
   border: none;
   color: var(--text-secondary);
@@ -724,6 +807,9 @@ body,
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all var(--transition-fast);
+  white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 0;
 }
 
 .crumb-btn:hover {
@@ -736,30 +822,65 @@ body,
   font-weight: 600;
 }
 
+.crumb-label {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-right: 2px;
+}
+
+.crumb-target.truncate,
+.crumb-text.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+  min-width: 0;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 .crumb-sep {
   color: var(--text-muted);
   font-size: 11px;
+  flex-shrink: 0;
 }
 
 .crumb-current {
-  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-brand);
+  background: var(--accent-brand-bg);
+  border: 1px solid var(--accent-brand-border);
   font-weight: 600;
   font-size: 12px;
-  padding: 2px 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  max-width: 440px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.crumb-current.relationship-crumb {
+  color: var(--accent-teal);
+  background: rgba(45, 212, 191, 0.08);
+  border-color: rgba(45, 212, 191, 0.25);
 }
 
 .crumb-clear-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-left: 4px;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
   background: transparent;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   cursor: pointer;
+  flex-shrink: 0;
   transition: all var(--transition-fast);
 }
 
@@ -990,7 +1111,8 @@ body,
 /* Graph Container & Overlays */
 .graph-container {
   width: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   position: relative;
   overflow: hidden;
 }
@@ -1843,8 +1965,8 @@ body,
 
 .live-toast {
   position: absolute;
-  top: 70px;
-  right: 360px;
+  bottom: 24px;
+  right: 24px;
   background: rgba(15, 23, 42, 0.95);
   border: 1px solid var(--accent-teal);
   color: var(--text-primary);
@@ -3288,4 +3410,50 @@ button:focus-visible,
 
 [data-theme="light"] .guide-box {
   background: rgba(0, 0, 0, 0.02);
+}
+
+/* ==========================================================================
+   Responsive Workspace Chrome & Container Queries
+   ========================================================================== */
+
+@container workspace (max-width: 820px) {
+  .mode-full-label {
+    display: none;
+  }
+  .mode-short-label {
+    display: inline;
+  }
+  .crumb-target.truncate,
+  .crumb-text.truncate {
+    max-width: 200px;
+  }
+}
+
+@container workspace (max-width: 620px) {
+  .toolbar-btn .btn-label {
+    display: none;
+  }
+  .action-btn-group .btn-secondary {
+    display: none;
+  }
+  .crumb-target.truncate,
+  .crumb-text.truncate {
+    max-width: 140px;
+  }
+  .primary-toolbar {
+    padding: 6px 12px;
+  }
+  .toolbar-menu-anchor:not(:first-child) .toolbar-dropdown-menu {
+    left: auto;
+    right: 0;
+  }
+}
+
+@container workspace (max-width: 480px) {
+  .mode-short-label {
+    display: none;
+  }
+  .primary-toolbar {
+    padding: 6px 10px;
+  }
 }

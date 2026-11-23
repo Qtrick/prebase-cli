@@ -258,12 +258,21 @@ def test_terminal_history():
 def test_detached_daemon_lifecycle():
     log("Testing background server detach, status, and stop lifecycle...")
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Create a small repo fixture
+        # Create a small repo fixture with scoped git identity
         subprocess.check_call(["git", "init", "-b", "main"], cwd=temp_dir, stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "config", "user.name", "PreBase Test"], cwd=temp_dir, stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "config", "user.email", "test@prebase.dev"], cwd=temp_dir, stdout=subprocess.DEVNULL)
         with open(os.path.join(temp_dir, "index.ts"), "w") as f:
             f.write("export const hello = 'world';\n")
         subprocess.check_call(["git", "add", "."], cwd=temp_dir, stdout=subprocess.DEVNULL)
-        subprocess.check_call(["git", "commit", "-m", "initial"], cwd=temp_dir, stdout=subprocess.DEVNULL)
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "PreBase Test",
+            "GIT_AUTHOR_EMAIL": "test@prebase.dev",
+            "GIT_COMMITTER_NAME": "PreBase Test",
+            "GIT_COMMITTER_EMAIL": "test@prebase.dev",
+        }
+        subprocess.check_call(["git", "commit", "-m", "initial"], cwd=temp_dir, env=git_env, stdout=subprocess.DEVNULL)
 
         # 1. Launch with --detach
         port = 19985

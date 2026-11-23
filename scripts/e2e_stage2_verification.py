@@ -249,6 +249,10 @@ def main():
                         # Test 1: 2D mode
                         page.goto(app_url_2d, wait_until="domcontentloaded", timeout=15000)
                         page.wait_for_selector(".relationship-container", timeout=10000)
+                        page.wait_for_function(
+                            "() => window.__prebaseRelationshipDebug && window.__prebaseRelationshipDebug.renderedNodeCount > 0",
+                            timeout=10000
+                        )
                         dom_output = page.content()
 
                         assert "network-mode-switcher" in dom_output, "DOM missing .network-mode-switcher"

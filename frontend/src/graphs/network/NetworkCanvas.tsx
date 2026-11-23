@@ -41,6 +41,7 @@ import {
   stepRotationalInertia,
   rotateOrientationByScreenDelta,
   quaternionToEuler,
+  eulerToQuaternion,
   quaternionSlerp,
   computeQuaternionToFacePoint,
   ensureCameraOrientation,
@@ -103,6 +104,7 @@ interface NetworkCanvasProps {
   insets?: ViewportInsets;
   onAnnounce?: (message: string) => void;
   theme?: 'dark' | 'light';
+  hideInternalBreadcrumb?: boolean;
 }
 
 interface CameraAnimation {
@@ -138,6 +140,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   insets,
   onAnnounce,
   theme = 'dark',
+  hideInternalBreadcrumb = false,
 }): React.ReactElement => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -328,7 +331,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           areaEdges: renderedEdgesRef.current.areaEdges.length,
         }),
         setCamera: (updates: Partial<NetworkCamera>) => {
-          cameraRef.current = { ...cameraRef.current, ...updates };
+          const next = { ...cameraRef.current, ...updates };
+          if ((updates.yaw !== undefined || updates.pitch !== undefined) && !updates.orientation) {
+            next.orientation = eulerToQuaternion(next.yaw, next.pitch);
+          }
+          cameraRef.current = next;
           requestRender();
         },
         getProjectedNodes: () =>
@@ -2246,73 +2253,75 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }}
     >
       {/* Interactive Hierarchical Breadcrumb Navigation */}
-      <div className="network-breadcrumb-bar" role="navigation" aria-label="Graph Level Navigation">
-        <button
-          type="button"
-          className={`crumb-btn ${scope === 'overview' ? 'active' : ''}`}
-          onClick={() => {
-            onSelectArea?.(null);
-            onSelectNode(null);
-            onSelectAreaEdge?.(null);
-          }}
-          title="Return to Repository Overview"
-        >
-          Overview
-        </button>
+      {!hideInternalBreadcrumb && (
+        <div className="network-breadcrumb-bar" role="navigation" aria-label="Graph Level Navigation">
+          <button
+            type="button"
+            className={`crumb-btn ${scope === 'overview' ? 'active' : ''}`}
+            onClick={() => {
+              onSelectArea?.(null);
+              onSelectNode(null);
+              onSelectAreaEdge?.(null);
+            }}
+            title="Return to Repository Overview"
+          >
+            Overview
+          </button>
 
-        {selectedAreaId && (
-          <>
-            <span className="crumb-sep">/</span>
-            <button
-              type="button"
-              className={`crumb-btn ${scope === 'area' ? 'active' : ''}`}
-              onClick={() => {
-                onSelectNode(null);
-                onSelectAreaEdge?.(null);
-              }}
-              title={`Area: ${selectedAreaId}`}
-            >
-              Area: {selectedAreaId}
-            </button>
-          </>
-        )}
+          {selectedAreaId && (
+            <>
+              <span className="crumb-sep">/</span>
+              <button
+                type="button"
+                className={`crumb-btn ${scope === 'area' ? 'active' : ''}`}
+                onClick={() => {
+                  onSelectNode(null);
+                  onSelectAreaEdge?.(null);
+                }}
+                title={`Area: ${selectedAreaId}`}
+              >
+                Area: {selectedAreaId}
+              </button>
+            </>
+          )}
 
-        {selectedNodeId && (
-          <>
-            <span className="crumb-sep">/</span>
-            <span className="crumb-current">
-              {snapshot.nodes.find((n) => n.id === selectedNodeId)?.filename || 'File'}
-            </span>
-            <button
-              type="button"
-              className="crumb-clear-btn"
-              onClick={() => onSelectNode(null)}
-              title="Deselect file"
-              aria-label="Deselect file"
-            >
-              <X size={12} />
-            </button>
-          </>
-        )}
+          {selectedNodeId && (
+            <>
+              <span className="crumb-sep">/</span>
+              <span className="crumb-current">
+                {snapshot.nodes.find((n) => n.id === selectedNodeId)?.filename || 'File'}
+              </span>
+              <button
+                type="button"
+                className="crumb-clear-btn"
+                onClick={() => onSelectNode(null)}
+                title="Deselect file"
+                aria-label="Deselect file"
+              >
+                <X size={12} />
+              </button>
+            </>
+          )}
 
-        {selectedAreaEdge && !selectedNodeId && (
-          <>
-            <span className="crumb-sep">/</span>
-            <span className="crumb-current">
-              {selectedAreaEdge.sourceAreaId} → {selectedAreaEdge.targetAreaId} ({selectedAreaEdge.edgeCount})
-            </span>
-            <button
-              type="button"
-              className="crumb-clear-btn"
-              onClick={() => onSelectAreaEdge?.(null)}
-              title="Deselect area relationship"
-              aria-label="Deselect area relationship"
-            >
-              <X size={12} />
-            </button>
-          </>
-        )}
-      </div>
+          {selectedAreaEdge && !selectedNodeId && (
+            <>
+              <span className="crumb-sep">/</span>
+              <span className="crumb-current">
+                {selectedAreaEdge.sourceAreaId} → {selectedAreaEdge.targetAreaId} ({selectedAreaEdge.edgeCount})
+              </span>
+              <button
+                type="button"
+                className="crumb-clear-btn"
+                onClick={() => onSelectAreaEdge?.(null)}
+                title="Deselect area relationship"
+                aria-label="Deselect area relationship"
+              >
+                <X size={12} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       <canvas
         ref={canvasRef}

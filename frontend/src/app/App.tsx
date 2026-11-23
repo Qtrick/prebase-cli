@@ -259,9 +259,9 @@ export const App: React.FC = () => {
   const [zoomInCounter, setZoomInCounter] = useState(0);
   const [zoomOutCounter, setZoomOutCounter] = useState(0);
 
-  // Viewport insets (header floating at top 64px, margins)
+  // Viewport insets (header is now in normal document flow; uniform stage margins)
   const networkInsets = useMemo<ViewportInsets>(() => ({
-    top: 64,
+    top: 20,
     bottom: 20,
     left: 20,
     right: 20,
@@ -1229,239 +1229,373 @@ export const App: React.FC = () => {
 
       {/* 2. Main Workspace */}
       <main className="main-content">
-        {/* Top Floating Control Bar */}
-        <header className="workspace-header">
-          {activeTab === 'network' ? (
-            <SearchBox
-              files={snapshot?.nodes || []}
-              onSelectNode={(node, options) => {
-                handleSelectNode(node, options);
-                if (networkViewMode === '2d' && node) {
-                  setFocusNodeId(node.id);
-                  setMissingFocusPath(null);
-                }
-              }}
-            />
-          ) : (
-            <div className="temporal-header-info">
-              <Clock size={15} color="var(--accent-brand)" />
-              <span>Commit history</span>
-              {commits.length > 0 && (
-                <span className="dim">
-                  ({commits.length} {totalCommits ? `of ${totalCommits}` : ''} commits)
-                </span>
+        {/* Unified Workspace Chrome (Normal in-flow layout) */}
+        <div className="workspace-chrome">
+          <header className="workspace-header primary-toolbar" role="toolbar" aria-label="Workspace controls">
+            <div className="primary-toolbar-left">
+              {activeTab === 'network' ? (
+                <SearchBox
+                  files={snapshot?.nodes || []}
+                  onSelectNode={(node, options) => {
+                    handleSelectNode(node, options);
+                    if (networkViewMode === '2d' && node) {
+                      setFocusNodeId(node.id);
+                      setMissingFocusPath(null);
+                    }
+                  }}
+                />
+              ) : (
+                <div className="temporal-header-info">
+                  <Clock size={15} color="var(--accent-brand)" />
+                  <span>Commit history</span>
+                  {commits.length > 0 && (
+                    <span className="dim">
+                      ({commits.length} {totalCommits ? `of ${totalCommits}` : ''} commits)
+                    </span>
+                  )}
+                </div>
               )}
             </div>
-          )}
 
-          {activeTab === 'network' && (
-            <div className="workspace-header-actions">
-              <div className="network-mode-switcher" role="radiogroup" aria-label="Network View Mode">
-                <button
-                  className={`mode-btn ${networkViewMode === '3d' ? 'active' : ''}`}
-                  onClick={() => handleSwitchNetworkMode('3d')}
-                  title="3D Repository Overview (Shortcut: V)"
-                  role="radio"
-                  aria-checked={networkViewMode === '3d'}
-                >
-                  <Layers size={13} />
-                  <span>3D Overview</span>
-                </button>
-                <button
-                  className={`mode-btn ${networkViewMode === '2d' ? 'active' : ''}`}
-                  onClick={() => handleSwitchNetworkMode('2d')}
-                  title="Contextual 2D Relationship Explorer (Shortcut: V)"
-                  role="radio"
-                  aria-checked={networkViewMode === '2d'}
-                >
-                  <Compass size={13} />
-                  <span>2D Relationships</span>
-                </button>
-              </div>
-
-              <div className="toolbar-menu-anchor" ref={filterMenuRef}>
-                <button
-                  className={`toolbar-btn ${selectedLanguageFilter !== 'all' || sourceOnlyFilter ? 'active' : ''}`}
-                  onClick={() => setIsFilterMenuOpen((prev) => !prev)}
-                  title="Filter repository files by scope or language"
-                  aria-haspopup="menu"
-                  aria-expanded={isFilterMenuOpen}
-                >
-                  <Filter size={13} />
-                  <span>Filters</span>
-                  {(selectedLanguageFilter !== 'all' || sourceOnlyFilter) && <span className="active-filter-dot" />}
-                  <ChevronDown size={11} className={`dropdown-chevron ${isFilterMenuOpen ? 'open' : ''}`} />
-                </button>
-                {isFilterMenuOpen && (
-                  <div className="toolbar-dropdown-menu" role="menu" aria-label="Filter graph files">
-                    <div className="menu-group-header">File Visibility</div>
-                    <button
-                      className={`menu-item ${!sourceOnlyFilter ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={!sourceOnlyFilter}
-                      onClick={() => {
-                        setSourceOnlyFilter(false);
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>All Discovered Files ({snapshot?.coverage.total_discovered || 0})</span>
-                      {!sourceOnlyFilter && <Check size={13} />}
-                    </button>
-                    <button
-                      className={`menu-item ${sourceOnlyFilter ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={sourceOnlyFilter}
-                      onClick={() => {
-                        setSourceOnlyFilter(true);
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>Analyzed Code Only ({snapshot?.coverage.total_analyzed || 0})</span>
-                      {sourceOnlyFilter && <Check size={13} />}
-                    </button>
-                    <div className="menu-divider" />
-                    <div className="menu-group-header">Filter Language</div>
-                    <button
-                      className={`menu-item ${selectedLanguageFilter === 'all' ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={selectedLanguageFilter === 'all'}
-                      onClick={() => {
-                        setSelectedLanguageFilter('all');
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>All Languages</span>
-                      {selectedLanguageFilter === 'all' && <Check size={13} />}
-                    </button>
-                    <button
-                      className={`menu-item ${selectedLanguageFilter === 'typescript' ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={selectedLanguageFilter === 'typescript'}
-                      onClick={() => {
-                        setSelectedLanguageFilter('typescript');
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>TypeScript / JavaScript</span>
-                      {selectedLanguageFilter === 'typescript' && <Check size={13} />}
-                    </button>
-                    <button
-                      className={`menu-item ${selectedLanguageFilter === 'rust' ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={selectedLanguageFilter === 'rust'}
-                      onClick={() => {
-                        setSelectedLanguageFilter('rust');
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>Rust</span>
-                      {selectedLanguageFilter === 'rust' && <Check size={13} />}
-                    </button>
-                    <button
-                      className={`menu-item ${selectedLanguageFilter === 'python' ? 'selected' : ''}`}
-                      role="menuitemradio"
-                      aria-checked={selectedLanguageFilter === 'python'}
-                      onClick={() => {
-                        setSelectedLanguageFilter('python');
-                        setIsFilterMenuOpen(false);
-                      }}
-                    >
-                      <span>Python</span>
-                      {selectedLanguageFilter === 'python' && <Check size={13} />}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div className="view-controls">
-                <button
-                  id="zoomIn"
-                  className="ctrl-btn icon-only"
-                  onClick={() => setZoomInCounter((c) => c + 1)}
-                  title="Zoom In (Shortcut: +)"
-                  aria-label="Zoom in"
-                >
-                  <ZoomIn size={14} />
-                </button>
-                <button
-                  id="zoomOut"
-                  className="ctrl-btn icon-only"
-                  onClick={() => setZoomOutCounter((c) => c + 1)}
-                  title="Zoom Out (Shortcut: -)"
-                  aria-label="Zoom out"
-                >
-                  <ZoomOut size={14} />
-                </button>
-                <button
-                  id="fitView"
-                  className="ctrl-btn icon-only"
-                  onClick={() => setFitViewCounter((c) => c + 1)}
-                  title={networkViewMode === '2d' ? 'Fit 2D Relationship View (Shortcut: F)' : 'Fit View to All Nodes (Shortcut: F)'}
-                  aria-label="Fit view"
-                >
-                  <Maximize2 size={14} />
-                </button>
-                <button
-                  id="resetCam"
-                  className="ctrl-btn icon-only"
-                  onClick={() => setResetViewCounter((c) => c + 1)}
-                  title={networkViewMode === '2d' ? 'Reset 2D Camera (Shortcut: R)' : 'Reset Camera to Standard 3D View (Shortcut: R)'}
-                  aria-label="Reset camera"
-                >
-                  <RotateCcw size={14} />
-                </button>
-                {networkViewMode === '3d' && (
+            {activeTab === 'network' && (
+              <div className="workspace-header-actions primary-toolbar-right">
+                <div className="network-mode-switcher" role="radiogroup" aria-label="Network View Mode">
                   <button
-                    id="centerLock"
-                    className={`ctrl-btn icon-only ${keepGraphCentered ? 'active' : ''}`}
-                    onClick={() => {
-                      setKeepGraphCentered((prev) => {
-                        const next = !prev;
-                        setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
-                        return next;
-                      });
-                    }}
-                    title={keepGraphCentered ? 'Keep graph centered (Active) (Shortcut: C)' : 'Center lock off (Shortcut: C)'}
-                    role="checkbox"
-                    aria-checked={keepGraphCentered}
-                    aria-label="Keep graph centered"
+                    className={`mode-btn ${networkViewMode === '3d' ? 'active' : ''}`}
+                    onClick={() => handleSwitchNetworkMode('3d')}
+                    title="3D Repository Overview (Shortcut: V)"
+                    role="radio"
+                    aria-checked={networkViewMode === '3d'}
                   >
-                    <Target size={14} />
+                    <Layers size={13} />
+                    <span className="mode-full-label">3D Overview</span>
+                    <span className="mode-short-label">3D</span>
                   </button>
-                )}
-                <div className="toolbar-menu-anchor" ref={viewMenuRef}>
                   <button
-                    className="ctrl-btn icon-only"
-                    onClick={() => setIsViewMenuOpen((prev) => !prev)}
-                    title="Export & view utilities"
+                    className={`mode-btn ${networkViewMode === '2d' ? 'active' : ''}`}
+                    onClick={() => handleSwitchNetworkMode('2d')}
+                    title="Contextual 2D Relationship Explorer (Shortcut: V)"
+                    role="radio"
+                    aria-checked={networkViewMode === '2d'}
+                  >
+                    <Compass size={13} />
+                    <span className="mode-full-label">2D Relationships</span>
+                    <span className="mode-short-label">2D</span>
+                  </button>
+                </div>
+
+                <div className="toolbar-menu-anchor" ref={filterMenuRef}>
+                  <button
+                    className={`toolbar-btn ${selectedLanguageFilter !== 'all' || sourceOnlyFilter ? 'active' : ''}`}
+                    onClick={() => setIsFilterMenuOpen((prev) => !prev)}
+                    title="Filter repository files by scope or language"
                     aria-haspopup="menu"
-                    aria-expanded={isViewMenuOpen}
-                    aria-label="More view options"
+                    aria-expanded={isFilterMenuOpen}
                   >
-                    <SlidersHorizontal size={14} />
+                    <Filter size={13} />
+                    <span className="btn-label">Filters</span>
+                    {(selectedLanguageFilter !== 'all' || sourceOnlyFilter) && <span className="active-filter-dot" />}
+                    <ChevronDown size={11} className={`dropdown-chevron ${isFilterMenuOpen ? 'open' : ''}`} />
                   </button>
-                  {isViewMenuOpen && (
-                    <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
+                  {isFilterMenuOpen && (
+                    <div className="toolbar-dropdown-menu" role="menu" aria-label="Filter graph files">
+                      <div className="menu-group-header">File Visibility</div>
                       <button
-                        id="exportPNG"
-                        className="menu-item"
-                        role="menuitem"
+                        className={`menu-item ${!sourceOnlyFilter ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={!sourceOnlyFilter}
                         onClick={() => {
-                          handleExportCanvasImage();
-                          setIsViewMenuOpen(false);
+                          setSourceOnlyFilter(false);
+                          setIsFilterMenuOpen(false);
                         }}
-                        title="Export active view as PNG image"
                       >
-                        <Download size={13} />
-                        <span>Export PNG</span>
+                        <span>All Discovered Files ({snapshot?.coverage.total_discovered || 0})</span>
+                        {!sourceOnlyFilter && <Check size={13} />}
+                      </button>
+                      <button
+                        className={`menu-item ${sourceOnlyFilter ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={sourceOnlyFilter}
+                        onClick={() => {
+                          setSourceOnlyFilter(true);
+                          setIsFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>Analyzed Code Only ({snapshot?.coverage.total_analyzed || 0})</span>
+                        {sourceOnlyFilter && <Check size={13} />}
+                      </button>
+                      <div className="menu-divider" />
+                      <div className="menu-group-header">Filter Language</div>
+                      <button
+                        className={`menu-item ${selectedLanguageFilter === 'all' ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={selectedLanguageFilter === 'all'}
+                        onClick={() => {
+                          setSelectedLanguageFilter('all');
+                          setIsFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>All Languages</span>
+                        {selectedLanguageFilter === 'all' && <Check size={13} />}
+                      </button>
+                      <button
+                        className={`menu-item ${selectedLanguageFilter === 'typescript' ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={selectedLanguageFilter === 'typescript'}
+                        onClick={() => {
+                          setSelectedLanguageFilter('typescript');
+                          setIsFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>TypeScript / JavaScript</span>
+                        {selectedLanguageFilter === 'typescript' && <Check size={13} />}
+                      </button>
+                      <button
+                        className={`menu-item ${selectedLanguageFilter === 'rust' ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={selectedLanguageFilter === 'rust'}
+                        onClick={() => {
+                          setSelectedLanguageFilter('rust');
+                          setIsFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>Rust</span>
+                        {selectedLanguageFilter === 'rust' && <Check size={13} />}
+                      </button>
+                      <button
+                        className={`menu-item ${selectedLanguageFilter === 'python' ? 'selected' : ''}`}
+                        role="menuitemradio"
+                        aria-checked={selectedLanguageFilter === 'python'}
+                        onClick={() => {
+                          setSelectedLanguageFilter('python');
+                          setIsFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>Python</span>
+                        {selectedLanguageFilter === 'python' && <Check size={13} />}
                       </button>
                     </div>
                   )}
                 </div>
+
+                <div className="action-btn-group view-controls">
+                  <button
+                    id="zoomIn"
+                    className="ctrl-btn icon-only btn-secondary"
+                    onClick={() => setZoomInCounter((c) => c + 1)}
+                    title="Zoom In (Shortcut: +)"
+                    aria-label="Zoom in"
+                  >
+                    <ZoomIn size={14} />
+                  </button>
+                  <button
+                    id="zoomOut"
+                    className="ctrl-btn icon-only btn-secondary"
+                    onClick={() => setZoomOutCounter((c) => c + 1)}
+                    title="Zoom Out (Shortcut: -)"
+                    aria-label="Zoom out"
+                  >
+                    <ZoomOut size={14} />
+                  </button>
+                  <button
+                    id="fitView"
+                    className="ctrl-btn icon-only"
+                    onClick={() => setFitViewCounter((c) => c + 1)}
+                    title={networkViewMode === '2d' ? 'Fit 2D Relationship View (Shortcut: F)' : 'Fit View to All Nodes (Shortcut: F)'}
+                    aria-label="Fit view"
+                  >
+                    <Maximize2 size={14} />
+                  </button>
+                  <button
+                    id="resetCam"
+                    className="ctrl-btn icon-only"
+                    onClick={() => setResetViewCounter((c) => c + 1)}
+                    title={networkViewMode === '2d' ? 'Reset 2D Camera (Shortcut: R)' : 'Reset Camera to Standard 3D View (Shortcut: R)'}
+                    aria-label="Reset camera"
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                  {networkViewMode === '3d' && (
+                    <button
+                      id="centerLock"
+                      className={`ctrl-btn icon-only ${keepGraphCentered ? 'active' : ''}`}
+                      onClick={() => {
+                        setKeepGraphCentered((prev) => {
+                          const next = !prev;
+                          setAnnouncement(next ? 'Keep centered on' : 'Keep centered off');
+                          return next;
+                        });
+                      }}
+                      title={keepGraphCentered ? 'Keep graph centered (Active) (Shortcut: C)' : 'Center lock off (Shortcut: C)'}
+                      role="checkbox"
+                      aria-checked={keepGraphCentered}
+                      aria-label="Keep graph centered"
+                    >
+                      <Target size={14} />
+                    </button>
+                  )}
+                  <div className="toolbar-menu-anchor" ref={viewMenuRef}>
+                    <button
+                      className="ctrl-btn icon-only"
+                      onClick={() => setIsViewMenuOpen((prev) => !prev)}
+                      title="Export & view utilities"
+                      aria-haspopup="menu"
+                      aria-expanded={isViewMenuOpen}
+                      aria-label="More view options"
+                    >
+                      <SlidersHorizontal size={14} />
+                    </button>
+                    {isViewMenuOpen && (
+                      <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
+                        <button
+                          className="menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            setZoomInCounter((c) => c + 1);
+                            setIsViewMenuOpen(false);
+                          }}
+                        >
+                          <ZoomIn size={13} />
+                          <span>Zoom In (+)</span>
+                        </button>
+                        <button
+                          className="menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            setZoomOutCounter((c) => c + 1);
+                            setIsViewMenuOpen(false);
+                          }}
+                        >
+                          <ZoomOut size={13} />
+                          <span>Zoom Out (-)</span>
+                        </button>
+                        <button
+                          className="menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            setFitViewCounter((c) => c + 1);
+                            setIsViewMenuOpen(false);
+                          }}
+                        >
+                          <Maximize2 size={13} />
+                          <span>Fit View (F)</span>
+                        </button>
+                        <button
+                          className="menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            setResetViewCounter((c) => c + 1);
+                            setIsViewMenuOpen(false);
+                          }}
+                        >
+                          <RotateCcw size={13} />
+                          <span>Reset Camera (R)</span>
+                        </button>
+                        <div className="menu-divider" />
+                        <button
+                          id="exportPNG"
+                          className="menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            handleExportCanvasImage();
+                            setIsViewMenuOpen(false);
+                          }}
+                          title="Export active view as PNG image"
+                        >
+                          <Download size={13} />
+                          <span>Export PNG</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
+          </header>
+
+          {/* Contextual Navigation Bar (Dedicated In-Flow Row) */}
+          {activeTab === 'network' && (
+            <nav className="context-nav-bar" role="navigation" aria-label="Graph Level Navigation">
+              <div className="network-breadcrumb-bar in-flow">
+                <button
+                  type="button"
+                  className={`crumb-btn ${!selectedAreaId && !selectedNode && !selectedAreaEdge ? 'active' : ''}`}
+                  onClick={() => {
+                    handleSelectArea(null);
+                    handleSelectNode(null);
+                    handleSelectAreaEdge(null);
+                  }}
+                  title="Return to Repository Overview"
+                >
+                  <Layers size={12} className="crumb-icon" />
+                  <span>Overview</span>
+                </button>
+
+                {selectedAreaId && (
+                  <>
+                    <span className="crumb-sep" aria-hidden="true">/</span>
+                    <button
+                      type="button"
+                      className={`crumb-btn ${!selectedNode && !selectedAreaEdge ? 'active' : ''}`}
+                      onClick={() => {
+                        handleSelectNode(null);
+                        handleSelectAreaEdge(null);
+                      }}
+                      title={`Area: ${selectedAreaId}`}
+                    >
+                      <span className="crumb-label">Area:</span>
+                      <span className="crumb-target truncate">{selectedAreaId}</span>
+                    </button>
+                  </>
+                )}
+
+                {selectedNode && (
+                  <>
+                    <span className="crumb-sep" aria-hidden="true">/</span>
+                    <span
+                      className="crumb-current"
+                      title={selectedNode.relative_path || selectedNode.filename}
+                    >
+                      <span className="crumb-text truncate">{selectedNode.filename}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="crumb-clear-btn"
+                      onClick={() => handleSelectNode(null)}
+                      title="Deselect file"
+                      aria-label="Deselect file"
+                    >
+                      <X size={12} />
+                    </button>
+                  </>
+                )}
+
+                {selectedAreaEdge && !selectedNode && (
+                  <>
+                    <span className="crumb-sep" aria-hidden="true">/</span>
+                    <span
+                      className="crumb-current relationship-crumb"
+                      title={`${selectedAreaEdge.sourceAreaId} → ${selectedAreaEdge.targetAreaId} (${selectedAreaEdge.edgeCount} links)`}
+                    >
+                      <span className="crumb-text truncate">
+                        {selectedAreaEdge.sourceAreaId} → {selectedAreaEdge.targetAreaId} ({selectedAreaEdge.edgeCount})
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className="crumb-clear-btn"
+                      onClick={() => handleSelectAreaEdge(null)}
+                      title="Deselect area relationship"
+                      aria-label="Deselect area relationship"
+                    >
+                      <X size={12} />
+                    </button>
+                  </>
+                )}
+              </div>
+            </nav>
           )}
-        </header>
+        </div>
 
         {/* Live sync toast notification */}
         {liveNotice && (
@@ -1553,6 +1687,7 @@ export const App: React.FC = () => {
                       insets={networkInsets}
                       onAnnounce={setAnnouncement}
                       theme={theme}
+                      hideInternalBreadcrumb={true}
                     />
                   </div>
                   <div
