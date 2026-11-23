@@ -64,6 +64,15 @@ import {
 import { computeAreaAnchors } from './layout/sphereLayout';
 import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
 import { fitTextEnd, fitTextMiddle } from '../../utils/textFitting';
+import {
+  resolveAreaLabelPlacement,
+  LabelPlacementAnchor,
+} from './layout/labelPlacement';
+import {
+  computeLabelTargetOpacity,
+  stepLabelFade,
+  AreaFadeState,
+} from './layout/labelFade';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -298,6 +307,16 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   }
   const projectedAreaAnchorsRef = useRef<Map<string, ProjectedAreaAnchor>>(new Map());
 
+  interface RenderedAreaLabel {
+    areaId: string;
+    name: string;
+    rect: ScreenRect;
+    placement: string;
+    opacity: number;
+  }
+  const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
+  const labelFadeStatesRef = useRef<Map<string, AreaFadeState>>(new Map());
+
   const renderedEdgesRef = useRef<{
     fileEdges: { edge: DependencyEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
     areaEdges: { edge: AreaEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
@@ -326,6 +345,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             radius: a.radius,
             isFront: a.isFront,
             z: a.proj.z,
+          })),
+        getRenderedAreaLabels: () => Array.from(renderedAreaLabelsRef.current.values()),
+        getFadeStates: () =>
+          Array.from(labelFadeStatesRef.current.entries()).map(([k, v]) => ({
+            id: k,
+            ...v,
           })),
         getRenderedEdgesCount: () => ({
           fileEdges: renderedEdgesRef.current.fileEdges.length,
@@ -748,6 +773,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       ctx.save();
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, width, height);
+
+      let isAnyLabelTransitionActive = false;
 
       try {
         const camera = cameraRef.current;
@@ -1194,70 +1221,21 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             ctx.fillText(monogram, pAnchor.screenX, pAnchor.screenY + 0.5);
             ctx.restore();
           }
-
-          // OVERVIEW SCOPE: Draw prominent Area Labels under front-facing anchors
-          const areaCollisionGrid = new LabelCollisionGrid(90);
-          const frontAnchors = Array.from(areaAnchorsMap.values())
-            .filter((a) => a.isFront || a.depthShading.prominence >= 0.35)
-            .sort((a, b) => b.area.fileCount - a.area.fileCount);
-
-          for (let i = 0; i < frontAnchors.length; i++) {
-            const pAnchor = frontAnchors[i];
-            const rawLabelText = pAnchor.area.name;
-            const countText = `${pAnchor.area.fileCount} files`;
-
-            ctx.save();
-            const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            ctx.font = areaFont;
-            const labelText = fitTextEnd(rawLabelText, 160, (s) => ctx.measureText(s).width, areaFont);
-            const nameWidth = ctx.measureText(labelText).width;
-            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            const countWidth = ctx.measureText(countText).width;
-
-            const boxWidth = Math.max(nameWidth, countWidth) + 14;
-            const boxHeight = 32;
-            const labelY = pAnchor.screenY + pAnchor.radius + 4;
-
-            const rect: ScreenRect = {
-              x1: pAnchor.screenX - boxWidth / 2,
-              y1: labelY - 2,
-              x2: pAnchor.screenX + boxWidth / 2,
-              y2: labelY + boxHeight,
-            };
-
-            if (!areaCollisionGrid.collides(rect)) {
-              areaCollisionGrid.insert(rect);
-
-              // Pill background
-              ctx.beginPath();
-              if (ctx.roundRect) {
-                ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
-              } else {
-                ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
-              }
-              ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.85)' : 'rgba(13, 18, 31, 0.80)';
-              ctx.fill();
-              ctx.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)';
-              ctx.lineWidth = 1;
-              ctx.stroke();
-
-              // Area name
-              ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'top';
-              ctx.fillText(labelText, pAnchor.screenX, labelY + 2);
-
-              // File count
-              ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
-              ctx.fillText(countText, pAnchor.screenX, labelY + 16);
-            }
-            ctx.restore();
-          }
         }
 
         // 4. Draw Nodes (sorted far-to-near for Painter's algorithm — rendered ON TOP of area backdrops)
+        const obstacleGrid = new LabelCollisionGrid(80);
+
+        // Register architectural area anchors into the obstacle collision grid
+        for (const pAnchor of areaAnchorsMap.values()) {
+          obstacleGrid.insert({
+            x1: pAnchor.screenX - pAnchor.radius - 2,
+            y1: pAnchor.screenY - pAnchor.radius - 2,
+            x2: pAnchor.screenX + pAnchor.radius + 2,
+            y2: pAnchor.screenY + pAnchor.radius + 2,
+          });
+        }
+
         const sortedNodes = projData.projectedList;
         for (let i = sortedNodes.length - 1; i >= 0; i--) {
           const pNode = sortedNodes[i];
@@ -1351,6 +1329,176 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.lineWidth = descriptor.ringWidth;
           ctx.stroke();
           ctx.restore();
+
+          // Register prominent foreground file nodes as obstacles for label placement
+          if (descriptor.depthAlpha >= 0.25 || isSelected || isHovered || isHighlighted) {
+            const haloPad = isSelected || isHovered ? 8 : 4;
+            obstacleGrid.insert({
+              x1: pNode.screenX - screenR - haloPad,
+              y1: pNode.screenY - screenR - haloPad,
+              x2: pNode.screenX + screenR + haloPad,
+              y2: pNode.screenY + screenR + haloPad,
+            });
+          }
+        }
+
+        // 4.5 Draw Architectural Area Labels (Collision-Aware Multi-Candidate Placement + Smooth Depth Fade)
+        isAnyLabelTransitionActive = false;
+        renderedAreaLabelsRef.current.clear();
+
+        if (scope === 'overview' && !isSmallRepo) {
+          const now = timestamp || performance.now();
+          const fadeMap = labelFadeStatesRef.current;
+          const placedLabelsGrid = new LabelCollisionGrid(90);
+
+          // Populate placedLabelsGrid with all area anchor badges so labels never cover anchor monograms
+          for (const a of areaAnchorsMap.values()) {
+            placedLabelsGrid.insert({
+              x1: a.screenX - a.radius - 2,
+              y1: a.screenY - a.radius - 2,
+              x2: a.screenX + a.radius + 2,
+              y2: a.screenY + a.radius + 2,
+            });
+          }
+
+          const allAnchors = Array.from(areaAnchorsMap.values());
+          allAnchors.sort((a, b) => {
+            if (a.area.id === selectedAreaId) return -1;
+            if (b.area.id === selectedAreaId) return 1;
+            if (a.area.id === hoveredAreaId) return -1;
+            if (b.area.id === hoveredAreaId) return 1;
+            return b.area.fileCount - a.area.fileCount;
+          });
+
+          for (let i = 0; i < allAnchors.length; i++) {
+            const pAnchor = allAnchors[i];
+            const isSelected = pAnchor.area.id === selectedAreaId;
+            const isHovered = pAnchor.area.id === hoveredAreaId;
+            const isPriority = isSelected || isHovered;
+
+            const existingFadeState = fadeMap.get(pAnchor.area.id);
+            const targetOpacity = computeLabelTargetOpacity(
+              pAnchor.isFront,
+              pAnchor.depthShading.prominence,
+              isPriority,
+              existingFadeState ? existingFadeState.currentOpacity : 0.0
+            );
+
+            let fadeState = existingFadeState;
+            if (!fadeState) {
+              // Initial state: front-facing labels start immediately visible at targetOpacity
+              fadeState = {
+                currentOpacity: targetOpacity,
+                targetOpacity,
+                lastTimestamp: now,
+              };
+              fadeMap.set(pAnchor.area.id, fadeState);
+            }
+
+            const transitionActive = stepLabelFade(
+              fadeState,
+              targetOpacity,
+              now,
+              prefersReducedMotion
+            );
+            if (transitionActive) {
+              isAnyLabelTransitionActive = true;
+            }
+
+            if (fadeState.currentOpacity <= 0.01) {
+              continue;
+            }
+
+            const rawLabelText = pAnchor.area.name;
+            const countText = `${pAnchor.area.fileCount} files`;
+
+            ctx.save();
+            const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            ctx.font = areaFont;
+            const labelText = fitTextEnd(rawLabelText, 160, (s) => ctx.measureText(s).width, areaFont);
+            const nameWidth = ctx.measureText(labelText).width;
+            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const countWidth = ctx.measureText(countText).width;
+
+            const boxWidth = Math.max(nameWidth, countWidth) + 16;
+            const boxHeight = 32;
+
+            const placementAnchor: LabelPlacementAnchor = {
+              id: pAnchor.area.id,
+              screenX: pAnchor.screenX,
+              screenY: pAnchor.screenY,
+              radius: pAnchor.radius,
+              isSelected,
+              isHovered,
+            };
+
+            const placementResult = resolveAreaLabelPlacement(
+              placementAnchor,
+              boxWidth,
+              boxHeight,
+              obstacleGrid,
+              width,
+              height,
+              insets,
+              fadeState.candidateIndex,
+              placedLabelsGrid
+            );
+
+            fadeState.candidateIndex = placementResult.candidateIndex;
+
+            if (placementResult.isSuppressed && !isPriority) {
+              ctx.restore();
+              continue;
+            }
+
+            const rect = placementResult.rect;
+            obstacleGrid.insert(rect);
+            placedLabelsGrid.insert(rect);
+
+            renderedAreaLabelsRef.current.set(pAnchor.area.id, {
+              areaId: pAnchor.area.id,
+              name: pAnchor.area.name,
+              rect,
+              placement: placementResult.placement,
+              opacity: fadeState.currentOpacity,
+            });
+
+            ctx.globalAlpha = (isLight ? 0.95 : 0.90) * fadeState.currentOpacity;
+
+            // Pill background
+            ctx.beginPath();
+            if (ctx.roundRect) {
+              ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
+            } else {
+              ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
+            }
+            ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.92)' : 'rgba(13, 18, 31, 0.88)';
+            ctx.fill();
+
+            // Pill border (highlighted if selected or hovered)
+            ctx.strokeStyle = isSelected
+              ? (isLight ? '#4f46e5' : '#6366f1')
+              : isHovered
+                ? (isLight ? '#0284c7' : '#38bdf8')
+                : (isLight ? 'rgba(0, 0, 0, 0.12)' : 'rgba(255, 255, 255, 0.15)');
+            ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
+            ctx.stroke();
+
+            // Area name
+            const textCenterX = (rect.x1 + rect.x2) / 2;
+            ctx.font = areaFont;
+            ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(labelText, textCenterX, rect.y1 + 3);
+
+            // File count
+            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+            ctx.fillText(countText, textCenterX, rect.y1 + 17);
+
+            ctx.restore();
+          }
         }
 
         // 5. Draw Node Labels (Spatial Collision Grid)
@@ -1451,7 +1599,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
         candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
 
-        const collisionGrid = new LabelCollisionGrid(80);
+        const collisionGrid = obstacleGrid;
 
         for (let i = 0; i < candidateLabels.length; i++) {
           const cand = candidateLabels[i];
@@ -1486,7 +1634,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
 
       // If animation is still running, schedule next frame
-      if (cameraAnimRef.current) {
+      if (cameraAnimRef.current || isAnyLabelTransitionActive) {
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },

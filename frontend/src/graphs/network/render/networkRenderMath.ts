@@ -1091,6 +1091,26 @@ export class LabelCollisionGrid {
     return false;
   }
 
+  countCollisions(rect: ScreenRect): number {
+    const keys = this.getCellKeys(rect);
+    const seen = new Set<ScreenRect>();
+    let count = 0;
+    for (const key of keys) {
+      const cellRects = this.grid.get(key);
+      if (!cellRects) continue;
+      for (let i = 0; i < cellRects.length; i++) {
+        const r = cellRects[i];
+        if (!seen.has(r)) {
+          seen.add(r);
+          if (rect.x1 < r.x2 && rect.x2 > r.x1 && rect.y1 < r.y2 && rect.y2 > r.y1) {
+            count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
   insert(rect: ScreenRect): void {
     const keys = this.getCellKeys(rect);
     for (const key of keys) {

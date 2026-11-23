@@ -373,12 +373,16 @@ describe('Network Occlusion Prevention, File Selection Precedence & Workspace Po
       const source = fs.readFileSync(networkCanvasPath, 'utf8');
 
       const anchorSectionIdx = source.indexOf('3. Draw Area Anchor Badges');
-      const overviewLabelIdx = source.indexOf('OVERVIEW SCOPE: Draw prominent Area Labels');
-      const nodeSectionIdx = source.indexOf('4. Draw Nodes (sorted far-to-near for Painter\'s algorithm — rendered ON TOP of area backdrops)');
+      const nodeSectionIdx = source.indexOf('4. Draw Nodes');
+      const areaLabelSectionIdx = source.indexOf('4.5 Draw Architectural Area Labels');
+      const fileLabelSectionIdx = source.indexOf('5. Draw Node Labels');
 
       expect(anchorSectionIdx).toBeGreaterThan(0);
-      expect(overviewLabelIdx).toBeGreaterThan(anchorSectionIdx);
-      expect(nodeSectionIdx).toBeGreaterThan(overviewLabelIdx);
+      expect(nodeSectionIdx).toBeGreaterThan(anchorSectionIdx);
+      // Area labels are positioned collision-aware and rendered above nodes to prevent text being painted over
+      expect(areaLabelSectionIdx).toBeGreaterThan(nodeSectionIdx);
+      // File labels are rendered topmost
+      expect(fileLabelSectionIdx).toBeGreaterThan(areaLabelSectionIdx);
     });
   });
 
