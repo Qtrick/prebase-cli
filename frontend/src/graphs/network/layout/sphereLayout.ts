@@ -156,7 +156,9 @@ export function layoutSphere(
           continue;
         }
 
-        const r = capRadius * Math.sqrt((j + 0.5) / nArea);
+        // Inner exclusion zone prevents file nodes from directly overlapping the central area anchor badge
+        const minInnerRadius = Math.min(24, capRadius * 0.35);
+        const r = minInnerRadius + (capRadius - minInnerRadius) * Math.sqrt((j + 0.5) / nArea);
         const phi = j * goldenAngle;
         const cosP = Math.cos(phi);
         const sinP = Math.sin(phi);

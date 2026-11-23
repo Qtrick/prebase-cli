@@ -579,8 +579,8 @@ describe('Network Membership Rings, Monogram Disambiguation & Layout Stability S
       expect(result.state.camera.panX).toBeCloseTo(usableCenterX, 2);
       expect(result.state.camera.panY).toBeCloseTo(usableCenterY, 2);
 
-      // Must never exceed comfortable maxFitZoom (1.25)
-      expect(result.state.camera.zoom).toBeLessThanOrEqual(1.25);
+      // Must never exceed comfortable maxFitZoom (1.55)
+      expect(result.state.camera.zoom).toBeLessThanOrEqual(1.55);
       expect(result.state.camera.zoom).toBeGreaterThanOrEqual(0.15);
     });
   });

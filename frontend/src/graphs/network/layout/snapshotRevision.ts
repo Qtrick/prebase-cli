@@ -116,16 +116,16 @@ export function processSnapshotRevision(
 
     const proj = projectGraph(snapshot.nodes, computedPositions, centroid, tempCamera, {
       extraPoints: anchors.values(),
-      extraRadius: 52,
+      extraRadius: 36,
     });
     const fit = computeNetworkFitTransform(
       proj.bounds,
       viewport.width,
       viewport.height,
       viewport.insets,
-      96,
+      32,
       true,
-      1.25
+      1.55
     );
 
     const initialCamera: NetworkCamera = {

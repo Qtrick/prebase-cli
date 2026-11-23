@@ -70,7 +70,7 @@ import {
   HoverHysteresisController,
   HOVER_RELEASE_GRACE_PERIOD_MS,
 } from './hoverHysteresis';
-import { X } from 'lucide-react';
+import { X, Lightbulb } from 'lucide-react';
 
 export interface RevealRequest {
   nodeId: string;
@@ -448,9 +448,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const currentCam = cameraRef.current;
       const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, currentCam, {
         extraPoints: areaAnchors.values(),
-        extraRadius: 52,
+        extraRadius: 36,
       });
-      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 96, true, 1.25);
+      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 32, true, 1.55);
 
       if (prefersReducedMotion) {
         cameraRef.current = {
@@ -499,9 +499,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
       const proj = projectGraph(snapshot.nodes, positions, centroidRef.current, resetCam, {
         extraPoints: areaAnchors.values(),
-        extraRadius: 52,
+        extraRadius: 36,
       });
-      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 96, true, 1.25);
+      const fit = computeNetworkFitTransform(proj.bounds, width, height, insets, 32, true, 1.55);
 
       const targetCamera: NetworkCamera = {
         orientation: DEFAULT_ORIENTATION,
@@ -750,6 +750,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
       try {
         const camera = cameraRef.current;
+        const isLight = theme === 'light';
 
         // 1. Authoritative projection pass
         const projectOptions = {
@@ -757,7 +758,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           selectedNodeId,
           hoveredNodeId,
           extraPoints: areaAnchors.values(),
-          extraRadius: 52,
+          extraRadius: 36,
         };
         const projData = projectGraph(
           snapshot.nodes,
@@ -1148,7 +1149,112 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
         }
 
-        // 3. Draw Nodes (sorted far-to-near for Painter's algorithm)
+        // 3. Draw Area Anchor Badges & Overview Area Labels (Overview Mode Architectural Underlay)
+        if (scope === 'overview' && !isSmallRepo) {
+          const sortedAnchors = Array.from(areaAnchorsMap.values()).sort((a, b) => b.proj.z - a.proj.z);
+          for (let i = 0; i < sortedAnchors.length; i++) {
+            const pAnchor = sortedAnchors[i];
+            const isAreaHovered = hoveredAreaId === pAnchor.area.id;
+            const isAreaSelected = selectedAreaId === pAnchor.area.id;
+            const areaColor = getAreaColor(pAnchor.area.id, theme);
+            const isLight = theme === 'light';
+
+            ctx.save();
+            ctx.globalAlpha = 0.50 + 0.50 * pAnchor.depthShading.depth;
+
+            // Outer glow ring
+            if (isAreaSelected || isAreaHovered) {
+              ctx.beginPath();
+              ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius + 4.5, 0, Math.PI * 2);
+              ctx.strokeStyle = areaColor;
+              ctx.lineWidth = isAreaSelected ? 3.0 : 2.0;
+              ctx.stroke();
+            }
+
+            // Badge fill
+            ctx.beginPath();
+            ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius, 0, Math.PI * 2);
+            ctx.fillStyle = areaColor;
+            ctx.fill();
+
+            // Badge border
+            ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.90)';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // Monogram text (disambiguated uniquely across repository areas)
+            const parts = pAnchor.area.name.split(/[-_/ ]+/).filter(Boolean);
+            const fallbackMonogram = (parts.length >= 2 ? parts[0][0] + parts[1][0] : pAnchor.area.name.slice(0, 2)).toUpperCase();
+            const monogram = areaMonograms.get(pAnchor.area.id) || fallbackMonogram;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `700 ${Math.round(pAnchor.radius * 0.8)}px "JetBrains Mono", ui-monospace, monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(monogram, pAnchor.screenX, pAnchor.screenY + 0.5);
+            ctx.restore();
+          }
+
+          // OVERVIEW SCOPE: Draw prominent Area Labels under front-facing anchors
+          const areaCollisionGrid = new LabelCollisionGrid(90);
+          const frontAnchors = Array.from(areaAnchorsMap.values())
+            .filter((a) => a.isFront || a.depthShading.prominence >= 0.35)
+            .sort((a, b) => b.area.fileCount - a.area.fileCount);
+
+          for (let i = 0; i < frontAnchors.length; i++) {
+            const pAnchor = frontAnchors[i];
+            const labelText = pAnchor.area.name;
+            const countText = `${pAnchor.area.fileCount} files`;
+
+            ctx.save();
+            ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const nameWidth = ctx.measureText(labelText).width;
+            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const countWidth = ctx.measureText(countText).width;
+
+            const boxWidth = Math.max(nameWidth, countWidth) + 14;
+            const boxHeight = 32;
+            const labelY = pAnchor.screenY + pAnchor.radius + 4;
+
+            const rect: ScreenRect = {
+              x1: pAnchor.screenX - boxWidth / 2,
+              y1: labelY - 2,
+              x2: pAnchor.screenX + boxWidth / 2,
+              y2: labelY + boxHeight,
+            };
+
+            if (!areaCollisionGrid.collides(rect)) {
+              areaCollisionGrid.insert(rect);
+
+              // Pill background
+              ctx.beginPath();
+              if (ctx.roundRect) {
+                ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
+              } else {
+                ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
+              }
+              ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.85)' : 'rgba(13, 18, 31, 0.80)';
+              ctx.fill();
+              ctx.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)';
+              ctx.lineWidth = 1;
+              ctx.stroke();
+
+              // Area name
+              ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'top';
+              ctx.fillText(labelText, pAnchor.screenX, labelY + 2);
+
+              // File count
+              ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+              ctx.fillText(countText, pAnchor.screenX, labelY + 16);
+            }
+            ctx.restore();
+          }
+        }
+
+        // 4. Draw Nodes (sorted far-to-near for Painter's algorithm — rendered ON TOP of area backdrops)
         const sortedNodes = projData.projectedList;
         for (let i = sortedNodes.length - 1; i >= 0; i--) {
           const pNode = sortedNodes[i];
@@ -1244,237 +1350,132 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           ctx.restore();
         }
 
-        // Draw Area Anchor Badges if in Overview mode
-        if (scope === 'overview' && !isSmallRepo) {
-          const sortedAnchors = Array.from(areaAnchorsMap.values()).sort((a, b) => b.proj.z - a.proj.z);
-          for (let i = 0; i < sortedAnchors.length; i++) {
-            const pAnchor = sortedAnchors[i];
-            const isAreaHovered = hoveredAreaId === pAnchor.area.id;
-            const isAreaSelected = selectedAreaId === pAnchor.area.id;
-            const areaColor = getAreaColor(pAnchor.area.id, theme);
-            const isLight = theme === 'light';
-
-            ctx.save();
-            ctx.globalAlpha = 0.50 + 0.50 * pAnchor.depthShading.depth;
-
-            // Outer glow ring
-            if (isAreaSelected || isAreaHovered) {
-              ctx.beginPath();
-              ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius + 4.5, 0, Math.PI * 2);
-              ctx.strokeStyle = areaColor;
-              ctx.lineWidth = isAreaSelected ? 3.0 : 2.0;
-              ctx.stroke();
-            }
-
-            // Badge fill
-            ctx.beginPath();
-            ctx.arc(pAnchor.screenX, pAnchor.screenY, pAnchor.radius, 0, Math.PI * 2);
-            ctx.fillStyle = areaColor;
-            ctx.fill();
-
-            // Badge border
-            ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.90)';
-            ctx.lineWidth = 1.8;
-            ctx.stroke();
-
-            // Monogram text (disambiguated uniquely across repository areas)
-            const parts = pAnchor.area.name.split(/[-_/ ]+/).filter(Boolean);
-            const fallbackMonogram = (parts.length >= 2 ? parts[0][0] + parts[1][0] : pAnchor.area.name.slice(0, 2)).toUpperCase();
-            const monogram = areaMonograms.get(pAnchor.area.id) || fallbackMonogram;
-            ctx.fillStyle = '#ffffff';
-            ctx.font = `700 ${Math.round(pAnchor.radius * 0.8)}px "JetBrains Mono", ui-monospace, monospace`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(monogram, pAnchor.screenX, pAnchor.screenY + 0.5);
-            ctx.restore();
-          }
-        }
-
-        // 4. Draw Labels
-        const isLight = theme === 'light';
+        // 5. Draw Node Labels (Spatial Collision Grid)
         const fontSize = Math.max(12, Math.min(16, Math.round(12.5 * Math.sqrt(camera.zoom))));
         const monoFont = `${fontSize}px "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+        ctx.font = `500 ${monoFont}`;
 
-        if (scope === 'overview' && !isSmallRepo) {
-          // OVERVIEW SCOPE: Draw prominent Area Labels under front-facing anchors!
-          const areaCollisionGrid = new LabelCollisionGrid(90);
-          const frontAnchors = Array.from(areaAnchorsMap.values())
-            .filter((a) => a.isFront || a.depthShading.prominence >= 0.35)
-            .sort((a, b) => b.area.fileCount - a.area.fileCount);
+        interface CandidateLabel {
+          pNode: ProjectedNode;
+          isSelected: boolean;
+          isHovered: boolean;
+          priorityScore: number;
+          text: string;
+          labelY: number;
+          rect: ScreenRect;
+        }
 
-          for (let i = 0; i < frontAnchors.length; i++) {
-            const pAnchor = frontAnchors[i];
-            const labelText = pAnchor.area.name;
-            const countText = `${pAnchor.area.fileCount} files`;
+        const candidateLabels: CandidateLabel[] = [];
 
-            ctx.save();
-            ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            const nameWidth = ctx.measureText(labelText).width;
-            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            const countWidth = ctx.measureText(countText).width;
+        for (let i = 0; i < sortedNodes.length; i++) {
+          const pNode = sortedNodes[i];
+          const isSelected = selectedNodeId === pNode.id;
+          const isHovered = hoveredNodeId === pNode.id;
+          const isConnectedToSelected =
+            selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
+          const totalDegree =
+            pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
 
-            const boxWidth = Math.max(nameWidth, countWidth) + 14;
-            const boxHeight = 32;
-            const labelY = pAnchor.screenY + pAnchor.radius + 4;
-
-            const rect: ScreenRect = {
-              x1: pAnchor.screenX - boxWidth / 2,
-              y1: labelY - 2,
-              x2: pAnchor.screenX + boxWidth / 2,
-              y2: labelY + boxHeight,
-            };
-
-            if (!areaCollisionGrid.collides(rect)) {
-              areaCollisionGrid.insert(rect);
-
-              // Pill background
-              ctx.beginPath();
-              if (ctx.roundRect) {
-                ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
-              } else {
-                ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
-              }
-              ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.94)' : 'rgba(13, 18, 31, 0.90)';
-              ctx.fill();
-              ctx.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)';
-              ctx.lineWidth = 1;
-              ctx.stroke();
-
-              // Area name
-              ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'top';
-              ctx.fillText(labelText, pAnchor.screenX, labelY + 2);
-
-              // File count
-              ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
-              ctx.fillText(countText, pAnchor.screenX, labelY + 16);
-            }
-            ctx.restore();
-          }
-        } else {
-          // AREA, FILE, OR SMALL REPO SCOPE: Draw Node Labels with Spatial Collision Grid
-          ctx.font = `500 ${monoFont}`;
-
-          interface CandidateLabel {
-            pNode: ProjectedNode;
-            isSelected: boolean;
-            isHovered: boolean;
-            priorityScore: number;
-            text: string;
-            labelY: number;
-            rect: ScreenRect;
+          // In Overview scope: suppress labels except for hovered or selected nodes
+          if (scope === 'overview' && !isSelected && !isHovered) {
+            continue;
           }
 
-          const candidateLabels: CandidateLabel[] = [];
-
-          for (let i = 0; i < sortedNodes.length; i++) {
-            const pNode = sortedNodes[i];
-            const isSelected = selectedNodeId === pNode.id;
-            const isHovered = hoveredNodeId === pNode.id;
-            const isConnectedToSelected =
-              selectedNodeId !== null && (neighborMap.get(selectedNodeId)?.has(pNode.id) ?? false);
-            const totalDegree =
-              pNode.node.direct_dependency_count + pNode.node.direct_dependent_count;
-
-            if (languageFilter && languageFilter !== 'all') {
-              if (!matchesLanguageFilter(pNode.node, languageFilter)) {
-                continue;
-              }
-            }
-
-            // In File scope: suppress labels for unrelated nodes
-            if (scope === 'file' && !isSelected && !isHovered && !isConnectedToSelected) {
+          if (languageFilter && languageFilter !== 'all') {
+            if (!matchesLanguageFilter(pNode.node, languageFilter)) {
               continue;
             }
-
-            // In Area scope: suppress labels for nodes outside selected area unless hovered
-            if (scope === 'area' && selectedAreaId) {
-              if (getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId && !isHovered) {
-                continue;
-              }
-            }
-
-            const shouldDraw = shouldDrawNodeLabel({
-              isSelected,
-              isHovered,
-              isConnectedToSelected,
-              projectedZ: pNode.projected.z,
-              totalDegree,
-              zoom: camera.zoom,
-            });
-
-            if (!shouldDraw) continue;
-
-            const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
-            const screenR = pNode.radius * camera.zoom;
-            const textWidth = ctx.measureText(text).width;
-            const labelY = pNode.screenY + screenR + 4;
-            const rect: ScreenRect = {
-              x1: pNode.screenX - textWidth / 2 - 4,
-              y1: labelY - 2,
-              x2: pNode.screenX + textWidth / 2 + 4,
-              y2: labelY + fontSize + 2,
-            };
-
-            const isInFocusedArea =
-              effectiveAreaSet !== null && effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
-
-            const priorityScore = computeLabelPriorityScore({
-              isSelected,
-              isHovered,
-              isConnectedToSelected,
-              isInFocusedArea,
-              projectedZ: pNode.projected.z,
-              depthScale: pNode.projected.depthScale,
-              totalDegree,
-            });
-
-            candidateLabels.push({
-              pNode,
-              isSelected,
-              isHovered,
-              priorityScore,
-              text,
-              labelY,
-              rect,
-            });
           }
 
-          candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
-
-          const collisionGrid = new LabelCollisionGrid(80);
-
-          for (let i = 0; i < candidateLabels.length; i++) {
-            const cand = candidateLabels[i];
-            const isPriority = cand.isSelected || cand.isHovered;
-
-            if (!isPriority) {
-              if (collisionGrid.collides(cand.rect)) {
-                continue;
-              }
-            }
-            collisionGrid.insert(cand.rect);
-
-            ctx.save();
-            ctx.font = isPriority ? `600 ${monoFont}` : `500 ${monoFont}`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'top';
-
-            ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
-            ctx.lineWidth = 3.5;
-            ctx.strokeText(cand.text, cand.pNode.screenX, cand.labelY);
-
-            ctx.fillStyle = cand.isSelected
-              ? (isLight ? '#0d9488' : '#2dd4bf')
-              : cand.isHovered
-                ? (isLight ? '#0284c7' : '#38bdf8')
-                : (isLight ? '#0f172a' : '#f1f5f9');
-            ctx.fillText(cand.text, cand.pNode.screenX, cand.labelY);
-            ctx.restore();
+          // In File scope: suppress labels for unrelated nodes
+          if (scope === 'file' && !isSelected && !isHovered && !isConnectedToSelected) {
+            continue;
           }
+
+          // In Area scope: suppress labels for nodes outside selected area unless hovered
+          if (scope === 'area' && selectedAreaId) {
+            if (getAreaIdForPath(pNode.node.relative_path) !== selectedAreaId && !isHovered) {
+              continue;
+            }
+          }
+
+          const shouldDraw = shouldDrawNodeLabel({
+            isSelected,
+            isHovered,
+            isConnectedToSelected,
+            projectedZ: pNode.projected.z,
+            totalDegree,
+            zoom: camera.zoom,
+          });
+
+          if (!shouldDraw) continue;
+
+          const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
+          const screenR = pNode.radius * camera.zoom;
+          const textWidth = ctx.measureText(text).width;
+          const labelY = pNode.screenY + screenR + 4;
+          const rect: ScreenRect = {
+            x1: pNode.screenX - textWidth / 2 - 4,
+            y1: labelY - 2,
+            x2: pNode.screenX + textWidth / 2 + 4,
+            y2: labelY + fontSize + 2,
+          };
+
+          const isInFocusedArea =
+            effectiveAreaSet !== null && effectiveAreaSet.has(getAreaIdForPath(pNode.node.relative_path));
+
+          const priorityScore = computeLabelPriorityScore({
+            isSelected,
+            isHovered,
+            isConnectedToSelected,
+            isInFocusedArea,
+            projectedZ: pNode.projected.z,
+            depthScale: pNode.projected.depthScale,
+            totalDegree,
+          });
+
+          candidateLabels.push({
+            pNode,
+            isSelected,
+            isHovered,
+            priorityScore,
+            text,
+            labelY,
+            rect,
+          });
+        }
+
+        candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
+
+        const collisionGrid = new LabelCollisionGrid(80);
+
+        for (let i = 0; i < candidateLabels.length; i++) {
+          const cand = candidateLabels[i];
+          const isPriority = cand.isSelected || cand.isHovered;
+
+          if (!isPriority) {
+            if (collisionGrid.collides(cand.rect)) {
+              continue;
+            }
+          }
+          collisionGrid.insert(cand.rect);
+
+          ctx.save();
+          ctx.font = isPriority ? `600 ${monoFont}` : `500 ${monoFont}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+
+          ctx.strokeStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(8, 11, 17, 0.92)';
+          ctx.lineWidth = 3.5;
+          ctx.strokeText(cand.text, cand.pNode.screenX, cand.labelY);
+
+          ctx.fillStyle = cand.isSelected
+            ? (isLight ? '#0d9488' : '#2dd4bf')
+            : cand.isHovered
+              ? (isLight ? '#0284c7' : '#38bdf8')
+              : (isLight ? '#0f172a' : '#f1f5f9');
+          ctx.fillText(cand.text, cand.pNode.screenX, cand.labelY);
+          ctx.restore();
         }
       } finally {
         ctx.restore();
@@ -1654,7 +1655,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
       for (const [, projAnchor] of projectedAreaAnchorsRef.current.entries()) {
         const dist = Math.hypot(projAnchor.screenX - screenX, projAnchor.screenY - screenY);
-        const hitRadius = Math.max(projAnchor.radius + 8, 20);
+        // Constrain hit radius to the anchor badge boundary so it never intercepts clicks intended for surrounding file nodes
+        const hitRadius = projAnchor.radius + 2;
         if (dist <= hitRadius && dist < bestDist) {
           bestDist = dist;
           bestArea = projAnchor.area;
@@ -1812,6 +1814,22 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       return;
     }
 
+    // File nodes have first-class interaction precedence over area anchors & edges
+    const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+    if (hitNode) {
+      if (hoveredAreaId !== null) {
+        setHoveredAreaId(null);
+        requestRender();
+      }
+      if (hoveredAreaEdgeId !== null) {
+        setHoveredAreaEdgeId(null);
+        requestRender();
+      }
+      hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
+      if (canvasRef.current) canvasRef.current.style.cursor = 'pointer';
+      return;
+    }
+
     // Hover hit test with hysteresis based on scope
     if (scope === 'overview' && !isSmallRepo) {
       const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
@@ -1843,14 +1861,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         requestRender();
       }
 
-      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-      if (hitNode) {
-        hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
-        if (canvasRef.current) canvasRef.current.style.cursor = 'pointer';
-      } else {
-        hoverControllerRef.current?.handlePointerMoveOverEmpty();
-        if (canvasRef.current) canvasRef.current.style.cursor = '';
-      }
+      hoverControllerRef.current?.handlePointerMoveOverEmpty();
+      if (canvasRef.current) canvasRef.current.style.cursor = '';
     } else {
       if (hoveredAreaId !== null) {
         setHoveredAreaId(null);
@@ -1861,12 +1873,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         requestRender();
       }
 
-      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-      if (hitNode) {
-        hoverControllerRef.current?.handlePointerMoveOverNode(hitNode.id);
-      } else {
-        hoverControllerRef.current?.handlePointerMoveOverEmpty();
-      }
+      hoverControllerRef.current?.handlePointerMoveOverEmpty();
+      if (canvasRef.current) canvasRef.current.style.cursor = '';
     }
   };
 
@@ -1904,6 +1912,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
     // If click below threshold: perform selection WITHOUT moving the camera
     if (!wasDragging) {
+      // 1. File nodes have first-class selection precedence over area anchors & edges
+      const hitNode = findNodeAtPoint(e.clientX, e.clientY);
+      if (hitNode) {
+        hoverControllerRef.current?.handleClickNode(hitNode.id);
+        onSelectNode(hitNode);
+        onSelectEdge(null);
+        onSelectAreaEdge?.(null);
+        onAnnounce?.(`Selected file ${hitNode.filename}`);
+        return;
+      }
+
       if (scope === 'overview' && !isSmallRepo) {
         const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
         if (hitArea) {
@@ -1924,51 +1943,32 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           return;
         }
 
-        const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-        if (hitNode) {
-          hoverControllerRef.current?.handleClickNode(hitNode.id);
-          onSelectNode(hitNode);
-          onSelectEdge(null);
-          onSelectAreaEdge?.(null);
-          onAnnounce?.(`Selected file ${hitNode.filename}`);
-          return;
-        }
-
         onSelectNode(null);
         onSelectEdge(null);
         onSelectAreaEdge?.(null);
       } else {
-        const hitNode = findNodeAtPoint(e.clientX, e.clientY);
-        if (hitNode) {
-          hoverControllerRef.current?.handleClickNode(hitNode.id);
-          onSelectNode(hitNode);
-          onSelectEdge(null);
+        const hitEdge = findEdgeAtPoint(e.clientX, e.clientY);
+        if (hitEdge) {
+          onSelectEdge(hitEdge);
+          onSelectNode(null);
           onSelectAreaEdge?.(null);
-          onAnnounce?.(`Selected file ${hitNode.filename}`);
+          onAnnounce?.(`Selected relationship ${hitEdge.relationship_kind}`);
         } else {
-          const hitEdge = findEdgeAtPoint(e.clientX, e.clientY);
-          if (hitEdge) {
-            onSelectEdge(hitEdge);
+          const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
+          if (hitArea && hitArea.id !== selectedAreaId) {
+            onSelectArea?.(hitArea.id);
             onSelectNode(null);
+            onSelectEdge(null);
             onSelectAreaEdge?.(null);
-            onAnnounce?.(`Selected relationship ${hitEdge.relationship_kind}`);
+            onAnnounce?.(`Switched to area ${hitArea.name}`);
           } else {
-            const hitArea = findAreaAnchorAtPoint(e.clientX, e.clientY);
-            if (hitArea && hitArea.id !== selectedAreaId) {
-              onSelectArea?.(hitArea.id);
+            if (selectedNodeId) {
               onSelectNode(null);
-              onSelectEdge(null);
-              onSelectAreaEdge?.(null);
-              onAnnounce?.(`Switched to area ${hitArea.name}`);
-            } else {
-              if (selectedNodeId) {
-                onSelectNode(null);
-              } else if (selectedAreaId) {
-                onSelectArea?.(null);
-              }
-              onSelectEdge(null);
-              onSelectAreaEdge?.(null);
+            } else if (selectedAreaId) {
+              onSelectArea?.(null);
             }
+            onSelectEdge(null);
+            onSelectAreaEdge?.(null);
           }
         }
       }
@@ -2354,7 +2354,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         aria-label="Toggle Codebase Orb Guide and Legend"
         title="Toggle Codebase Orb Guide and Legend"
       >
-        <span className="legend-icon" aria-hidden="true">💡</span>
+        <Lightbulb size={13} className="legend-icon" aria-hidden="true" />
         <span>Graph Guide</span>
       </button>
 

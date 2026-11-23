@@ -1508,6 +1508,18 @@ export const App: React.FC = () => {
                       </div>
                     )}
                   </div>
+                  {inspectorCollapsed && (
+                    <button
+                      id="toggleInspector"
+                      className="ctrl-btn inspector-reopen-btn"
+                      onClick={() => setInspectorCollapsed(false)}
+                      title="Open inspector"
+                      aria-label="Open inspector"
+                    >
+                      <PanelRightOpen size={14} />
+                      <span className="btn-label">Inspect</span>
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -1874,19 +1886,6 @@ export const App: React.FC = () => {
           }}
           theme={theme}
         />
-      )}
-
-      {/* Floating Reopen Inspector Button when Collapsed */}
-      {inspectorCollapsed && (
-        <button
-          className="inspector-reopen-btn"
-          onClick={() => setInspectorCollapsed(false)}
-          title="Open inspector"
-          aria-label="Open inspector"
-        >
-          <PanelRightOpen size={14} />
-          <span>Inspect</span>
-        </button>
       )}
 
       {/* Screen Reader Live Region for Accessibility Announcements */}
