@@ -63,6 +63,7 @@ import {
 } from '../../utils/repositoryAreas';
 import { computeAreaAnchors } from './layout/sphereLayout';
 import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
+import { fitTextEnd, fitTextMiddle } from '../../utils/textFitting';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -1202,11 +1203,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
           for (let i = 0; i < frontAnchors.length; i++) {
             const pAnchor = frontAnchors[i];
-            const labelText = pAnchor.area.name;
+            const rawLabelText = pAnchor.area.name;
             const countText = `${pAnchor.area.fileCount} files`;
 
             ctx.save();
-            ctx.font = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            ctx.font = areaFont;
+            const labelText = fitTextEnd(rawLabelText, 160, (s) => ctx.measureText(s).width, areaFont);
             const nameWidth = ctx.measureText(labelText).width;
             ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
             const countWidth = ctx.measureText(countText).width;
@@ -1410,7 +1413,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
           if (!shouldDraw) continue;
 
-          const text = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
+          const rawText = disambiguatedLabels.get(pNode.id) || pNode.node.filename;
+          const text = fitTextMiddle(rawText, 180, (s) => ctx.measureText(s).width, monoFont);
           const screenR = pNode.radius * camera.zoom;
           const textWidth = ctx.measureText(text).width;
           const labelY = pNode.screenY + screenR + 4;

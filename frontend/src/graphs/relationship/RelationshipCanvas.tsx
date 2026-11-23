@@ -35,6 +35,7 @@ import {
   Maximize2,
   RotateCcw,
 } from 'lucide-react';
+import { fitTextEnd, fitTextPrefix, fitTextMiddle } from '../../utils/textFitting';
 import './RelationshipCanvas.css';
 
 export type { Viewport2D } from './relationshipViewport';
@@ -89,47 +90,6 @@ interface RelationshipCanvasProps {
   theme?: 'dark' | 'light';
   onAnnounce?: (message: string) => void;
   isVisible?: boolean;
-}
-
-// Truncation cache to prevent calling measureText in while loops on every frame
-const textTruncateCache = new Map<string, string>();
-
-function getTruncatedText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-  font: string,
-  prefixEllipsis = false
-): string {
-  const cacheKey = `${text}:${Math.floor(maxWidth)}:${font}:${prefixEllipsis}`;
-  const cached = textTruncateCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  if (textTruncateCache.size > 1500) {
-    textTruncateCache.clear();
-  }
-
-  ctx.font = font;
-  if (ctx.measureText(text).width <= maxWidth) {
-    textTruncateCache.set(cacheKey, text);
-    return text;
-  }
-
-  let result = text;
-  if (!prefixEllipsis) {
-    while (result.length > 3 && ctx.measureText(result + '…').width > maxWidth) {
-      result = result.slice(0, -1);
-    }
-    result += '…';
-  } else {
-    while (result.length > 5 && ctx.measureText('…' + result).width > maxWidth) {
-      result = result.slice(2);
-    }
-    result = '…' + result;
-  }
-
-  textTruncateCache.set(cacheKey, result);
-  return result;
 }
 
 export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
@@ -412,39 +372,79 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
     const curHoveredEdge = hoveredEdgeIdRef.current;
     const curKeyNode = keyboardNodeId;
 
-    // 1. Draw Column Headers with distinct grounding badge
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
+    // 1. Draw Column Headers with distinct grounding badge and strict containment
     for (const header of curLayout.headers) {
-      const headerW = Math.max(160, header.width * 0.72);
-      const headerH = header.omittedCount > 0 ? 52 : 36;
+      const headerW = header.width;
+      const headerH = header.height || (header.omittedCount > 0 ? 54 : 40);
       const headerLeft = header.x - headerW / 2;
-      const headerTop = header.y - 12;
+      const headerTop = header.y - headerH / 2;
+      const radius = 6;
 
       ctx.save();
-      ctx.fillStyle = isLight ? 'rgba(241, 245, 249, 0.85)' : 'rgba(15, 23, 42, 0.75)';
-      ctx.strokeStyle = isLight ? 'rgba(203, 213, 225, 0.8)' : 'rgba(51, 65, 85, 0.6)';
+      ctx.fillStyle = isLight ? 'rgba(241, 245, 249, 0.90)' : 'rgba(15, 23, 42, 0.85)';
+      ctx.strokeStyle = isLight ? 'rgba(203, 213, 225, 0.85)' : 'rgba(51, 65, 85, 0.7)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(headerLeft, headerTop, headerW, headerH, 6);
+      ctx.roundRect(headerLeft, headerTop, headerW, headerH, radius);
       ctx.fill();
       ctx.stroke();
-      ctx.restore();
 
-      ctx.font = '600 12px system-ui, -apple-system, sans-serif';
+      // Defensive clipping to ensure zero text bleeding outside the header badge
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(headerLeft + 1, headerTop + 1, headerW - 2, headerH - 2, radius);
+      ctx.clip();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      const maxInnerW = Math.max(30, headerW - 20);
+
+      // 1. Column Title
+      const titleFont = '600 11.5px system-ui, -apple-system, sans-serif';
+      ctx.font = titleFont;
       ctx.fillStyle = palette.headerTitle;
-      ctx.fillText(header.title.toUpperCase(), header.x, header.y);
+      const titleY = header.omittedCount > 0 ? headerTop + 14 : headerTop + 13;
+      const displayTitle = fitTextEnd(
+        header.title.toUpperCase(),
+        maxInnerW,
+        (s) => ctx.measureText(s).width,
+        titleFont
+      );
+      ctx.fillText(displayTitle, header.x, titleY);
 
-      ctx.font = '500 11px system-ui, -apple-system, sans-serif';
+      // 2. Subtitle (for focus node, it's a file path: use prefix ellipsis to preserve filename & directory)
+      const subtitleFont =
+        header.role === 'focus'
+          ? '500 10.5px monospace'
+          : '500 10.5px system-ui, -apple-system, sans-serif';
+      ctx.font = subtitleFont;
       ctx.fillStyle = palette.headerSubtitle;
-      ctx.fillText(header.subtitle, header.x, header.y + 15);
+      const subtitleY = header.omittedCount > 0 ? headerTop + 28 : headerTop + 27;
 
+      const displaySubtitle =
+        header.role === 'focus'
+          ? fitTextPrefix(header.subtitle, maxInnerW, (s) => ctx.measureText(s).width, subtitleFont)
+          : fitTextEnd(header.subtitle, maxInnerW, (s) => ctx.measureText(s).width, subtitleFont);
+      ctx.fillText(displaySubtitle, header.x, subtitleY);
+
+      // 3. Omitted files count badge
       if (header.omittedCount > 0) {
-        ctx.font = '500 10px monospace';
+        const omittedFont = '500 9.5px monospace';
+        ctx.font = omittedFont;
         ctx.fillStyle = palette.headerOmitted;
-        ctx.fillText(`+${header.omittedCount} omitted`, header.x, header.y + 29);
+        const omittedY = headerTop + 42;
+        const displayOmitted = fitTextEnd(
+          `+${header.omittedCount} omitted`,
+          maxInnerW,
+          (s) => ctx.measureText(s).width,
+          omittedFont
+        );
+        ctx.fillText(displayOmitted, header.x, omittedY);
       }
+
+      ctx.restore(); // clip
+      ctx.restore(); // header
     }
 
     // 2. Draw Edges
@@ -589,6 +589,12 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
 
       ctx.restore();
 
+      // Defensive clipping for the entire card content to guarantee zero text spill
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(left, top, node.width, node.height, radius);
+      ctx.clip();
+
       // Card Content (Color Dot, Filename, Path)
       const typeInfo = getFileTypeInfo(node.node.relative_path);
       const dotX = left + 14;
@@ -599,6 +605,20 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.beginPath();
       ctx.arc(dotX, dotY, isFocus ? 5 : 4, 0, Math.PI * 2);
       ctx.fill();
+
+      // Reserve space for focus stats on the right so filename/path never collide
+      let reservedRightW = 12;
+      if (isFocus) {
+        const statsFont = '600 10.5px system-ui, -apple-system, sans-serif';
+        ctx.font = statsFont;
+        const usedByW = ctx.measureText(`Used by: ${node.node.direct_dependent_count}`).width;
+        const usesW = ctx.measureText(`Uses: ${node.node.direct_dependency_count}`).width;
+        const maxStatsW = Math.max(usedByW, usesW);
+        reservedRightW = Math.max(76, Math.ceil(maxStatsW) + 26);
+      }
+
+      const textX = dotX + (isFocus ? 12 : 10);
+      const maxTextW = Math.max(30, node.width - (textX - left) - reservedRightW);
 
       // Filename
       const filenameFont = isFocus
@@ -613,11 +633,13 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
 
-      const textX = dotX + (isFocus ? 12 : 10);
       const nameY = top + (isFocus ? 23 : 20);
-      const maxTextW = node.width - (textX - left) - (isFocus ? 52 : 12);
-
-      const displayFilename = getTruncatedText(ctx, node.node.filename, maxTextW, filenameFont, false);
+      const displayFilename = fitTextMiddle(
+        node.node.filename,
+        maxTextW,
+        (s) => ctx.measureText(s).width,
+        filenameFont
+      );
       ctx.fillText(displayFilename, textX, nameY);
 
       // Relative Path
@@ -626,7 +648,12 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
       ctx.fillStyle = palette.textMuted;
       const pathY = top + (isFocus ? 40 : 35);
 
-      const displayPath = getTruncatedText(ctx, node.node.relative_path, maxTextW, pathFont, true);
+      const displayPath = fitTextPrefix(
+        node.node.relative_path,
+        maxTextW,
+        (s) => ctx.measureText(s).width,
+        pathFont
+      );
       ctx.fillText(displayPath, textX, pathY);
 
       // Badges for Focus Node (dependencies and dependents counts in clear, plain language)
@@ -638,6 +665,8 @@ export const RelationshipCanvas: React.FC<RelationshipCanvasProps> = ({
         ctx.fillStyle = isLight ? '#0d9488' : '#2dd4bf';
         ctx.fillText(`Uses: ${node.node.direct_dependency_count}`, left + node.width - 12, top + 40);
       }
+
+      ctx.restore(); // clip
 
       ctx.restore();
     }

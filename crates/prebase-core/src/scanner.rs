@@ -259,78 +259,33 @@ impl RepositoryScanner {
             return Ok(canonical);
         }
 
-        // Reject empty directories (after checking git root)
-        if is_empty_dir(&canonical) {
-            return Err(ScanError::NoProjectFound(canonical));
+        // Direct canonical manifest check (Cargo.toml, package.json, pyproject.toml, etc.)
+        if has_canonical_manifest(&canonical) {
+            return Ok(canonical);
         }
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
-        let is_explicit = canonical != canonical_cwd;
-
-        if is_explicit {
-            // Explicit project path preservation:
-            // 1. Direct manifest check
-            if has_canonical_manifest(&canonical) {
-                return Ok(canonical);
-            }
-
-            // 2. Walk up parents to nearest project root (manifest or git)
-            let mut current = canonical.as_path();
-            while let Some(parent) = current.parent() {
-                if is_home_or_system_directory(current) {
-                    break;
-                }
-                if is_git_root(current) || has_canonical_manifest(current) {
-                    return Ok(current.to_path_buf());
-                }
-                current = parent;
-            }
-
-            // 3. Fallback for explicit directories containing project indicators (e.g. manifests or code in subpackages)
-            if has_project_indicators(&canonical) {
-                return Ok(canonical);
-            }
-
-            return Err(ScanError::NoProjectFound(canonical));
-        }
-
-        // Default invocation (running in current working directory or subdirectory):
-        // 1. Walk up to enclosing Git repository root
+        // Walk up parents to discover enclosing project root (Git repo or canonical manifest),
+        // stopping immediately at user home or system directory boundaries.
+        // This ensures nested subdirectories (including empty nested folders within a valid project)
+        // successfully discover their enclosing project.
         let mut current = canonical.as_path();
         while let Some(parent) = current.parent() {
             if is_home_or_system_directory(current) {
                 break;
             }
-            if is_git_root(current) {
+            if is_git_root(current) || has_canonical_manifest(current) {
                 return Ok(current.to_path_buf());
             }
             current = parent;
         }
 
-        // 2. If not in a Git repo, walk up to enclosing project with canonical manifest
-        let mut manifest_root = if has_canonical_manifest(&canonical) {
-            Some(canonical.clone())
-        } else {
-            None
-        };
-
-        let mut current = canonical.as_path();
-        while let Some(parent) = current.parent() {
-            if is_home_or_system_directory(current) {
-                break;
-            }
-            if has_canonical_manifest(current) {
-                manifest_root = Some(current.to_path_buf());
-                break;
-            }
-            current = parent;
+        // Fallback for directories containing software project indicators (manifests or source files within depth 3)
+        // that are not empty and not outside a software project.
+        if !is_empty_dir(&canonical) && has_project_indicators(&canonical) {
+            return Ok(canonical);
         }
 
-        if let Some(root) = manifest_root {
-            return Ok(root);
-        }
-
+        // Otherwise reject arbitrary, empty, or non-project directories
         Err(ScanError::NoProjectFound(canonical))
     }
 

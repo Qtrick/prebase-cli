@@ -431,17 +431,32 @@ def test_failure_behaviors():
     assert res.returncode != 0, "CLI must fail on non-existent path"
     success("Non-existent repository path rejected with non-zero exit code")
 
-    # 2. No-watch mode with dynamic port allocation (port 0)
-    tmp = tempfile.mkdtemp()
+    # 2. Arbitrary non-project directory rejection (strict project validation)
+    tmp_empty = tempfile.mkdtemp()
     try:
-        proc = subprocess.Popen([BIN, "--port", "0", "--no-open", "--no-watch", "map", tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        res_empty = subprocess.run([BIN, "--no-open", "map", tmp_empty], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert res_empty.returncode != 0, "CLI must reject arbitrary non-project directory"
+        success("Arbitrary non-project directory rejected with non-zero exit code")
+    finally:
+        shutil.rmtree(tmp_empty, ignore_errors=True)
+
+    # 3. No-watch mode with dynamic port allocation (port 0) on a valid project
+    tmp_proj = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp_proj, "package.json"), "w") as f:
+            f.write('{"name": "eval-no-watch", "version": "1.0.0"}')
+        os.makedirs(os.path.join(tmp_proj, "src"), exist_ok=True)
+        with open(os.path.join(tmp_proj, "src", "index.ts"), "w") as f:
+            f.write("export const ready = true;\n")
+
+        proc = subprocess.Popen([BIN, "--port", "0", "--no-open", "--no-watch", "map", tmp_proj], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.0)
         assert proc.poll() is None, "Server must remain running in --no-watch mode"
         proc.terminate()
         proc.wait(timeout=5)
         success("--no-watch mode launches cleanly on port 0 and terminates gracefully")
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp_proj, ignore_errors=True)
 
 def main():
     print("=" * 80)

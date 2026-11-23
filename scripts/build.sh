@@ -15,7 +15,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ORIGINAL_PATH="${PREBASE_CALLER_PATH:-$PATH}"
 
 # Ensure toolchain paths (cargo, node, npm) are accessible for the build process
-for tool_dir in "$HOME/.cargo/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
+for tool_dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
   if [[ -d "$tool_dir" && ":$PATH:" != *":$tool_dir:"* ]]; then
     PATH="$tool_dir:$PATH"
   fi

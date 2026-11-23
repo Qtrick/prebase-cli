@@ -62,6 +62,7 @@ export interface LayoutColumnHeader {
   x: number;
   y: number;
   width: number;
+  height: number;
   omittedCount: number;
   totalCount: number;
 }
@@ -143,6 +144,7 @@ export function computeRelationshipLayout(
       });
 
       // Position column header above highest node or at default top offset
+      const headerH = col.omittedCount > 0 ? 54 : 40;
       const topY = count > 0 ? startY - cardHeight / 2 - HEADER_OFFSET_Y : -HEADER_OFFSET_Y;
       headers.push({
         role: col.role,
@@ -152,6 +154,7 @@ export function computeRelationshipLayout(
         x: colX,
         y: topY,
         width: cardWidth,
+        height: headerH,
         omittedCount: col.omittedCount,
         totalCount: col.totalCount,
       });
@@ -194,14 +197,16 @@ export function computeRelationshipLayout(
         nodesById.set(lNode.id, lNode);
       });
 
+      const headerH = col.omittedCount > 0 ? 54 : 40;
       headers.push({
         role: col.role,
         columnIndex: col.columnIndex,
         title: col.title,
         subtitle: col.subtitle,
         x: 0,
-        y: rowY - cardHeight / 2 - 28,
+        y: rowY - cardHeight / 2 - 32,
         width: Math.max(totalWidth, cardWidth),
+        height: headerH,
         omittedCount: col.omittedCount,
         totalCount: col.totalCount,
       });
@@ -373,7 +378,8 @@ export function computeRelationshipLayout(
   for (const h of headers) {
     minX = Math.min(minX, h.x - h.width / 2);
     maxX = Math.max(maxX, h.x + h.width / 2);
-    minY = Math.min(minY, h.y - 30);
+    minY = Math.min(minY, h.y - h.height / 2 - 8);
+    maxY = Math.max(maxY, h.y + h.height / 2 + 8);
   }
 
   if (minX === Infinity) {

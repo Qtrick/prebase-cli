@@ -32,6 +32,13 @@ def mask_credentials(text: str) -> str:
     text = re.sub(r'prebase_session(?:_\d+)?=[A-Za-z0-9_-]+', 'prebase_session=[REDACTED]', text)
     return text
 
+def sanitized_excepthook(exc_type, exc_value, exc_traceback):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    sys.stderr.write(mask_credentials(tb_str))
+
+sys.excepthook = sanitized_excepthook
+
 def log(msg):
     print(f"\x1b[36m[INSTALL VERIFY]\x1b[0m {mask_credentials(str(msg))}", flush=True)
 
@@ -73,6 +80,9 @@ def make_isolated_env(temp_home: str, bin_dir: str = None, include_bin_in_path: 
     env["HOME"] = temp_home
     env["PATH"] = os.pathsep.join(path_components)
     env.pop("PREBASE_PREFIX", None)
+    # Preserve cargo/rustup caches so test subprocesses reuse pre-built toolchains
+    env["CARGO_HOME"] = os.environ.get("CARGO_HOME", os.path.expanduser("~/.cargo"))
+    env["RUSTUP_HOME"] = os.environ.get("RUSTUP_HOME", os.path.expanduser("~/.rustup"))
     return env
 
 def test_copied_installation():

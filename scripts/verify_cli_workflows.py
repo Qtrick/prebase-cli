@@ -250,6 +250,29 @@ def test_project_subdirectory_discovery():
             fail(f"Failed to discover non-Git project root from subdirectory {nested_dir}: {res_non_git.stderr}")
         success("Non-Git manifest project root discovered when launched from nested subdirectory.")
 
+    # 3. Inside an EMPTY nested subdirectory within a valid project
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo_dir = os.path.join(temp_dir, "my_repo_with_empty_sub")
+        os.makedirs(repo_dir)
+        subprocess.check_call(["git", "init", "-b", "main"], cwd=repo_dir, stdout=subprocess.DEVNULL)
+        with open(os.path.join(repo_dir, "main.ts"), "w") as f:
+            f.write("export const app = 1;\n")
+        empty_nested_dir = os.path.join(repo_dir, "src", "empty_components")
+        os.makedirs(empty_nested_dir)
+
+        # Run analyze from inside the empty nested subdirectory without path argument
+        res_empty_sub = subprocess.run([BIN, "analyze"], cwd=empty_nested_dir, capture_output=True, text=True)
+        if res_empty_sub.returncode != 0:
+            fail(f"Failed to discover project root from empty nested subdirectory {empty_nested_dir}: {res_empty_sub.stderr}")
+        if "PreBase Repository Intelligence" not in res_empty_sub.stdout:
+            fail(f"Analyze failed from empty nested subdirectory: {res_empty_sub.stdout}")
+
+        # Also test explicit path pointing to empty nested subdirectory inside project
+        res_explicit_empty = subprocess.run([BIN, "analyze", empty_nested_dir], capture_output=True, text=True)
+        if res_explicit_empty.returncode != 0:
+            fail(f"Failed to discover project root from explicit empty nested subdirectory: {res_explicit_empty.stderr}")
+        success("Empty nested subdirectory inside valid project discovers project root correctly.")
+
 def test_explicit_path_arguments():
     log("Testing explicit path argument preservation and override...")
     with tempfile.TemporaryDirectory() as empty_dir, tempfile.TemporaryDirectory() as proj_dir:
