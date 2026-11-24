@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   generateLabelCandidates,
+  getCandidateRect,
+  getCandidatePlacement,
   isRectInsideViewport,
   resolveAreaLabelPlacement,
   LabelPlacementAnchor,
@@ -392,6 +394,63 @@ describe('Collision-Aware Area Label Placement (labelPlacement.ts)', () => {
 
       expect(res.placement).toBe('above');
       expect(res.candidateIndex).toBe(1);
+    });
+
+    it('strictly preserves candidate when isInteractionLocked is true, preventing teleportation during drag', () => {
+      const obstacleGrid = new LabelCollisionGrid(80);
+      // Sature candidate 1 ('above') with heavy obstacles
+      obstacleGrid.insert({ x1: 350, y1: 240, x2: 450, y2: 280 });
+      obstacleGrid.insert({ x1: 380, y1: 240, x2: 420, y2: 280 });
+
+      // During active interaction (user is dragging/rotating), isInteractionLocked = true
+      const res = resolveAreaLabelPlacement(
+        anchor,
+        boxWidth,
+        boxHeight,
+        obstacleGrid,
+        800,
+        600,
+        undefined,
+        1, // previousCandidateIndex = 1 ('above')
+        undefined,
+        true // isInteractionLocked = true
+      );
+
+      // Must remain strictly locked to candidate 1 with zero switching
+      expect(res.placement).toBe('above');
+      expect(res.candidateIndex).toBe(1);
+      expect(res.isSuppressed).toBe(false);
+    });
+
+    it('retains persistent candidate when grazed by a single file node without hard collision', () => {
+      const obstacleGrid = new LabelCollisionGrid(80);
+      // Place a single file node touching Candidate 0 ('below')
+      obstacleGrid.insert({ x1: 395, y1: 330, x2: 405, y2: 340 });
+
+      const res = resolveAreaLabelPlacement(
+        anchor,
+        boxWidth,
+        boxHeight,
+        obstacleGrid,
+        800,
+        600,
+        undefined,
+        0 // previousCandidateIndex = 0 ('below')
+      );
+
+      // Single grazing node (< 2) must NOT flip candidate placement!
+      expect(res.placement).toBe('below');
+      expect(res.candidateIndex).toBe(0);
+    });
+
+    it('getCandidateRect and getCandidatePlacement return deterministic geometry', () => {
+      const rect0 = getCandidateRect(anchor, 0, boxWidth, boxHeight);
+      expect(rect0.y1).toBe(anchor.screenY + anchor.radius + 4);
+      expect(getCandidatePlacement(0)).toBe('below');
+
+      const rect1 = getCandidateRect(anchor, 1, boxWidth, boxHeight);
+      expect(rect1.y2).toBe(anchor.screenY - anchor.radius - 4);
+      expect(getCandidatePlacement(1)).toBe('above');
     });
   });
 });

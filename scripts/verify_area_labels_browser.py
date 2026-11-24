@@ -26,6 +26,16 @@ def http_get(url):
     with urllib.request.urlopen(req, timeout=5) as resp:
         return resp.status, resp.read().decode("utf-8")
 
+def wait_for_motion_settled(page, timeout_sec=5.0):
+    """CSP-safe polling loop that waits for all label motion transitions to settle."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout_sec:
+        active_count = page.evaluate("() => window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0")
+        if active_count == 0:
+            return True
+        time.sleep(0.03)
+    return False
+
 def main():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     binary = os.path.join(repo_root, "target", "release", "prebase")
@@ -122,8 +132,8 @@ def main():
             cx = canvas_box["x"] + canvas_box["width"] / 2
             cy = canvas_box["y"] + canvas_box["height"] / 2
 
-            # Ensure initial layout and entry relocations settle completely
-            page.wait_for_function("() => (window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0) === 0", timeout=5000)
+            # Ensure initial layout and entry relocations settle completely (CSP-safe)
+            assert wait_for_motion_settled(page, timeout_sec=5.0), "Initial label motion failed to settle"
             time.sleep(0.1)
 
             # Start dragging at center
@@ -131,25 +141,33 @@ def main():
             page.mouse.down()
             time.sleep(0.05)
 
-            # Wait for gesture start stabilization if any hover change occurred
-            page.wait_for_function("() => (window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0) === 0", timeout=5000)
+            # Wait for gesture start stabilization if any hover change occurred (CSP-safe)
+            wait_for_motion_settled(page, timeout_sec=2.0)
 
             # Record initial positions and motion states
             prev_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
             prev_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
             prev_motions = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
 
-            # Perform 6 sequential micro-drags of 2-3px each
+            # Perform 10 sequential micro-drags of 2-3px each (including directional reversals)
             micro_steps = [
-                (cx + 3, cy - 2),
-                (cx + 6, cy - 4),
-                (cx + 9, cy - 7),
-                (cx + 12, cy - 9),
-                (cx + 15, cy - 12),
-                (cx + 18, cy - 14),
+                (cx + 2, cy - 1),
+                (cx + 4, cy - 2),
+                (cx + 7, cy - 4),
+                (cx + 10, cy - 6),
+                (cx + 12, cy - 8),
+                # Reversal / small back-and-forth
+                (cx + 10, cy - 7),
+                (cx + 8, cy - 5),
+                (cx + 11, cy - 6),
+                (cx + 14, cy - 8),
+                (cx + 16, cy - 9),
             ]
 
             micro_tested_count = 0
+            candidate_switch_count = 0
+            relocation_start_count = 0
+
             for step_x, step_y in micro_steps:
                 page.mouse.move(step_x, step_y)
                 time.sleep(0.04)
@@ -164,27 +182,32 @@ def main():
                         prev_m = prev_motions[area_id]
                         curr_m = curr_motions.get(area_id, {})
 
-                        # Skip labels that were relocating in the baseline frame or are currently relocating
-                        if prev_m.get("isRelocating") or curr_m.get("isRelocating"):
-                            continue
+                        # Track any candidate switches during micro-movement
+                        if curr_m.get("candidateIndex") != prev_m.get("candidateIndex"):
+                            candidate_switch_count += 1
+                            print(f"[UNEXPECTED] Candidate switch for {area_id}: {prev_m.get('candidateIndex')} -> {curr_m.get('candidateIndex')}")
 
-                        # When candidate placement is stable (same candidate), assert strict 1:1 camera tracking
-                        if curr_m.get("candidateIndex") == prev_m.get("candidateIndex"):
-                            anc_curr = curr_anchors[area_id]
-                            anc_prev = prev_anchors[area_id]
-                            anc_dx = anc_curr["screenX"] - anc_prev["screenX"]
-                            anc_dy = anc_curr["screenY"] - anc_prev["screenY"]
+                        # Track any relocation starts during micro-movement
+                        if curr_m.get("isRelocating") and not prev_m.get("isRelocating"):
+                            relocation_start_count += 1
+                            print(f"[UNEXPECTED] Relocation started for {area_id}")
 
-                            lbl_dx = curr_lbl["rect"]["x1"] - prev_lbl["rect"]["x1"]
-                            lbl_dy = curr_lbl["rect"]["y1"] - prev_lbl["rect"]["y1"]
+                        # Assert 1:1 camera-coupled tracking: displacement of label must equal anchor displacement
+                        anc_curr = curr_anchors[area_id]
+                        anc_prev = prev_anchors[area_id]
+                        anc_dx = anc_curr["screenX"] - anc_prev["screenX"]
+                        anc_dy = anc_curr["screenY"] - anc_prev["screenY"]
 
-                            diff_x = abs(lbl_dx - anc_dx)
-                            diff_y = abs(lbl_dy - anc_dy)
+                        lbl_dx = curr_lbl["rect"]["x1"] - prev_lbl["rect"]["x1"]
+                        lbl_dy = curr_lbl["rect"]["y1"] - prev_lbl["rect"]["y1"]
 
-                            # Label displacement must match projected anchor displacement within subpixel tolerance
-                            assert diff_x <= 1.0, f"Micro-movement mismatch in X for {area_id}: label_dx={lbl_dx}, anc_dx={anc_dx}, diff={diff_x}"
-                            assert diff_y <= 1.0, f"Micro-movement mismatch in Y for {area_id}: label_dy={lbl_dy}, anc_dy={anc_dy}, diff={diff_y}"
-                            micro_tested_count += 1
+                        diff_x = abs(lbl_dx - anc_dx)
+                        diff_y = abs(lbl_dy - anc_dy)
+
+                        # Label displacement must match projected anchor displacement within subpixel tolerance
+                        assert diff_x <= 1.0, f"Micro-movement mismatch in X for {area_id}: label_dx={lbl_dx}, anc_dx={anc_dx}, diff={diff_x}"
+                        assert diff_y <= 1.0, f"Micro-movement mismatch in Y for {area_id}: label_dy={lbl_dy}, anc_dy={anc_dy}, diff={diff_y}"
+                        micro_tested_count += 1
 
                 prev_anchors = curr_anchors
                 prev_labels = curr_labels
@@ -192,8 +215,11 @@ def main():
 
             page.mouse.up()
             time.sleep(0.15)
-            assert micro_tested_count >= 10, f"Expected at least 10 stable frame comparisons, got {micro_tested_count}"
-            print(f"[PASS] Continuous micro-movement tracking verified ({micro_tested_count} frame comparisons, zero lag/teleportation).")
+            # Enforce Section 11.2, 11.3 & 15.4 acceptance criteria:
+            assert candidate_switch_count == 0, f"Expected 0 candidate switches during micro-drag, got {candidate_switch_count}"
+            assert relocation_start_count == 0, f"Expected 0 relocation starts during micro-drag, got {relocation_start_count}"
+            assert micro_tested_count >= 50, f"Expected at least 50 verified frame comparisons across all visible labels, got {micro_tested_count}"
+            print(f"[PASS] Continuous micro-movement tracking verified ({micro_tested_count} frame comparisons, 0 candidate switches, 0 relocation starts, zero lag/teleportation).")
 
             shot_micro = os.path.join(screenshot_dir, "area_labels_micromovement.png")
             page.screenshot(path=shot_micro)

@@ -161,9 +161,42 @@ export function isRectInsideViewport(
 }
 
 /**
+ * Returns the exact bounding rectangle for a given candidate index.
+ */
+export function getCandidateRect(
+  anchor: LabelPlacementAnchor,
+  candidateIndex: number,
+  boxWidth: number,
+  boxHeight: number,
+  gap = 4
+): ScreenRect {
+  const candidates = generateLabelCandidates(anchor, boxWidth, boxHeight, gap);
+  const validIndex = Math.max(0, Math.min(candidates.length - 1, candidateIndex));
+  return candidates[validIndex].rect;
+}
+
+/**
+ * Returns the candidate placement name for a given candidate index.
+ */
+export function getCandidatePlacement(candidateIndex: number): CandidatePlacement {
+  const validIndex = Math.max(0, Math.min(CANDIDATE_PLACEMENTS.length - 1, candidateIndex));
+  return CANDIDATE_PLACEMENTS[validIndex];
+}
+
+/**
  * Evaluates candidate placements against the spatial obstacle grid and selects
  * the candidate with the lowest collision penalty, applying temporal hysteresis
  * to prevent frame-to-frame jumping.
+ *
+ * Architecture Invariants:
+ * 1. Interaction-Locked Stability: During active camera interaction (dragging, rotating,
+ *    panning, inertia, or camera animation), candidate switching is completely locked.
+ *    Labels track their projected anchors 1:1 with zero re-evaluation and zero teleportation.
+ * 2. Persistent Candidate Authority: Once a candidate placement is established, it remains
+ *    authoritative unless a hard constraint (severe viewport exit or hard collision with
+ *    another area label) invalidates it. Soft file-node collisions NEVER trigger candidate switching.
+ * 3. Initial & Fallback Optimization: Multi-candidate scoring is only performed on initial
+ *    mount or when an existing persistent placement is genuinely hard-invalidated.
  */
 export function resolveAreaLabelPlacement(
   anchor: LabelPlacementAnchor,
@@ -174,9 +207,62 @@ export function resolveAreaLabelPlacement(
   viewportHeight: number,
   insets?: ViewportInsets,
   previousCandidateIndex?: number,
-  placedLabelsGrid?: LabelCollisionGrid
+  placedLabelsGrid?: LabelCollisionGrid,
+  isInteractionLocked = false
 ): LabelPlacementResult {
   const candidates = generateLabelCandidates(anchor, boxWidth, boxHeight);
+
+  // Invariant 1: During active camera interaction (drag, rotate, pan, inertia coasting,
+  // or camera animation), candidate switching is strictly locked to prevent teleportation.
+  if (isInteractionLocked && previousCandidateIndex !== undefined) {
+    const validIndex = Math.max(0, Math.min(candidates.length - 1, previousCandidateIndex));
+    const cand = candidates[validIndex];
+    return {
+      rect: cand.rect,
+      placement: cand.placement,
+      candidateIndex: cand.index,
+      isSuppressed: false,
+    };
+  }
+
+  // Invariant 2: When stationary (not actively dragging/rotating), treat the previously
+  // selected candidate as durable persistent state. It remains authoritative as long as it
+  // satisfies hard constraints (contained inside usable viewport and not overlapping another
+  // area label or anchor monogram). Soft collisions (overlapping 0 or 1 file node) MUST NEVER
+  // cause a label to flip to the opposite side of its anchor!
+  if (
+    previousCandidateIndex !== undefined &&
+    previousCandidateIndex >= 0 &&
+    previousCandidateIndex < candidates.length
+  ) {
+    const prevCand = candidates[previousCandidateIndex];
+    const insideViewport = isRectInsideViewport(
+      prevCand.rect,
+      viewportWidth,
+      viewportHeight,
+      insets,
+      6
+    );
+    const hardCollision = placedLabelsGrid ? placedLabelsGrid.collides(prevCand.rect) : false;
+    const nodeCollisions = collisionGrid.countCollisions(prevCand.rect);
+
+    // If candidate is inside the viewport, does not collide with another placed area label,
+    // and is not heavily obstructed by multiple file nodes (nodeCollisions < 2), PRESERVE IT!
+    if (
+      (insideViewport && !hardCollision && nodeCollisions < 2) ||
+      anchor.isSelected ||
+      anchor.isHovered
+    ) {
+      return {
+        rect: prevCand.rect,
+        placement: prevCand.placement,
+        candidateIndex: prevCand.index,
+        isSuppressed: false,
+      };
+    }
+  }
+
+  // Invariant 3: Initial placement or hard-invalidated candidate: evaluate all candidates
   let bestCandidate = candidates[0];
   let minPenalty = Infinity;
 

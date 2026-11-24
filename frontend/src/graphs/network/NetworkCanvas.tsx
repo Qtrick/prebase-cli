@@ -1405,6 +1405,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const motionMap = labelMotionStatesRef.current;
           const motionTimeline = motionTimelineRef.current;
           const placedLabelsGrid = new LabelCollisionGrid(90);
+          const isInteractionActive =
+            gestureRef.current.active ||
+            inertiaRafRef.current !== null ||
+            cameraAnimRef.current !== null;
 
           // Advance synchronized motion timeline for active transitions
           const timelineStillActive = stepSynchronizedMotion(
@@ -1513,7 +1517,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               height,
               insets,
               prevCandidateIndex,
-              placedLabelsGrid
+              placedLabelsGrid,
+              isInteractionActive
             );
 
             fadeState.candidateIndex = placementResult.candidateIndex;

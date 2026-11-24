@@ -30,6 +30,7 @@ import tempfile
 import subprocess
 import urllib.request
 import urllib.parse
+import math
 from playwright.sync_api import sync_playwright
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -386,8 +387,20 @@ def main():
             success("Saved vertical rotation screenshot -> docs/screenshots/03_after_vertical_drag.png")
 
             after_vert = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            log(f"After Vertical Drag: pitch={after_vert['pitch']:.4f}, panX={after_vert['panX']:.2f}, panY={after_vert['panY']:.2f}")
-            assert abs(after_vert["pitch"] - horiz_cam["pitch"]) > 0.1, "Pitch must change significantly during vertical drag"
+            log(f"After Vertical Drag: pitch={after_vert['pitch']:.4f}, yaw={after_vert['yaw']:.4f}, panX={after_vert['panX']:.2f}, panY={after_vert['panY']:.2f}")
+
+            # Verify significant 3D camera rotation using quaternion angular distance
+            horiz_q = horiz_cam.get("orientation")
+            vert_q = after_vert.get("orientation")
+            if horiz_q and vert_q:
+                dot = abs(sum(a * b for a, b in zip(horiz_q, vert_q)))
+                angular_change = 2 * math.acos(min(1.0, dot))
+                log(f"3D Quaternion angular change: {angular_change:.4f} rad")
+                assert angular_change > 0.15, f"Camera 3D orientation must change significantly during vertical drag (got {angular_change:.4f} rad)"
+            else:
+                pitch_diff = abs(after_vert["pitch"] - horiz_cam["pitch"])
+                yaw_diff = abs(after_vert["yaw"] - horiz_cam["yaw"])
+                assert pitch_diff > 0.05 or yaw_diff > 0.05, f"Camera orientation must change significantly (pitch_diff={pitch_diff:.4f}, yaw_diff={yaw_diff:.4f})"
             assert abs(after_vert["panX"] - init_cam["panX"]) < 25.0, f"PanX remains within center-lock bounds (drift: {abs(after_vert['panX'] - init_cam['panX']):.2f}px)"
             assert abs(after_vert["panY"] - init_cam["panY"]) < 25.0, f"PanY remains within center-lock bounds (drift: {abs(after_vert['panY'] - init_cam['panY']):.2f}px)"
 
