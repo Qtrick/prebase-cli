@@ -321,6 +321,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     name: string;
     rect: ScreenRect;
     placement: string;
+    candidateIndex?: number;
     opacity: number;
   }
   const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
@@ -1563,6 +1564,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               name: pAnchor.area.name,
               rect,
               placement: placementResult.placement,
+              candidateIndex: placementResult.candidateIndex,
               opacity: fadeState.currentOpacity,
             });
 

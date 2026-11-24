@@ -122,14 +122,22 @@ def main():
             cx = canvas_box["x"] + canvas_box["width"] / 2
             cy = canvas_box["y"] + canvas_box["height"] / 2
 
+            # Ensure initial layout and entry relocations settle completely
+            page.wait_for_function("() => (window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0) === 0", timeout=5000)
+            time.sleep(0.1)
+
             # Start dragging at center
             page.mouse.move(cx, cy)
             page.mouse.down()
             time.sleep(0.05)
 
-            # Record initial positions
+            # Wait for gesture start stabilization if any hover change occurred
+            page.wait_for_function("() => (window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0) === 0", timeout=5000)
+
+            # Record initial positions and motion states
             prev_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
             prev_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
+            prev_motions = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
 
             # Perform 6 sequential micro-drags of 2-3px each
             micro_steps = [
@@ -148,15 +156,20 @@ def main():
 
                 curr_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
                 curr_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
-                motion_states_map = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
-                timeline = page.evaluate("() => window.__prebaseNetworkDebug?.getMotionTimeline() || {}")
+                curr_motions = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
 
                 for area_id, curr_lbl in curr_labels.items():
-                    if area_id in prev_labels and area_id in curr_anchors and area_id in prev_anchors:
+                    if area_id in prev_labels and area_id in curr_anchors and area_id in prev_anchors and area_id in prev_motions:
                         prev_lbl = prev_labels[area_id]
-                        m_state = motion_states_map.get(area_id, {})
-                        # Assert 1:1 camera tracking for stable placements (same candidate placement and not in discrete relocation)
-                        if not m_state.get("isRelocating") and curr_lbl.get("placement") == prev_lbl.get("placement"):
+                        prev_m = prev_motions[area_id]
+                        curr_m = curr_motions.get(area_id, {})
+
+                        # Skip labels that were relocating in the baseline frame or are currently relocating
+                        if prev_m.get("isRelocating") or curr_m.get("isRelocating"):
+                            continue
+
+                        # When candidate placement is stable (same candidate), assert strict 1:1 camera tracking
+                        if curr_m.get("candidateIndex") == prev_m.get("candidateIndex"):
                             anc_curr = curr_anchors[area_id]
                             anc_prev = prev_anchors[area_id]
                             anc_dx = anc_curr["screenX"] - anc_prev["screenX"]
@@ -175,9 +188,11 @@ def main():
 
                 prev_anchors = curr_anchors
                 prev_labels = curr_labels
+                prev_motions = curr_motions
 
             page.mouse.up()
             time.sleep(0.15)
+            assert micro_tested_count >= 10, f"Expected at least 10 stable frame comparisons, got {micro_tested_count}"
             print(f"[PASS] Continuous micro-movement tracking verified ({micro_tested_count} frame comparisons, zero lag/teleportation).")
 
             shot_micro = os.path.join(screenshot_dir, "area_labels_micromovement.png")
