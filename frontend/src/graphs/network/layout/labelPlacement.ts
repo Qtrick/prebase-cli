@@ -48,6 +48,8 @@ export const CANDIDATE_PLACEMENTS: CandidatePlacement[] = [
   'below-left',
 ];
 
+export const TEMPORAL_HYSTERESIS_BONUS = 60;
+
 /**
  * Generates bounded candidate positions for an area label around its anchor.
  */
@@ -217,9 +219,9 @@ export function resolveAreaLabelPlacement(
     }
 
     // Temporal Hysteresis: strongly prefer keeping the previous frame's candidate position
-    // if it remains collision-free, completely eliminating position oscillation
+    // if it remains collision-free or lightly contested, completely eliminating position oscillation
     if (previousCandidateIndex !== undefined && previousCandidateIndex === cand.index) {
-      penalty -= 25;
+      penalty -= TEMPORAL_HYSTERESIS_BONUS;
     }
 
     if (penalty < minPenalty) {

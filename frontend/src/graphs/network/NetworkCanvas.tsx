@@ -80,6 +80,7 @@ import {
   registerLabelMotionTarget,
   stepSynchronizedMotion,
   computeRenderedLabelRect,
+  DEFAULT_MOTION_DURATION_MS,
 } from './layout/labelMotion';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
@@ -323,6 +324,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     opacity: number;
   }
   const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
+  const previouslyRenderedAreaIdsRef = useRef<Set<string>>(new Set());
   const labelFadeStatesRef = useRef<Map<string, AreaFadeState>>(new Map());
   const labelMotionStatesRef = useRef<Map<string, AreaMotionState>>(new Map());
   const motionTimelineRef = useRef<SynchronizedMotionTimeline>({
@@ -373,6 +375,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             startOffset: { ...v.startOffset },
             targetOffset: { ...v.targetOffset },
             candidateIndex: v.candidateIndex,
+            isRelocating: !!v.isRelocating,
           })),
         getMotionTimeline: () => ({
           startTime: motionTimelineRef.current.startTime,
@@ -417,7 +420,26 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     };
   }, [keepGraphCentered, sphereRadius, theme, scope, selectedAreaId, selectedAreaEdge, repoStructure]);
 
-  // Maintain stable centering from projected bounds during rotation and viewport changes (Prebasecode applyCenterLock parity)
+  // Reconcile label fade and motion states when repository structure or scope updates
+  useEffect(() => {
+    const validAreaIds = new Set(repoStructure.areas.map((a) => a.id));
+    for (const id of labelFadeStatesRef.current.keys()) {
+      if (!validAreaIds.has(id)) {
+        labelFadeStatesRef.current.delete(id);
+      }
+    }
+    for (const id of labelMotionStatesRef.current.keys()) {
+      if (!validAreaIds.has(id)) {
+        labelMotionStatesRef.current.delete(id);
+        motionTimelineRef.current.activeAreaIds.delete(id);
+      }
+    }
+    if (scope !== 'overview') {
+      renderedAreaLabelsRef.current.clear();
+      motionTimelineRef.current.activeAreaIds.clear();
+      previouslyRenderedAreaIdsRef.current.clear();
+    }
+  }, [repoStructure, scope]);
   const applyCenterLock = useCallback(
     (immediate = false) => {
       if (!keepGraphCentered || !containerRef.current) return;
@@ -1410,7 +1432,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             if (b.area.id === selectedAreaId) return 1;
             if (a.area.id === hoveredAreaId) return -1;
             if (b.area.id === hoveredAreaId) return 1;
-            return b.area.fileCount - a.area.fileCount;
+            if (b.area.fileCount !== a.area.fileCount) {
+              return b.area.fileCount - a.area.fileCount;
+            }
+            return a.area.id.localeCompare(b.area.id);
           });
 
           for (let i = 0; i < allAnchors.length; i++) {
@@ -1475,6 +1500,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               isHovered,
             };
 
+            const existingMotionState = motionMap.get(pAnchor.area.id);
+            const prevCandidateIndex = existingMotionState?.candidateIndex ?? fadeState.candidateIndex;
+
             const placementResult = resolveAreaLabelPlacement(
               placementAnchor,
               boxWidth,
@@ -1483,7 +1511,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               width,
               height,
               insets,
-              fadeState.candidateIndex,
+              prevCandidateIndex,
               placedLabelsGrid
             );
 
@@ -1493,6 +1521,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               ctx.restore();
               continue;
             }
+
+            const wasRenderedLastFrame = previouslyRenderedAreaIdsRef.current.has(pAnchor.area.id);
+            const isReentry = !wasRenderedLastFrame;
 
             // Register candidate placement with synchronized motion engine
             const targetOffset = computeAnchorRelativeOffset(
@@ -1507,7 +1538,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               placementResult.candidateIndex,
               targetOffset,
               now,
-              prefersReducedMotion
+              prefersReducedMotion,
+              DEFAULT_MOTION_DURATION_MS,
+              isReentry
             );
             if (motionJoined) {
               isAnyMotionActive = true;
@@ -1569,6 +1602,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
             ctx.restore();
           }
+          previouslyRenderedAreaIdsRef.current = new Set(renderedAreaLabelsRef.current.keys());
         }
 
         // 5. Draw Node Labels (Spatial Collision Grid)

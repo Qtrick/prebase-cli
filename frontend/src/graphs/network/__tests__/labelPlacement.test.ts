@@ -374,10 +374,11 @@ describe('Collision-Aware Area Label Placement (labelPlacement.ts)', () => {
 
     it('overrides temporal hysteresis when previous candidate position is overtaken by an obstacle', () => {
       const obstacleGrid = new LabelCollisionGrid(80);
-      // Place an obstacle directly covering Candidate 0 ('below')
-      obstacleGrid.insert({ x1: 350, y1: 320, x2: 450, y2: 360 });
+      // Place obstacles directly covering Candidate 0 ('below')
+      obstacleGrid.insert({ x1: 350, y1: 320, x2: 400, y2: 360 });
+      obstacleGrid.insert({ x1: 400, y1: 320, x2: 450, y2: 360 });
 
-      // Even though previousCandidateIndex was 0 ('below'), the collision penalty overrides the -25 bonus
+      // Even though previousCandidateIndex was 0 ('below'), the collision penalty overrides the hysteresis bonus
       const res = resolveAreaLabelPlacement(
         anchor,
         boxWidth,

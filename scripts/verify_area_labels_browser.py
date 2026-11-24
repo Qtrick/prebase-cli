@@ -116,11 +116,75 @@ def main():
             page.screenshot(path=shot1)
             print(f"[PASS] Default view screenshot saved -> {shot1}")
             
-            # Now drag to rotate and observe depth fade
+            # --- PHASE: Continuous Micro-Movement Verification ---
+            print("[AREA LABELS] Verifying continuous camera-coupled anchor tracking under micro-movements...")
             canvas_box = page.locator(".network-canvas").bounding_box()
             cx = canvas_box["x"] + canvas_box["width"] / 2
             cy = canvas_box["y"] + canvas_box["height"] / 2
-            
+
+            # Start dragging at center
+            page.mouse.move(cx, cy)
+            page.mouse.down()
+            time.sleep(0.05)
+
+            # Record initial positions
+            prev_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
+            prev_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
+
+            # Perform 6 sequential micro-drags of 2-3px each
+            micro_steps = [
+                (cx + 3, cy - 2),
+                (cx + 6, cy - 4),
+                (cx + 9, cy - 7),
+                (cx + 12, cy - 9),
+                (cx + 15, cy - 12),
+                (cx + 18, cy - 14),
+            ]
+
+            micro_tested_count = 0
+            for step_x, step_y in micro_steps:
+                page.mouse.move(step_x, step_y)
+                time.sleep(0.04)
+
+                curr_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
+                curr_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
+                motion_states_map = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
+                timeline = page.evaluate("() => window.__prebaseNetworkDebug?.getMotionTimeline() || {}")
+
+                for area_id, curr_lbl in curr_labels.items():
+                    if area_id in prev_labels and area_id in curr_anchors and area_id in prev_anchors:
+                        prev_lbl = prev_labels[area_id]
+                        m_state = motion_states_map.get(area_id, {})
+                        # Assert 1:1 camera tracking for stable placements (same candidate placement and not in discrete relocation)
+                        if not m_state.get("isRelocating") and curr_lbl.get("placement") == prev_lbl.get("placement"):
+                            anc_curr = curr_anchors[area_id]
+                            anc_prev = prev_anchors[area_id]
+                            anc_dx = anc_curr["screenX"] - anc_prev["screenX"]
+                            anc_dy = anc_curr["screenY"] - anc_prev["screenY"]
+
+                            lbl_dx = curr_lbl["rect"]["x1"] - prev_lbl["rect"]["x1"]
+                            lbl_dy = curr_lbl["rect"]["y1"] - prev_lbl["rect"]["y1"]
+
+                            diff_x = abs(lbl_dx - anc_dx)
+                            diff_y = abs(lbl_dy - anc_dy)
+
+                            # Label displacement must match projected anchor displacement within subpixel tolerance
+                            assert diff_x <= 1.0, f"Micro-movement mismatch in X for {area_id}: label_dx={lbl_dx}, anc_dx={anc_dx}, diff={diff_x}"
+                            assert diff_y <= 1.0, f"Micro-movement mismatch in Y for {area_id}: label_dy={lbl_dy}, anc_dy={anc_dy}, diff={diff_y}"
+                            micro_tested_count += 1
+
+                prev_anchors = curr_anchors
+                prev_labels = curr_labels
+
+            page.mouse.up()
+            time.sleep(0.15)
+            print(f"[PASS] Continuous micro-movement tracking verified ({micro_tested_count} frame comparisons, zero lag/teleportation).")
+
+            shot_micro = os.path.join(screenshot_dir, "area_labels_micromovement.png")
+            page.screenshot(path=shot_micro)
+            print(f"[PASS] Micro-movement screenshot saved -> {shot_micro}")
+
+            # Now drag to rotate and observe depth fade
             # Rotate horizontally by 180px
             page.mouse.move(cx, cy)
             page.mouse.down()

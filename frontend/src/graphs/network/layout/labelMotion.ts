@@ -24,6 +24,9 @@ export interface AreaMotionState {
   startOffset: Point2D;
   targetOffset: Point2D;
   candidateIndex: number;
+  startTime?: number;
+  durationMs?: number;
+  isRelocating?: boolean;
 }
 
 export interface SynchronizedMotionTimeline {
@@ -60,10 +63,18 @@ export function computeAnchorRelativeOffset(
 
 /**
  * Initializes or updates an area label's motion state.
- * If the target offset changes, marks the label as needing movement and synchronizes
- * with the shared motion timeline.
  *
- * Returns true if this label initiated or joined an active motion transition.
+ * Implements three distinct motion categories:
+ * A. Continuous camera-driven tracking: When the candidate placement remains stable,
+ *    relative offsets are directly coupled with zero transition delay, zero lag,
+ *    and zero timeline resets, guaranteeing that 1px anchor movement produces 1px label movement.
+ * B. Minor geometry adjustments: Slight adjustments to anchor radius or subpixels
+ *    update directly without restarting layout animations.
+ * C. Genuine layout relocation: When a candidate placement changes (e.g. 'below' to 'above'),
+ *    a smooth synchronized cubic ease-out transition is initiated, rebasing from the
+ *    exact currently rendered position with zero snapping or teleportation.
+ *
+ * Returns true if this label initiated or is actively participating in a relocation transition.
  */
 export function registerLabelMotionTarget(
   motionMap: Map<string, AreaMotionState>,
@@ -73,66 +84,96 @@ export function registerLabelMotionTarget(
   targetOffset: Point2D,
   now: number,
   prefersReducedMotion = false,
-  durationMs = DEFAULT_MOTION_DURATION_MS
+  durationMs?: number,
+  isReentry = false
 ): boolean {
+  const effectiveDuration = durationMs ?? (timeline.durationMs > 0 ? timeline.durationMs : DEFAULT_MOTION_DURATION_MS);
   let state = motionMap.get(areaId);
 
-  // If first encounter, initialize immediately at target position with no transition
-  if (!state) {
-    state = {
-      areaId,
-      currentOffset: { ...targetOffset },
-      startOffset: { ...targetOffset },
-      targetOffset: { ...targetOffset },
-      candidateIndex,
-    };
-    motionMap.set(areaId, state);
+  // If first encounter or re-entering from hidden/suppressed state, initialize immediately
+  // at current target position with zero transition
+  if (!state || isReentry) {
+    if (!state) {
+      state = {
+        areaId,
+        currentOffset: { ...targetOffset },
+        startOffset: { ...targetOffset },
+        targetOffset: { ...targetOffset },
+        candidateIndex,
+        isRelocating: false,
+      };
+      motionMap.set(areaId, state);
+    } else {
+      state.currentOffset = { ...targetOffset };
+      state.startOffset = { ...targetOffset };
+      state.targetOffset = { ...targetOffset };
+      state.candidateIndex = candidateIndex;
+      state.isRelocating = false;
+      timeline.activeAreaIds.delete(areaId);
+    }
     return false;
   }
 
-  // If prefers-reduced-motion, snap immediately to target
+  // Under prefers-reduced-motion, immediately snap to target position without animation
   if (prefersReducedMotion) {
     state.currentOffset = { ...targetOffset };
     state.startOffset = { ...targetOffset };
     state.targetOffset = { ...targetOffset };
     state.candidateIndex = candidateIndex;
+    state.isRelocating = false;
     timeline.activeAreaIds.delete(areaId);
     return false;
   }
 
-  const dx = targetOffset.x - state.targetOffset.x;
-  const dy = targetOffset.y - state.targetOffset.y;
-  const targetDistance = Math.hypot(dx, dy);
+  const isCandidateChange = candidateIndex !== state.candidateIndex;
 
-  // If target candidate or position has changed meaningfully (> 1px)
-  if (targetDistance > 1.0 || candidateIndex !== state.candidateIndex) {
-    // Rebase start offset from current interpolated position to ensure zero snapping
-    state.startOffset = { ...state.currentOffset };
-    state.targetOffset = { ...targetOffset };
-    state.candidateIndex = candidateIndex;
-
-    // Join the synchronized motion timeline
-    timeline.activeAreaIds.add(areaId);
-
-    // Synchronize batch start time: all affected labels share the same clock.
-    // If this transition begins at a new timestamp, rebase all existing active labels
-    // to their current interpolated offsets to prevent backward snapping.
-    if (timeline.startTime !== now) {
-      for (const existingId of timeline.activeAreaIds) {
-        if (existingId !== areaId) {
-          const existingState = motionMap.get(existingId);
-          if (existingState) {
-            existingState.startOffset = { ...existingState.currentOffset };
-          }
-        }
-      }
-      timeline.startTime = now;
-      timeline.durationMs = durationMs;
+  // Case A & B: Candidate placement is stable (e.g. still 'below')
+  if (!isCandidateChange) {
+    if (state.isRelocating) {
+      // Label is already in an active relocation transition towards this candidate:
+      // smoothly update destination geometry (e.g. minor anchor radius change)
+      // without resetting timeline or rebasing, preventing animation starvation!
+      state.targetOffset = { ...targetOffset };
+      return true;
     }
-    return true;
+
+    // Direct anchor-coupled tracking with continuous minor geometry adaptation:
+    // Update offsets directly with zero animation delay, zero lag, and zero timeline resets!
+    state.currentOffset = { ...targetOffset };
+    state.startOffset = { ...targetOffset };
+    state.targetOffset = { ...targetOffset };
+    timeline.activeAreaIds.delete(areaId);
+    return false;
   }
 
-  return timeline.activeAreaIds.has(areaId);
+  // Case C: Genuine layout relocation (candidate changed from one placement to another)
+  // Rebase start offset from current rendered position to ensure zero snapping or teleportation
+  state.startOffset = { ...state.currentOffset };
+  state.targetOffset = { ...targetOffset };
+  state.candidateIndex = candidateIndex;
+  state.startTime = now;
+  state.durationMs = effectiveDuration;
+  state.isRelocating = true;
+
+  // Join the synchronized motion timeline
+  timeline.activeAreaIds.add(areaId);
+
+  // Synchronize batch start time: all affected labels in this update share the same clock.
+  // Rebase any existing active labels to their current interpolated offsets to prevent backward snapping.
+  if (timeline.startTime !== now) {
+    for (const existingId of timeline.activeAreaIds) {
+      if (existingId !== areaId) {
+        const existingState = motionMap.get(existingId);
+        if (existingState) {
+          existingState.startOffset = { ...existingState.currentOffset };
+        }
+      }
+    }
+    timeline.startTime = now;
+    timeline.durationMs = effectiveDuration;
+  }
+
+  return true;
 }
 
 /**
@@ -155,16 +196,12 @@ export function stepSynchronizedMotion(
       if (state) {
         state.currentOffset = { ...state.targetOffset };
         state.startOffset = { ...state.targetOffset };
+        state.isRelocating = false;
       }
     }
     timeline.activeAreaIds.clear();
     return false;
   }
-
-  const elapsed = Math.max(0, now - timeline.startTime);
-  const rawProgress = timeline.durationMs > 0 ? elapsed / timeline.durationMs : 1.0;
-  const progress = Math.min(1.0, rawProgress);
-  const easedProgress = cubicEaseOut(progress);
 
   const completedIds: string[] = [];
 
@@ -175,10 +212,18 @@ export function stepSynchronizedMotion(
       continue;
     }
 
+    const startTime = state.startTime ?? timeline.startTime;
+    const durationMs = state.durationMs ?? timeline.durationMs;
+    const elapsed = Math.max(0, now - startTime);
+    const rawProgress = durationMs > 0 ? elapsed / durationMs : 1.0;
+    const progress = Math.min(1.0, rawProgress);
+    const easedProgress = cubicEaseOut(progress);
+
     if (progress >= 1.0) {
       // Completed destination arrival
       state.currentOffset = { ...state.targetOffset };
       state.startOffset = { ...state.targetOffset };
+      state.isRelocating = false;
       completedIds.push(areaId);
     } else {
       // Smooth synchronized interpolation
