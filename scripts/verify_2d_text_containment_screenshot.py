@@ -87,8 +87,14 @@ def main():
 
         print(f"[2D SCREENSHOT] Navigating to: {nav_url}")
         
-        os.makedirs(os.path.join(repo_root, "docs", "screenshots"), exist_ok=True)
-        screenshot_path = os.path.join(repo_root, "docs", "screenshots", "14_2d_tsconfig_text_containment.png")
+        capture_docs = "--capture-docs" in sys.argv or os.environ.get("PREBASE_CAPTURE_DOCS") == "1"
+        screenshot_dir = (
+            os.path.join(repo_root, "docs", "screenshots")
+            if capture_docs
+            else os.path.join(repo_root, "test-results", "visual")
+        )
+        os.makedirs(screenshot_dir, exist_ok=True)
+        screenshot_path = os.path.join(screenshot_dir, "2d_tsconfig_text_containment.png")
         
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)

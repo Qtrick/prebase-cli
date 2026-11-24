@@ -73,6 +73,14 @@ import {
   stepLabelFade,
   AreaFadeState,
 } from './layout/labelFade';
+import {
+  AreaMotionState,
+  SynchronizedMotionTimeline,
+  computeAnchorRelativeOffset,
+  registerLabelMotionTarget,
+  stepSynchronizedMotion,
+  computeRenderedLabelRect,
+} from './layout/labelMotion';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -316,6 +324,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   }
   const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
   const labelFadeStatesRef = useRef<Map<string, AreaFadeState>>(new Map());
+  const labelMotionStatesRef = useRef<Map<string, AreaMotionState>>(new Map());
+  const motionTimelineRef = useRef<SynchronizedMotionTimeline>({
+    startTime: 0,
+    durationMs: 220,
+    activeAreaIds: new Set<string>(),
+  });
 
   const renderedEdgesRef = useRef<{
     fileEdges: { edge: DependencyEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
@@ -352,6 +366,20 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             id: k,
             ...v,
           })),
+        getMotionStates: () =>
+          Array.from(labelMotionStatesRef.current.entries()).map(([k, v]) => ({
+            areaId: k,
+            currentOffset: { ...v.currentOffset },
+            startOffset: { ...v.startOffset },
+            targetOffset: { ...v.targetOffset },
+            candidateIndex: v.candidateIndex,
+          })),
+        getMotionTimeline: () => ({
+          startTime: motionTimelineRef.current.startTime,
+          durationMs: motionTimelineRef.current.durationMs,
+          activeCount: motionTimelineRef.current.activeAreaIds.size,
+          activeAreaIds: Array.from(motionTimelineRef.current.activeAreaIds),
+        }),
         getRenderedEdgesCount: () => ({
           fileEdges: renderedEdgesRef.current.fileEdges.length,
           areaEdges: renderedEdgesRef.current.areaEdges.length,
@@ -775,6 +803,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       ctx.clearRect(0, 0, width, height);
 
       let isAnyLabelTransitionActive = false;
+      let isAnyMotionActive = false;
 
       try {
         const camera = cameraRef.current;
@@ -1342,14 +1371,28 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
         }
 
-        // 4.5 Draw Architectural Area Labels (Collision-Aware Multi-Candidate Placement + Smooth Depth Fade)
+        // 4.5 Draw Architectural Area Labels (Collision-Aware Multi-Candidate Placement + Smooth Depth Fade + Synchronized Motion)
         isAnyLabelTransitionActive = false;
+        isAnyMotionActive = false;
         renderedAreaLabelsRef.current.clear();
 
         if (scope === 'overview' && !isSmallRepo) {
           const now = timestamp || performance.now();
           const fadeMap = labelFadeStatesRef.current;
+          const motionMap = labelMotionStatesRef.current;
+          const motionTimeline = motionTimelineRef.current;
           const placedLabelsGrid = new LabelCollisionGrid(90);
+
+          // Advance synchronized motion timeline for active transitions
+          const timelineStillActive = stepSynchronizedMotion(
+            motionMap,
+            motionTimeline,
+            now,
+            prefersReducedMotion
+          );
+          if (timelineStillActive) {
+            isAnyMotionActive = true;
+          }
 
           // Populate placedLabelsGrid with all area anchor badges so labels never cover anchor monograms
           for (const a of areaAnchorsMap.values()) {
@@ -1451,7 +1494,34 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               continue;
             }
 
-            const rect = placementResult.rect;
+            // Register candidate placement with synchronized motion engine
+            const targetOffset = computeAnchorRelativeOffset(
+              pAnchor.screenX,
+              pAnchor.screenY,
+              placementResult.rect
+            );
+            const motionJoined = registerLabelMotionTarget(
+              motionMap,
+              motionTimeline,
+              pAnchor.area.id,
+              placementResult.candidateIndex,
+              targetOffset,
+              now,
+              prefersReducedMotion
+            );
+            if (motionJoined) {
+              isAnyMotionActive = true;
+            }
+
+            const motionState = motionMap.get(pAnchor.area.id)!;
+            const rect = computeRenderedLabelRect(
+              pAnchor.screenX,
+              pAnchor.screenY,
+              motionState.currentOffset,
+              boxWidth,
+              boxHeight
+            );
+
             obstacleGrid.insert(rect);
             placedLabelsGrid.insert(rect);
 
@@ -1634,7 +1704,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
 
       // If animation is still running, schedule next frame
-      if (cameraAnimRef.current || isAnyLabelTransitionActive) {
+      if (cameraAnimRef.current || isAnyLabelTransitionActive || isAnyMotionActive) {
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },

@@ -74,9 +74,15 @@ def main():
         assert startup_url, "Could not find startup URL in server log"
         print(f"[AREA LABELS] Extracted startup URL: {mask_credentials(startup_url)}")
         
-        os.makedirs(os.path.join(repo_root, "docs", "screenshots"), exist_ok=True)
-        shot1 = os.path.join(repo_root, "docs", "screenshots", "15_area_labels_non_overlapping.png")
-        shot2 = os.path.join(repo_root, "docs", "screenshots", "16_area_labels_smooth_fade.png")
+        capture_docs = "--capture-docs" in sys.argv or os.environ.get("PREBASE_CAPTURE_DOCS") == "1"
+        screenshot_dir = (
+            os.path.join(repo_root, "docs", "screenshots")
+            if capture_docs
+            else os.path.join(repo_root, "test-results", "visual")
+        )
+        os.makedirs(screenshot_dir, exist_ok=True)
+        shot1 = os.path.join(screenshot_dir, "area_labels_default.png")
+        shot2 = os.path.join(screenshot_dir, "area_labels_rotated.png")
         
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)

@@ -31,7 +31,13 @@ from playwright.sync_api import sync_playwright
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT_DIR, "target", "release", "prebase")
 PORT = 19991
-SCREENSHOT_DIR = os.path.join(ROOT_DIR, "docs", "screenshots")
+capture_docs = "--capture-docs" in sys.argv or os.environ.get("PREBASE_CAPTURE_DOCS") == "1"
+default_dest = (
+    os.path.join(ROOT_DIR, "docs", "screenshots")
+    if capture_docs
+    else os.path.join(ROOT_DIR, "test-results", "visual")
+)
+SCREENSHOT_DIR = os.environ.get("PREBASE_SCREENSHOT_DIR", default_dest)
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 def mask_credentials(text: str) -> str:

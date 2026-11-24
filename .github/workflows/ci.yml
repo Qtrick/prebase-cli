@@ -134,6 +134,9 @@ jobs:
       - name: Run Multi-Area Exploration Browser Verification
         run: python3 scripts/verify_area_exploration_browser.py
 
+      - name: Run Synchronized Area Labels & Motion Browser Verification
+        run: python3 scripts/verify_area_labels_browser.py
+
       - name: Run Temporal DAG & Auth Lifecycle Real Browser Verification
         run: python3 scripts/verify_temporal_lifecycle_browser.py
 
