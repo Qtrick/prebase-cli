@@ -28,6 +28,8 @@ import {
   resetNetworkCamera,
   normalizeWheelZoomDelta,
   computeContinuousZoomFactor,
+  eulerToQuaternion,
+  rotateOrientationByScreenDelta,
 } from '../render/networkRenderMath';
 import { FileNode, NetworkCamera, Point3D, ViewportInsets } from '../../../types/graph';
 
@@ -964,6 +966,102 @@ describe('Network Camera & 3D Projection Math', () => {
         // (1000 - 192) / 1200 = 808 / 1200 ≈ 0.6733
         expect(fit.zoom).toBeLessThan(1.25);
         expect(fit.zoom).toBeCloseTo(808 / 1200, 4);
+      });
+    });
+
+    describe('Symmetric vs Asymmetric Pivot-vs-Bounding-Box Invariance under 360° Quaternion Rotation', () => {
+      it('keeps symmetric cloud midpoint and origin pivot invariant, while asymmetric cloud midpoint shifts under perspective without moving pivot', () => {
+        const width = 1440;
+        const height = 900;
+        const insets: ViewportInsets = { left: 240, right: 320, top: 64, bottom: 24 };
+        const usableCenterX = insets.left! + (width - insets.left! - insets.right!) / 2;
+        const usableCenterY = insets.top! + (height - insets.top! - insets.bottom!) / 2;
+
+        // Symmetric octahedron centered at (0,0,0)
+        const symNodes = ['px', 'nx', 'py', 'ny', 'pz', 'nz'].map(createNode);
+        const symPos = new Map<string, Point3D>([
+          ['px', { x: 100, y: 0, z: 0 }],
+          ['nx', { x: -100, y: 0, z: 0 }],
+          ['py', { x: 0, y: 100, z: 0 }],
+          ['ny', { x: 0, y: -100, z: 0 }],
+          ['pz', { x: 0, y: 0, z: 100 }],
+          ['nz', { x: 0, y: 0, z: -100 }],
+        ]);
+
+        // Asymmetric clustered cloud (radius ~100, non-zero centroid)
+        const asymNodes = ['a1', 'a2', 'a3', 'a4', 'a5'].map(createNode);
+        const asymPos = new Map<string, Point3D>([
+          ['a1', { x: 95, y: -25, z: 15 }],
+          ['a2', { x: 80, y: -55, z: -20 }],
+          ['a3', { x: -90, y: 20, z: 35 }],
+          ['a4', { x: 10, y: 92, z: -30 }],
+          ['a5', { x: -30, y: -85, z: 40 }],
+        ]);
+
+        const centroid: Point3D = { x: 0, y: 0, z: 0 };
+        const zoom = 1.55;
+        let orientation = eulerToQuaternion(DEFAULT_YAW, DEFAULT_PITCH);
+
+        const deltas = [
+          { dx: 0, dy: 0 },
+          { dx: 180, dy: 0 },
+          { dx: 0, dy: -180 },
+          { dx: -360, dy: 270 },
+          { dx: 240, dy: 180 },
+        ];
+
+        let maxAsymMidpointShift = 0;
+
+        for (const d of deltas) {
+          orientation = rotateOrientationByScreenDelta(orientation, d.dx, d.dy, 0.008);
+          const cam: NetworkCamera = {
+            yaw: DEFAULT_YAW,
+            pitch: DEFAULT_PITCH,
+            orientation,
+            panX: usableCenterX,
+            panY: usableCenterY,
+            zoom,
+          };
+
+          // 1. Origin pivot (0,0,0) must project to exact (panX, panY) at every orientation
+          const pivotProj = projectGraph(
+            [createNode('pivot')],
+            new Map([['pivot', { x: 0, y: 0, z: 0 }]]),
+            centroid,
+            cam
+          ).projectedList[0];
+          expect(pivotProj.screenX).toBeCloseTo(usableCenterX, 6);
+          expect(pivotProj.screenY).toBeCloseTo(usableCenterY, 6);
+
+          // 2. Symmetric cloud bounding-box midpoint stays within small perspective foreshortening of pivot
+          const symProj = projectGraph(symNodes, symPos, centroid, cam);
+          const symXs = symProj.projectedList.map((p) => p.screenX);
+          const symYs = symProj.projectedList.map((p) => p.screenY);
+          const symMidX = (Math.min(...symXs) + Math.max(...symXs)) / 2;
+          const symMidY = (Math.min(...symYs) + Math.max(...symYs)) / 2;
+          expect(Math.abs(symMidX - usableCenterX)).toBeLessThan(10);
+          expect(Math.abs(symMidY - usableCenterY)).toBeLessThan(10);
+
+          // 3. Asymmetric clustered cloud bounding-box midpoint exhibits larger perspective eccentricity
+          //    while centerAtPivot=true keeps the camera pivot strictly stationary
+          const asymProj = projectGraph(asymNodes, asymPos, centroid, cam);
+          const asymYs = asymProj.projectedList.map((p) => p.screenY);
+          const asymMidY = (Math.min(...asymYs) + Math.max(...asymYs)) / 2;
+          maxAsymMidpointShift = Math.max(maxAsymMidpointShift, Math.abs(asymMidY - usableCenterY));
+
+          const lockTransform = computeCenterLockedTransform(
+            asymProj.bounds,
+            width,
+            height,
+            zoom,
+            insets,
+            true
+          );
+          expect(lockTransform.panX).toBe(usableCenterX);
+          expect(lockTransform.panY).toBe(usableCenterY);
+        }
+
+        expect(maxAsymMidpointShift).toBeGreaterThan(2);
       });
     });
   });

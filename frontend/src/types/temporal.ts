@@ -76,9 +76,17 @@ export interface GitUpdatedEventData {
   branch: string | null;
 }
 
+export interface WorkspaceNavigateEventData {
+  request_id: string;
+  target_client_id?: string | null;
+  view: '3d' | '2d' | 'temporal';
+  focus?: string | null;
+}
+
 export type ServerEvent =
   | { type: 'network.updated'; data: NetworkUpdatedEventData }
   | { type: 'git.updated'; data: GitUpdatedEventData }
   | { type: 'reconcile.required'; data: { current_revision: number } }
+  | { type: 'workspace.navigate'; data: WorkspaceNavigateEventData }
   | { type: 'heartbeat'; data: { timestamp: number } };
 

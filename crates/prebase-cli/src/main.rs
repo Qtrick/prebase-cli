@@ -45,6 +45,10 @@ pub struct CliArgs {
     #[arg(long, global = true)]
     pub no_watch: bool,
 
+    /// Open a new browser tab/window instead of reusing an existing workspace
+    #[arg(short = 'n', long = "new", global = true)]
+    pub new_window: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -231,6 +235,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let scanner = RepositoryScanner::new(&canonical_root, Default::default())?;
     let repo_id = scanner.repository_id();
 
+    if args.new_window {
+        let conflict_reason = if args.no_open {
+            Some("--no-open")
+        } else if args.json {
+            Some("--json")
+        } else {
+            match &args.command {
+                Some(Commands::History { text: true, .. }) => Some("--text"),
+                Some(Commands::Analyze { .. }) => Some("analyze"),
+                Some(Commands::Files { .. }) => Some("files"),
+                Some(Commands::Search { .. }) => Some("search"),
+                Some(Commands::Inspect { .. }) => Some("inspect"),
+                Some(Commands::Deps { .. }) => Some("deps"),
+                Some(Commands::Dependents { .. }) => Some("dependents"),
+                Some(Commands::Path { .. }) => Some("path"),
+                Some(Commands::Status { .. }) => Some("status"),
+                Some(Commands::Stop { .. }) => Some("stop"),
+                _ => None,
+            }
+        };
+        if let Some(flag) = conflict_reason {
+            eprintln!("Error: --new (-n) cannot be combined with '{flag}'.");
+            std::process::exit(2);
+        }
+    }
+
     match args.command {
         Some(Commands::Analyze { .. }) => {
             run_analyze(&canonical_root, &repo_name, args.json)?;
@@ -275,6 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     args.no_open,
                     args.no_watch,
                     false,
+                    args.new_window,
                     "temporal",
                     None,
                 )
@@ -301,6 +332,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 args.no_open,
                 args.no_watch,
                 detach,
+                args.new_window,
                 view.as_str(),
                 focus,
             )
@@ -316,6 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 args.no_open,
                 args.no_watch,
                 false,
+                args.new_window,
                 "3d",
                 None,
             )

@@ -6,7 +6,10 @@ use tracing_subscriber::FmtSubscriber;
 use prebase_parser::RepositoryAnalyzer;
 use prebase_server::start_server;
 
-use crate::commands::daemon::{remove_session, save_session};
+use crate::commands::daemon::{
+    acquire_startup_lock, mint_bootstrap_token, navigate_existing_workspace,
+    remove_session_if_owned, save_session, validate_live_session, DaemonSession,
+};
 
 fn percent_encode_query_param(value: &str) -> String {
     let mut out = String::with_capacity(value.len() * 3);
@@ -23,6 +26,88 @@ fn percent_encode_query_param(value: &str) -> String {
     out
 }
 
+fn build_bootstrap_url(
+    port: u16,
+    bootstrap_token: &str,
+    view: &str,
+    focus: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "http://127.0.0.1:{}/?bootstrap={}&view={}",
+        port, bootstrap_token, view
+    );
+    if let Some(focus_path) = focus {
+        url.push_str("&focus=");
+        url.push_str(&percent_encode_query_param(focus_path));
+    }
+    url
+}
+
+fn is_session_compatible(session: &DaemonSession, port: Option<u16>, no_watch: bool) -> bool {
+    let port_ok = port.is_none() || port == Some(session.port);
+    let watch_ok = session.watch_filesystem == !no_watch;
+    port_ok && watch_ok
+}
+
+async fn reuse_existing_server(
+    session: &DaemonSession,
+    no_open: bool,
+    new_window: bool,
+    view: &str,
+    focus: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if no_open {
+        println!(
+            "\x1b[32m✔\x1b[0m Reusing existing PreBase server at \x1b[4;34mhttp://127.0.0.1:{}/\x1b[0m (PID {})",
+            session.port, session.pid
+        );
+        println!("  Browser launch skipped (--no-open).");
+        return Ok(());
+    }
+
+    if !new_window {
+        if let Ok(nav) = navigate_existing_workspace(session, view, focus).await {
+            if nav.acknowledged {
+                if let Some(f) = focus {
+                    println!(
+                        "\x1b[32m✔\x1b[0m Reused existing PreBase workspace at \x1b[4;34mhttp://127.0.0.1:{}/\x1b[0m (view: {}, focus: {})",
+                        session.port, view, f
+                    );
+                } else {
+                    println!(
+                        "\x1b[32m✔\x1b[0m Reused existing PreBase workspace at \x1b[4;34mhttp://127.0.0.1:{}/\x1b[0m (view: {})",
+                        session.port, view
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    let bootstrap_token = mint_bootstrap_token(session).await?;
+    let url = build_bootstrap_url(session.port, &bootstrap_token, view, focus);
+    if new_window {
+        println!(
+            "\x1b[32m✔\x1b[0m Reusing existing PreBase server (PID {}) — opening new browser tab at: \x1b[4;34m{}\x1b[0m",
+            session.pid, url
+        );
+    } else {
+        println!(
+            "\x1b[32m✔\x1b[0m Reusing existing PreBase server (PID {}, no active browser tab) — opening: \x1b[4;34m{}\x1b[0m",
+            session.pid, url
+        );
+    }
+
+    if let Err(err) = open::that(&url) {
+        println!(
+            "  \x1b[33mNotice:\x1b[0m Could not open browser automatically: {}. Please visit the link above.",
+            err
+        );
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     canonical_root: PathBuf,
@@ -32,10 +117,32 @@ pub async fn run_server(
     no_open: bool,
     no_watch: bool,
     detach: bool,
+    new_window: bool,
     view: &str,
     focus: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if detach {
+        let lock_guard = acquire_startup_lock(&canonical_root)?;
+        if let Some(session) = validate_live_session(&canonical_root, &repo_id).await {
+            if is_session_compatible(&session, port, no_watch) {
+                drop(lock_guard);
+                return reuse_existing_server(
+                    &session,
+                    no_open,
+                    new_window,
+                    view,
+                    focus.as_deref(),
+                )
+                .await;
+            }
+            drop(lock_guard);
+            return Err(format!(
+                "PreBase server is already running for this repository on port {} (PID {}) with incompatible options (watch_filesystem={}). Run 'prebase stop' first.",
+                session.port, session.pid, session.watch_filesystem
+            )
+            .into());
+        }
+        drop(lock_guard);
         return run_detached_server(
             &canonical_root,
             port,
@@ -53,6 +160,21 @@ pub async fn run_server(
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
+    let lock_guard = acquire_startup_lock(&canonical_root)?;
+    if let Some(session) = validate_live_session(&canonical_root, &repo_id).await {
+        if is_session_compatible(&session, port, no_watch) {
+            drop(lock_guard);
+            return reuse_existing_server(&session, no_open, new_window, view, focus.as_deref())
+                .await;
+        }
+        drop(lock_guard);
+        return Err(format!(
+            "PreBase server is already running for this repository on port {} (PID {}) with incompatible options (watch_filesystem={}). Run 'prebase stop' first.",
+            session.port, session.pid, session.watch_filesystem
+        )
+        .into());
+    }
+
     let watch_filesystem = !no_watch;
     let server = start_server(
         canonical_root.clone(),
@@ -63,17 +185,18 @@ pub async fn run_server(
     )
     .await?;
 
-    let mut url = format!(
-        "http://127.0.0.1:{}/?bootstrap={}&view={}",
-        server.port, server.bootstrap_token, view
-    );
-    if let Some(focus_path) = &focus {
-        url.push_str("&focus=");
-        url.push_str(&percent_encode_query_param(focus_path));
-    }
+    let url = build_bootstrap_url(server.port, &server.bootstrap_token, view, focus.as_deref());
 
     let pid = std::process::id();
-    let _ = save_session(&canonical_root, pid, server.port);
+    let _ = save_session(
+        &canonical_root,
+        pid,
+        server.port,
+        &repo_id,
+        watch_filesystem,
+        &server.session_token,
+    );
+    drop(lock_guard);
 
     println!(
         "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34m{}\x1b[0m",
@@ -178,7 +301,7 @@ pub async fn run_server(
     server.state.set_shutting_down();
     let _ = server.shutdown_tx.send(());
     indexing_handle.abort();
-    remove_session(&canonical_root);
+    remove_session_if_owned(&canonical_root, pid, server.port);
 
     Ok(())
 }

@@ -10,8 +10,10 @@ import {
 } from '../layout/labelMotion';
 import {
   generateLabelCandidates,
+  resolveAreaLabelPlacement,
   LabelPlacementAnchor,
 } from '../layout/labelPlacement';
+import { LabelCollisionGrid } from '../render/networkRenderMath';
 
 describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regression Suite', () => {
   function createMotionFixture() {
@@ -270,14 +272,15 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
       expect(state.candidateIndex).toBe(1);
       expect(state.isRelocating).toBe(true);
 
-      // Step halfway (t = 1200, 100ms elapsed out of 200ms -> progress = 0.5 -> cubicEaseOut(0.5) = 0.875)
+      // Step halfway (t = 1200, 100ms elapsed)
       const stillActive = stepSynchronizedMotion(motionMap, timeline, 1200);
       expect(stillActive).toBe(true);
-      // y = 22 + (-58 - 22) * 0.875 = 22 - 80 * 0.875 = 22 - 70 = -48
-      expect(state.currentOffset.y).toBeCloseTo(-48, 1);
+      expect(state.currentOffset.y).toBeLessThan(-35);
+      expect(state.currentOffset.y).toBeGreaterThan(-58);
 
-      // Complete arrival (t = 1300)
-      const completed = stepSynchronizedMotion(motionMap, timeline, 1300);
+      // Complete arrival (step through settling)
+      stepSynchronizedMotion(motionMap, timeline, 1280);
+      const completed = stepSynchronizedMotion(motionMap, timeline, 1360);
       expect(completed).toBe(false);
       expect(timeline.activeAreaIds.size).toBe(0);
       expect(state.currentOffset).toEqual({ x: -60, y: -58 });
@@ -305,9 +308,12 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
       const s1 = motionMap.get('area-1')!;
       const s2 = motionMap.get('area-2')!;
 
-      // Both must have progressed with identical normalized progress (0.875)
-      expect(s1.currentOffset.y).toBeCloseTo(20 + (-70) * 0.875, 1);
-      expect(s2.currentOffset.x).toBeCloseTo(-50 + (80) * 0.875, 1);
+      // Both must have progressed symmetrically along the spring curve
+      const norm1 = (s1.currentOffset.y - 20) / -70;
+      const norm2 = (s2.currentOffset.x - -50) / 80;
+      expect(norm1).toBeGreaterThan(0.7);
+      expect(norm1).toBeLessThan(1.0);
+      expect(norm1).toBeCloseTo(norm2, 4);
     });
   });
 
@@ -319,10 +325,12 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
       registerLabelMotionTarget(motionMap, timeline, 'area-a', 0, { x: 0, y: 0 }, 1000, false, 200);
       registerLabelMotionTarget(motionMap, timeline, 'area-a', 1, { x: 100, y: 0 }, 1000, false, 200);
 
-      // Advance to t=1100 (50% progress -> eased = 0.875 -> currentOffset.x = 87.5)
+      // Advance to t=1100
       stepSynchronizedMotion(motionMap, timeline, 1100);
       const stateA = motionMap.get('area-a')!;
-      expect(stateA.currentOffset.x).toBeCloseTo(87.5, 1);
+      const xAt1100 = stateA.currentOffset.x;
+      expect(xAt1100).toBeGreaterThan(70);
+      expect(xAt1100).toBeLessThan(100);
 
       // At t=1100, Label B starts relocating
       registerLabelMotionTarget(motionMap, timeline, 'area-b', 0, { x: 0, y: 0 }, 1100, false, 200);
@@ -332,11 +340,13 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
       stepSynchronizedMotion(motionMap, timeline, 1150);
 
       // Label A must continue forward towards 100, not jump backward to 0
-      expect(stateA.currentOffset.x).toBeGreaterThan(87.5);
-      expect(stateA.currentOffset.x).toBeLessThan(100);
+      expect(stateA.currentOffset.x).toBeGreaterThan(xAt1100);
+      expect(stateA.currentOffset.x).toBeLessThanOrEqual(100);
 
-      // At t=1300 (200ms after t=1100), all should be completed
-      stepSynchronizedMotion(motionMap, timeline, 1300);
+      // Step to completion
+      stepSynchronizedMotion(motionMap, timeline, 1230);
+      stepSynchronizedMotion(motionMap, timeline, 1310);
+      stepSynchronizedMotion(motionMap, timeline, 1390);
       expect(stateA.currentOffset.x).toBe(100);
       expect(motionMap.get('area-b')!.currentOffset.y).toBe(100);
     });
@@ -356,8 +366,8 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
         registerLabelMotionTarget(motionMap, timeline, 'area-starve', 1, { x: 100 + frame * 0.5, y: 0 }, now);
       }
 
-      // At t=1250 (past the 200ms duration), transition must successfully converge to destination
-      stepSynchronizedMotion(motionMap, timeline, 1250);
+      // At t=1340 (after the last target update at t=1160), transition must successfully converge to destination
+      stepSynchronizedMotion(motionMap, timeline, 1340);
       const state = motionMap.get('area-starve')!;
       expect(state.currentOffset.x).toBeCloseTo(105, 1);
       expect(timeline.activeAreaIds.has('area-starve')).toBe(false);
@@ -412,7 +422,7 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
         registerLabelMotionTarget(motionMap, timeline, 'area-rate', 1, { x: 100, y: 50 }, 1000, false, 200);
 
         let t = 1000;
-        while (t < 1250) {
+        while (t < 1350) {
           t += rate.dt;
           stepSynchronizedMotion(motionMap, timeline, t);
         }
@@ -449,6 +459,136 @@ describe('Continuous Anchor-Tracking Labels & Micro-Movement Stability Regressio
       const rectBefore = computeRenderedLabelRect(400, 300, state.currentOffset, 100, 32);
       const rectAfter = computeRenderedLabelRect(401, 300, state.currentOffset, 100, 32);
       expect(rectAfter.x1 - rectBefore.x1).toBe(1);
+    });
+
+    it('preserves C1 position and velocity continuity during mid-flight direction reversals', () => {
+      const { motionMap, timeline } = createMotionFixture();
+
+      // Start at candidate 0 (below: y = +22)
+      registerLabelMotionTarget(motionMap, timeline, 'area-rev', 0, { x: -60, y: 22 }, 1000);
+
+      // Switch to candidate 1 (above: y = -58)
+      registerLabelMotionTarget(motionMap, timeline, 'area-rev', 1, { x: -60, y: -58 }, 1000);
+      stepSynchronizedMotion(motionMap, timeline, 1040);
+
+      const state = motionMap.get('area-rev')!;
+      const yBeforeReversal = state.currentOffset.y;
+      const vyBeforeReversal = state.velocity!.y;
+      expect(vyBeforeReversal).toBeLessThan(0); // Moving upward
+
+      // Camera reverses direction! Switch back to candidate 0 (below: y = +22) mid-flight
+      registerLabelMotionTarget(motionMap, timeline, 'area-rev', 0, { x: -60, y: 22 }, 1040);
+
+      // Position and velocity must be preserved immediately upon retargeting (zero teleport)
+      expect(state.currentOffset.y).toBe(yBeforeReversal);
+      expect(state.velocity!.y).toBe(vyBeforeReversal);
+
+      // Step 16ms: spring decelerates upward velocity smoothly before turning downward
+      stepSynchronizedMotion(motionMap, timeline, 1056);
+      expect(Math.abs(state.currentOffset.y - yBeforeReversal)).toBeLessThan(20);
+
+      // Step to settle at candidate 0
+      for (let t = 1072; t <= 1400; t += 16) {
+        stepSynchronizedMotion(motionMap, timeline, t);
+      }
+      expect(state.currentOffset).toEqual({ x: -60, y: 22 });
+      expect(state.isRelocating).toBe(false);
+    });
+
+    it('adjusts relative offset smoothly DURING active camera drag/inertia when hard constraint triggers (never defers until release)', () => {
+      const { motionMap, timeline } = createMotionFixture();
+      const boxWidth = 120;
+      const boxHeight = 32;
+      const viewportW = 800;
+      const viewportH = 600;
+
+      // Simulate an anchor moving downward during active camera drag + inertia (no mouseup yet)
+      let anchor: LabelPlacementAnchor = {
+        id: 'area-active-drag',
+        screenX: 400,
+        screenY: 510,
+        radius: 18,
+      };
+
+      const emptyObstacles = new LabelCollisionGrid(80);
+      const placedLabels = new LabelCollisionGrid(80);
+      let lastSwitchTime = 0;
+
+      // Frame 0: inside viewport, selects candidate 0 ('below': yOffset = +22)
+      const res0 = resolveAreaLabelPlacement(
+        anchor,
+        boxWidth,
+        boxHeight,
+        emptyObstacles,
+        viewportW,
+        viewportH,
+        undefined,
+        undefined,
+        placedLabels,
+        { now: 1000, lastSwitchTime }
+      );
+      expect(res0.candidateIndex).toBe(0);
+      const off0 = computeAnchorRelativeOffset(anchor.screenX, anchor.screenY, res0.rect);
+      registerLabelMotionTarget(motionMap, timeline, 'area-active-drag', res0.candidateIndex, off0, 1000);
+
+      let switchedFrame = -1;
+      let prevCandidate = res0.candidateIndex;
+      const observedMidDragOffsets: number[] = [];
+
+      // Frames 1..30: continuous camera drag/inertia moves anchor downward by 3px/frame toward bottom edge (y=600)
+      for (let frame = 1; frame <= 30; frame++) {
+        const now = 1000 + frame * 16;
+        anchor = { ...anchor, screenY: anchor.screenY + 3 };
+
+        const res = resolveAreaLabelPlacement(
+          anchor,
+          boxWidth,
+          boxHeight,
+          emptyObstacles,
+          viewportW,
+          viewportH,
+          undefined,
+          prevCandidate,
+          placedLabels,
+          { now, lastSwitchTime }
+        );
+
+        if (res.candidateIndex !== prevCandidate) {
+          switchedFrame = frame;
+          lastSwitchTime = now;
+          prevCandidate = res.candidateIndex;
+        }
+
+        const targetOffset = computeAnchorRelativeOffset(anchor.screenX, anchor.screenY, res.rect);
+        registerLabelMotionTarget(
+          motionMap,
+          timeline,
+          'area-active-drag',
+          res.candidateIndex,
+          targetOffset,
+          now
+        );
+        stepSynchronizedMotion(motionMap, timeline, now);
+
+        const state = motionMap.get('area-active-drag')!;
+        if (switchedFrame !== -1 && frame >= switchedFrame && frame <= switchedFrame + 4) {
+          observedMidDragOffsets.push(state.currentOffset.y);
+        }
+      }
+
+      // Must have switched to 'above' (candidate 1) DURING active motion before hitting bottom edge
+      expect(switchedFrame).toBeGreaterThan(0);
+      expect(switchedFrame).toBeLessThan(15);
+      expect(prevCandidate).toBe(1);
+
+      // Relative offset must have smoothly adjusted upward across consecutive active-drag frames (not frozen!)
+      expect(observedMidDragOffsets.length).toBeGreaterThanOrEqual(4);
+      expect(observedMidDragOffsets[observedMidDragOffsets.length - 1]).toBeLessThan(observedMidDragOffsets[0]);
+
+      // After enough frames, spring settles cleanly even while anchor keeps tracking
+      const finalState = motionMap.get('area-active-drag')!;
+      expect(finalState.currentOffset.y).toBeCloseTo(-(anchor.radius + 4 + boxHeight), 1);
+      expect(timeline.activeAreaIds.size).toBe(0);
     });
   });
 });

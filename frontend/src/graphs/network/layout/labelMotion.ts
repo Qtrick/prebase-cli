@@ -1,14 +1,15 @@
 /**
- * PreBase — Synchronized Architectural Label Motion Engine
+ * PreBase — Continuous Retargetable Architectural Label Motion Engine
  *
- * Implements smooth anchor-relative coordinate interpolation, synchronized batch timing,
- * retargeting and interruption safety, and reduced-motion compliance.
+ * Implements smooth anchor-relative coordinate interpolation via an analytical
+ * critically-damped spring, 1:1 anchor tracking when settled, retargeting and
+ * direction-reversal velocity continuity, and reduced-motion compliance.
  *
  * Guarantees that:
- * 1. Labels never teleport or snap when changing candidate placements.
- * 2. All affected labels in a placement update transition simultaneously on a shared clock.
- * 3. Labels follow moving anchors in 3D perspective during continuous camera rotation.
- * 4. Demand-driven scheduling ensures zero idle CPU when labels are stationary.
+ * 1. Labels never teleport or snap when changing candidate placements or reversing direction.
+ * 2. Retargeting mid-flight preserves both rendered position and velocity (C1 continuity).
+ * 3. Settled labels track moving anchors 1:1 with zero lag during continuous camera motion.
+ * 4. Demand-driven scheduling ensures zero idle CPU when labels are settled.
  */
 
 import { ScreenRect } from '../render/networkRenderMath';
@@ -23,8 +24,11 @@ export interface AreaMotionState {
   currentOffset: Point2D;
   startOffset: Point2D;
   targetOffset: Point2D;
+  velocity?: Point2D;
   candidateIndex: number;
   startTime?: number;
+  lastTimestamp?: number;
+  lastCandidateSwitchTime?: number;
   durationMs?: number;
   isRelocating?: boolean;
 }
@@ -36,10 +40,14 @@ export interface SynchronizedMotionTimeline {
 }
 
 export const DEFAULT_MOTION_DURATION_MS = 220;
+export const DEFAULT_SPRING_OMEGA = 38; // rad/s (settles cleanly within ~220ms)
+export const SPRING_POSITION_EPSILON = 0.25; // px
+export const SPRING_VELOCITY_EPSILON = 6.0; // px/s (~0.1px/frame at 60Hz)
+const MAX_SPRING_DT_SEC = 1.0;
 
 /**
  * Restrained cubic ease-out function: f(p) = 1 - (1 - p)^3
- * Provides immediate responsive departure with gentle, controlled arrival.
+ * Retained for curve utilities and reference.
  */
 export function cubicEaseOut(progress: number): number {
   const p = Math.max(0, Math.min(1, progress));
@@ -62,17 +70,44 @@ export function computeAnchorRelativeOffset(
 }
 
 /**
+ * Advances a single 1D axis using the exact analytical critically-damped spring
+ * solution (damping ratio zeta = 1). Unconditionally stable for any dt >= 0 and
+ * preserves C1 position + velocity continuity across retargeting.
+ */
+function stepCriticallyDampedSpringAxis(
+  current: number,
+  target: number,
+  velocity: number,
+  omega: number,
+  dtSec: number
+): { value: number; velocity: number } {
+  if (dtSec <= 0) {
+    return { value: current, velocity };
+  }
+  const x0 = current - target;
+  const c2 = velocity + omega * x0;
+  const decay = Math.exp(-omega * dtSec);
+  const displacement = (x0 + c2 * dtSec) * decay;
+  const nextVel = (c2 - omega * (x0 + c2 * dtSec)) * decay;
+  return {
+    value: target + displacement,
+    velocity: nextVel,
+  };
+}
+
+/**
  * Initializes or updates an area label's motion state.
  *
  * Implements three distinct motion categories:
- * A. Continuous camera-driven tracking: When the candidate placement remains stable,
- *    relative offsets are directly coupled with zero transition delay, zero lag,
- *    and zero timeline resets, guaranteeing that 1px anchor movement produces 1px label movement.
- * B. Minor geometry adjustments: Slight adjustments to anchor radius or subpixels
- *    update directly without restarting layout animations.
- * C. Genuine layout relocation: When a candidate placement changes (e.g. 'below' to 'above'),
- *    a smooth synchronized cubic ease-out transition is initiated, rebasing from the
- *    exact currently rendered position with zero snapping or teleportation.
+ * A. Continuous camera-driven tracking: When the candidate placement remains stable
+ *    and settled, relative offsets are directly coupled with zero transition delay
+ *    and zero lag (1px anchor movement = 1px label movement).
+ * B. Active relocation target updates: While a spring transition is in flight,
+ *    updates to target geometry (e.g. zoom radius changes) smoothly steer the
+ *    moving target without resetting position, velocity, or causing starvation.
+ * C. Candidate relocation / retargeting: When a candidate placement changes,
+ *    the spring retargets from the exact current rendered offset and velocity
+ *    with zero snapping or teleportation.
  *
  * Returns true if this label initiated or is actively participating in a relocation transition.
  */
@@ -99,7 +134,9 @@ export function registerLabelMotionTarget(
         currentOffset: { ...targetOffset },
         startOffset: { ...targetOffset },
         targetOffset: { ...targetOffset },
+        velocity: { x: 0, y: 0 },
         candidateIndex,
+        lastTimestamp: now,
         isRelocating: false,
       };
       motionMap.set(areaId, state);
@@ -107,19 +144,26 @@ export function registerLabelMotionTarget(
       state.currentOffset = { ...targetOffset };
       state.startOffset = { ...targetOffset };
       state.targetOffset = { ...targetOffset };
+      state.velocity = { x: 0, y: 0 };
       state.candidateIndex = candidateIndex;
+      state.lastTimestamp = now;
       state.isRelocating = false;
       timeline.activeAreaIds.delete(areaId);
     }
     return false;
   }
 
-  // Under prefers-reduced-motion, immediately snap to target position without animation
-  if (prefersReducedMotion) {
+  // Under prefers-reduced-motion or zero duration, immediately snap to target position
+  if (prefersReducedMotion || effectiveDuration <= 0) {
     state.currentOffset = { ...targetOffset };
     state.startOffset = { ...targetOffset };
     state.targetOffset = { ...targetOffset };
+    state.velocity = { x: 0, y: 0 };
+    if (candidateIndex !== state.candidateIndex) {
+      state.lastCandidateSwitchTime = now;
+    }
     state.candidateIndex = candidateIndex;
+    state.lastTimestamp = now;
     state.isRelocating = false;
     timeline.activeAreaIds.delete(areaId);
     return false;
@@ -127,57 +171,48 @@ export function registerLabelMotionTarget(
 
   const isCandidateChange = candidateIndex !== state.candidateIndex;
 
-  // Case A & B: Candidate placement is stable (e.g. still 'below')
+  // Case A & B: Candidate placement is stable
   if (!isCandidateChange) {
     if (state.isRelocating) {
-      // Label is already in an active relocation transition towards this candidate:
-      // smoothly update destination geometry (e.g. minor anchor radius change)
-      // without resetting timeline or rebasing, preventing animation starvation!
+      // Spring is in flight towards this candidate: smoothly steer targetOffset
+      // without resetting velocity or position.
       state.targetOffset = { ...targetOffset };
       return true;
     }
 
-    // Direct anchor-coupled tracking with continuous minor geometry adaptation:
-    // Update offsets directly with zero animation delay, zero lag, and zero timeline resets!
+    // Settled direct anchor-coupled tracking: 1px anchor movement = 1px label movement.
     state.currentOffset = { ...targetOffset };
     state.startOffset = { ...targetOffset };
     state.targetOffset = { ...targetOffset };
+    state.velocity = { x: 0, y: 0 };
+    state.lastTimestamp = now;
     timeline.activeAreaIds.delete(areaId);
     return false;
   }
 
-  // Case C: Genuine layout relocation (candidate changed from one placement to another)
-  // Rebase start offset from current rendered position to ensure zero snapping or teleportation
+  // Case C: Candidate changed — retarget critically-damped spring from current
+  // rendered offset and current velocity (C1 continuous, zero snapping).
   state.startOffset = { ...state.currentOffset };
   state.targetOffset = { ...targetOffset };
+  if (!state.velocity) {
+    state.velocity = { x: 0, y: 0 };
+  }
   state.candidateIndex = candidateIndex;
   state.startTime = now;
+  state.lastTimestamp = state.lastTimestamp ?? now;
+  state.lastCandidateSwitchTime = now;
   state.durationMs = effectiveDuration;
   state.isRelocating = true;
 
-  // Join the synchronized motion timeline
   timeline.activeAreaIds.add(areaId);
-
-  // Synchronize batch start time: all affected labels in this update share the same clock.
-  // Rebase any existing active labels to their current interpolated offsets to prevent backward snapping.
-  if (timeline.startTime !== now) {
-    for (const existingId of timeline.activeAreaIds) {
-      if (existingId !== areaId) {
-        const existingState = motionMap.get(existingId);
-        if (existingState) {
-          existingState.startOffset = { ...existingState.currentOffset };
-        }
-      }
-    }
-    timeline.startTime = now;
-    timeline.durationMs = effectiveDuration;
-  }
+  timeline.startTime = now;
+  timeline.durationMs = effectiveDuration;
 
   return true;
 }
 
 /**
- * Advances all active label motions along the synchronized timeline.
+ * Advances all active label motions using the critically-damped spring solver.
  * Returns true if any motion transition remains active (requiring another animation frame).
  */
 export function stepSynchronizedMotion(
@@ -196,6 +231,8 @@ export function stepSynchronizedMotion(
       if (state) {
         state.currentOffset = { ...state.targetOffset };
         state.startOffset = { ...state.targetOffset };
+        state.velocity = { x: 0, y: 0 };
+        state.lastTimestamp = now;
         state.isRelocating = false;
       }
     }
@@ -212,25 +249,56 @@ export function stepSynchronizedMotion(
       continue;
     }
 
-    const startTime = state.startTime ?? timeline.startTime;
     const durationMs = state.durationMs ?? timeline.durationMs;
-    const elapsed = Math.max(0, now - startTime);
-    const rawProgress = durationMs > 0 ? elapsed / durationMs : 1.0;
-    const progress = Math.min(1.0, rawProgress);
-    const easedProgress = cubicEaseOut(progress);
-
-    if (progress >= 1.0) {
-      // Completed destination arrival
+    if (durationMs <= 0) {
       state.currentOffset = { ...state.targetOffset };
       state.startOffset = { ...state.targetOffset };
+      state.velocity = { x: 0, y: 0 };
+      state.lastTimestamp = now;
       state.isRelocating = false;
       completedIds.push(areaId);
-    } else {
-      // Smooth synchronized interpolation
-      state.currentOffset = {
-        x: state.startOffset.x + (state.targetOffset.x - state.startOffset.x) * easedProgress,
-        y: state.startOffset.y + (state.targetOffset.y - state.startOffset.y) * easedProgress,
-      };
+      continue;
+    }
+
+    const prevTime = state.lastTimestamp ?? state.startTime ?? timeline.startTime;
+    const rawDtSec = Math.max(0, (now - prevTime) / 1000);
+    const dtSec = Math.min(MAX_SPRING_DT_SEC, rawDtSec);
+    state.lastTimestamp = Math.max(prevTime, now);
+
+    // Scale omega inversely with durationMs so 220ms -> DEFAULT_SPRING_OMEGA
+    const omega = DEFAULT_SPRING_OMEGA * (DEFAULT_MOTION_DURATION_MS / durationMs);
+    const vel = state.velocity ?? { x: 0, y: 0 };
+
+    const nextX = stepCriticallyDampedSpringAxis(
+      state.currentOffset.x,
+      state.targetOffset.x,
+      vel.x,
+      omega,
+      dtSec
+    );
+    const nextY = stepCriticallyDampedSpringAxis(
+      state.currentOffset.y,
+      state.targetOffset.y,
+      vel.y,
+      omega,
+      dtSec
+    );
+
+    state.currentOffset = { x: nextX.value, y: nextY.value };
+    state.velocity = { x: nextX.velocity, y: nextY.velocity };
+
+    const dist = Math.hypot(
+      state.currentOffset.x - state.targetOffset.x,
+      state.currentOffset.y - state.targetOffset.y
+    );
+    const speed = Math.hypot(state.velocity.x, state.velocity.y);
+
+    if (dist < SPRING_POSITION_EPSILON && speed < SPRING_VELOCITY_EPSILON) {
+      state.currentOffset = { ...state.targetOffset };
+      state.startOffset = { ...state.targetOffset };
+      state.velocity = { x: 0, y: 0 };
+      state.isRelocating = false;
+      completedIds.push(areaId);
     }
   }
 

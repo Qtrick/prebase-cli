@@ -18,6 +18,10 @@ import {
   ServerEvent,
 } from '../types/temporal';
 import { createNetworkSnapshotCoordinator } from './networkSnapshotCoordinator';
+import {
+  dispatchWorkspaceNavigate,
+  getWorkspaceClientId,
+} from './workspaceNavigation';
 
 export interface SessionInitResult {
   success: boolean;
@@ -236,12 +240,26 @@ export const api = {
     request<GitStatus>('/api/v1/git/status', signal),
 
   // Server-Sent Events (SSE)
+  ackWorkspaceNavigation: async (requestId: string, clientId = getWorkspaceClientId()): Promise<boolean> => {
+    const response = await fetch('/api/v1/workspace/ack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ request_id: requestId, client_id: clientId }),
+    });
+    return response.ok;
+  },
+
   subscribeToEvents: (
     onEvent: (event: ServerEvent) => void,
     onStatusChange?: (status: 'connected' | 'reconnecting' | 'error') => void
   ): (() => void) => {
     // Authenticate cleanly via HttpOnly session cookie without token exposure in URL
-    const eventSource = new EventSource('/api/v1/events', { withCredentials: true });
+    const clientId = getWorkspaceClientId();
+    const eventSource = new EventSource(
+      `/api/v1/events?client_id=${encodeURIComponent(clientId)}`,
+      { withCredentials: true }
+    );
     let isExplicitlyClosed = false;
 
     eventSource.onopen = () => {
@@ -252,6 +270,9 @@ export const api = {
       try {
         if (!e.data || e.data === 'heartbeat') return;
         const parsed = JSON.parse(e.data) as ServerEvent;
+        if (parsed.type === 'workspace.navigate') {
+          void dispatchWorkspaceNavigate(parsed.data);
+        }
         onEvent(parsed);
       } catch (err) {
         // ignore parse error on heartbeat

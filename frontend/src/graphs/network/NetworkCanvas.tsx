@@ -1405,12 +1405,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const motionMap = labelMotionStatesRef.current;
           const motionTimeline = motionTimelineRef.current;
           const placedLabelsGrid = new LabelCollisionGrid(90);
-          const isInteractionActive =
-            gestureRef.current.active ||
-            inertiaRafRef.current !== null ||
-            cameraAnimRef.current !== null;
 
-          // Advance synchronized motion timeline for active transitions
+          // Advance critically-damped label motion for active transitions
           const timelineStillActive = stepSynchronizedMotion(
             motionMap,
             motionTimeline,
@@ -1483,7 +1479,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             }
 
             const rawLabelText = pAnchor.area.name;
-            const countText = `${pAnchor.area.fileCount} files`;
+            const countText =
+              pAnchor.area.fileCount === 1 ? '1 file' : `${pAnchor.area.fileCount} files`;
 
             ctx.save();
             const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
@@ -1518,7 +1515,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               insets,
               prevCandidateIndex,
               placedLabelsGrid,
-              isInteractionActive
+              {
+                now,
+                lastSwitchTime: existingMotionState?.lastCandidateSwitchTime,
+              }
             );
 
             fadeState.candidateIndex = placementResult.candidateIndex;
@@ -1582,29 +1582,29 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             } else {
               ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
             }
-            ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.92)' : 'rgba(13, 18, 31, 0.88)';
+            ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.94)' : 'rgba(16, 19, 25, 0.90)';
             ctx.fill();
 
             // Pill border (highlighted if selected or hovered)
             ctx.strokeStyle = isSelected
-              ? (isLight ? '#4f46e5' : '#6366f1')
+              ? (isLight ? '#4f46e5' : '#5e6ad2')
               : isHovered
                 ? (isLight ? '#0284c7' : '#38bdf8')
-                : (isLight ? 'rgba(0, 0, 0, 0.12)' : 'rgba(255, 255, 255, 0.15)');
+                : (isLight ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.10)');
             ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
             ctx.stroke();
 
             // Area name
             const textCenterX = (rect.x1 + rect.x2) / 2;
             ctx.font = areaFont;
-            ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+            ctx.fillStyle = isLight ? '#111827' : '#f0f2f5';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
             ctx.fillText(labelText, textCenterX, rect.y1 + 3);
 
             // File count
             ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+            ctx.fillStyle = isLight ? '#6b7280' : '#9aa3b2';
             ctx.fillText(countText, textCenterX, rect.y1 + 17);
 
             ctx.restore();
@@ -1708,7 +1708,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           });
         }
 
-        candidateLabels.sort((a, b) => b.priorityScore - a.priorityScore);
+        candidateLabels.sort(
+          (a, b) => b.priorityScore - a.priorityScore || a.pNode.id.localeCompare(b.pNode.id)
+        );
 
         const collisionGrid = obstacleGrid;
 
@@ -1744,8 +1746,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         ctx.restore();
       }
 
-      // If animation is still running, schedule next frame
+      // If animation is still running, mark dirty and schedule next frame
       if (cameraAnimRef.current || isAnyLabelTransitionActive || isAnyMotionActive) {
+        isDirtyRef.current = true;
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
     },

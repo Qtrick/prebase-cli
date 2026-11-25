@@ -399,9 +399,9 @@ describe('Network Occlusion Prevention, File Selection Precedence & Workspace Po
       expect(content).toContain('<svg');
       expect(content).toContain('viewBox="0 0 32 32"');
       expect(content).toContain('xmlns="http://www.w3.org/2000/svg"');
-      // Contains brand graphic elements: orbit circles and core gradient
-      expect(content).toContain('<circle');
-      expect(content).toContain('linearGradient');
+      // Contains authentic PreBase monogram vector path elements
+      expect(content).toContain('<path');
+      expect(content).toContain('stroke-linecap="round"');
       expect(content).toContain('</svg>');
     });
 

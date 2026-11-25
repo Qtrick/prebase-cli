@@ -396,13 +396,14 @@ describe('Collision-Aware Area Label Placement (labelPlacement.ts)', () => {
       expect(res.candidateIndex).toBe(1);
     });
 
-    it('strictly preserves candidate when isInteractionLocked is true, preventing teleportation during drag', () => {
+    it('continuously resolves hard constraints (viewport exit / hard collision) during active motion without freezing', () => {
       const obstacleGrid = new LabelCollisionGrid(80);
-      // Sature candidate 1 ('above') with heavy obstacles
-      obstacleGrid.insert({ x1: 350, y1: 240, x2: 450, y2: 280 });
-      obstacleGrid.insert({ x1: 380, y1: 240, x2: 420, y2: 280 });
+      const placedLabelsGrid = new LabelCollisionGrid(80);
+      // Hard collision covers candidate 1 ('above')
+      placedLabelsGrid.insert({ x1: 350, y1: 240, x2: 450, y2: 280 });
 
-      // During active interaction (user is dragging/rotating), isInteractionLocked = true
+      // Even immediately after a previous switch (within soft cooldown), a hard collision
+      // or viewport exit MUST resolve immediately rather than freezing
       const res = resolveAreaLabelPlacement(
         anchor,
         boxWidth,
@@ -412,14 +413,50 @@ describe('Collision-Aware Area Label Placement (labelPlacement.ts)', () => {
         600,
         undefined,
         1, // previousCandidateIndex = 1 ('above')
-        undefined,
-        true // isInteractionLocked = true
+        placedLabelsGrid,
+        { now: 1050, lastSwitchTime: 1040 }
       );
 
-      // Must remain strictly locked to candidate 1 with zero switching
-      expect(res.placement).toBe('above');
-      expect(res.candidateIndex).toBe(1);
+      expect(res.placement).toBe('below');
+      expect(res.candidateIndex).toBe(0);
       expect(res.isSuppressed).toBe(false);
+    });
+
+    it('damps soft-collision oscillation within cooldown window during continuous camera motion', () => {
+      const obstacleGrid = new LabelCollisionGrid(80);
+      // 2 soft file-node collisions on candidate 1 ('above')
+      obstacleGrid.insert({ x1: 360, y1: 250, x2: 380, y2: 270 });
+      obstacleGrid.insert({ x1: 420, y1: 250, x2: 440, y2: 270 });
+
+      // Within 350ms soft cooldown, keep candidate 1 to prevent ping-ponging
+      const resDuringCooldown = resolveAreaLabelPlacement(
+        anchor,
+        boxWidth,
+        boxHeight,
+        obstacleGrid,
+        800,
+        600,
+        undefined,
+        1,
+        undefined,
+        { now: 1200, lastSwitchTime: 1000 }
+      );
+      expect(resDuringCooldown.candidateIndex).toBe(1);
+
+      // Once cooldown elapses, smoothly switch to clear candidate 0 ('below')
+      const resAfterCooldown = resolveAreaLabelPlacement(
+        anchor,
+        boxWidth,
+        boxHeight,
+        obstacleGrid,
+        800,
+        600,
+        undefined,
+        1,
+        undefined,
+        { now: 1360, lastSwitchTime: 1000 }
+      );
+      expect(resAfterCooldown.candidateIndex).toBe(0);
     });
 
     it('retains persistent candidate when grazed by a single file node without hard collision', () => {

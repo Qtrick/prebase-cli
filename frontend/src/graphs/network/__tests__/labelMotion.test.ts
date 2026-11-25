@@ -201,19 +201,22 @@ describe('Synchronized Architectural Label Motion Engine (labelMotion.ts)', () =
         candidateIndex: 2,
       });
 
-      // Advance by 100ms (50% progress -> eased = 0.875)
+      // Advance by 100ms
       const isStillActive = stepSynchronizedMotion(motionMap, timeline, 1100);
       expect(isStillActive).toBe(true);
 
       const stateA = motionMap.get('area-a')!;
       const stateB = motionMap.get('area-b')!;
 
-      // Both labels moved by exactly the same normalized progress (0.875)
-      expect(stateA.currentOffset.x).toBeCloseTo(87.5, 1);
-      expect(stateB.currentOffset.y).toBeCloseTo(50 + (-100) * 0.875, 1);
+      // Both labels advance symmetrically along the critically-damped spring
+      const normA = stateA.currentOffset.x / 100;
+      const normB = (50 - stateB.currentOffset.y) / 100;
+      expect(normA).toBeGreaterThan(0.7);
+      expect(normA).toBeLessThan(1.0);
+      expect(normA).toBeCloseTo(normB, 4);
 
-      // Advance to completion (t=1200)
-      const isDone = stepSynchronizedMotion(motionMap, timeline, 1200);
+      // Advance to completion (t=1300)
+      const isDone = stepSynchronizedMotion(motionMap, timeline, 1300);
       expect(isDone).toBe(false);
       expect(timeline.activeAreaIds.size).toBe(0);
       expect(stateA.currentOffset).toEqual({ x: 100, y: 0 });
@@ -292,29 +295,34 @@ describe('Synchronized Architectural Label Motion Engine (labelMotion.ts)', () =
       registerLabelMotionTarget(motionMap, timeline, 'area-a', 0, { x: 0, y: 0 }, 1000);
       registerLabelMotionTarget(motionMap, timeline, 'area-a', 1, { x: 100, y: 0 }, 1000);
 
-      // 2. Advance to t=1100 (50% elapsed, cubicEaseOut(0.5) = 0.875 -> currentOffset.x = 87.5)
+      // 2. Advance to t=1100
       stepSynchronizedMotion(motionMap, timeline, 1100);
       const stateA = motionMap.get('area-a')!;
-      expect(stateA.currentOffset.x).toBeCloseTo(87.5, 1);
+      const xAt1100 = stateA.currentOffset.x;
+      expect(xAt1100).toBeGreaterThan(70);
+      expect(xAt1100).toBeLessThan(100);
 
       // 3. At t=1100, Label B joins the active motion timeline (targeting 0, 100)
       registerLabelMotionTarget(motionMap, timeline, 'area-b', 0, { x: 0, y: 0 }, 1100);
       registerLabelMotionTarget(motionMap, timeline, 'area-b', 1, { x: 0, y: 100 }, 1100);
 
-      // Verification: Label A's startOffset MUST be rebased to its current position (87.5), not its origin (0)
-      expect(stateA.startOffset.x).toBeCloseTo(87.5, 1);
+      // Verification: Label A's currentOffset and velocity are preserved with zero backward snap
+      expect(stateA.currentOffset.x).toBeCloseTo(xAt1100, 3);
       expect(timeline.startTime).toBe(1100);
 
-      // 4. Advance to t=1150 (50ms after new batch start -> progress = 50/200 = 0.25 -> eased = 0.578)
+      // 4. Advance to t=1150
       stepSynchronizedMotion(motionMap, timeline, 1150);
 
       // Label A MUST continue moving forward towards 100 without snapping backward
-      expect(stateA.currentOffset.x).toBeGreaterThan(87.5);
-      expect(stateA.currentOffset.x).toBeLessThan(100);
+      expect(stateA.currentOffset.x).toBeGreaterThan(xAt1100);
+      expect(stateA.currentOffset.x).toBeLessThanOrEqual(100);
 
-      // 5. Advance to completion (t=1320, 220ms after t=1100 start)
-      const isStillActive = stepSynchronizedMotion(motionMap, timeline, 1320);
-      expect(isStillActive).toBe(false);
+      // 5. Advance to completion (t=1380)
+      const isStillActive = stepSynchronizedMotion(motionMap, timeline, 1200);
+      stepSynchronizedMotion(motionMap, timeline, 1280);
+      const settled = stepSynchronizedMotion(motionMap, timeline, 1360);
+      expect(isStillActive).toBe(true);
+      expect(settled).toBe(false);
       expect(stateA.currentOffset.x).toBe(100);
       expect(motionMap.get('area-b')!.currentOffset.y).toBe(100);
     });
@@ -347,8 +355,11 @@ describe('Synchronized Architectural Label Motion Engine (labelMotion.ts)', () =
       expect(motionMap.get('area-a')!.startOffset.x).toBe(pos2.x);
       expect(motionMap.get('area-a')!.startOffset.y).toBe(pos2.y);
 
-      // Complete (200ms after t=1100 hop -> t=1300)
-      stepSynchronizedMotion(motionMap, timeline, 1300);
+      // Complete (step in 50ms increments to settle)
+      stepSynchronizedMotion(motionMap, timeline, 1180);
+      stepSynchronizedMotion(motionMap, timeline, 1260);
+      stepSynchronizedMotion(motionMap, timeline, 1340);
+      stepSynchronizedMotion(motionMap, timeline, 1420);
       expect(motionMap.get('area-a')!.currentOffset).toEqual({ x: -50, y: -50 });
     });
 

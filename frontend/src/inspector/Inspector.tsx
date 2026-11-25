@@ -833,7 +833,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               onClick={() => onTogglePathExplorer?.(true)}
               title="Find verified dependency paths between two files"
             >
-              <Route size={14} color="var(--accent-brand)" />
+              <Route size={14} color="var(--text-secondary)" />
               <span>Explore Dependency Paths</span>
             </button>
           </div>
@@ -842,7 +842,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           {repoStructure && repoStructure.suggestions.length > 0 && (
             <div className="exploration-section">
               <div className="section-title">
-                <Compass size={14} color="var(--accent-brand)" />
+                <Compass size={14} color="var(--text-muted)" />
                 <h4>Start here</h4>
               </div>
               <div className="suggestion-cards-list">
@@ -879,7 +879,7 @@ export const Inspector: React.FC<InspectorProps> = ({
           {repoStructure && repoStructure.areas.length > 0 && (
             <div className="areas-section">
               <div className="section-title">
-                <Folder size={14} color="var(--accent-brand)" />
+                <Folder size={14} color="var(--text-muted)" />
                 <h4>Areas</h4>
               </div>
               <div className="areas-grid">

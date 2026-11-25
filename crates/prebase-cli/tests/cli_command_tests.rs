@@ -648,3 +648,63 @@ fn test_cli_exit_codes_and_stdout_stderr_separation() {
         "JSON output must never contain ANSI escape codes"
     );
 }
+
+#[test]
+fn test_cli_new_window_flag_accepted_across_interactive_subcommands() {
+    let prebase_bin = env!("CARGO_BIN_EXE_prebase");
+
+    // 1. Global --help documents -n / --new
+    let help_out = Command::new(prebase_bin)
+        .arg("--help")
+        .output()
+        .expect("Failed to execute prebase --help");
+    assert!(help_out.status.success());
+    let help_stdout = String::from_utf8_lossy(&help_out.stdout);
+    assert!(
+        help_stdout.contains("-n, --new"),
+        "Global --help must document -n, --new flag"
+    );
+
+    // 2. -n and --new are accepted on root, map, and history subcommands
+    for args in [
+        vec!["-n", "map", "--help"],
+        vec!["--new", "map", "--help"],
+        vec!["map", "-n", "--help"],
+        vec!["history", "--new", "--help"],
+    ] {
+        let out = Command::new(prebase_bin)
+            .args(&args)
+            .output()
+            .expect("Failed to execute prebase with -n/--new");
+        assert!(
+            out.status.success(),
+            "Expected {:?} to parse cleanly with -n/--new, stderr: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // 3. Conflicting -n/--new combinations must be rejected with exit code 2
+    for bad_args in [
+        vec!["-n", "--no-open"],
+        vec!["-n", "map", "--no-open"],
+        vec!["-n", "history", "--text"],
+        vec!["-n", "history", "--json"],
+        vec!["-n", "analyze"],
+        vec!["-n", "status"],
+        vec!["-n", "stop"],
+    ] {
+        let out = Command::new(prebase_bin)
+            .args(&bad_args)
+            .output()
+            .expect("Failed to execute conflicting -n command");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "Expected {:?} to exit with code 2, got {:?}, stderr: {}",
+            bad_args,
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

@@ -640,9 +640,13 @@ mod tests {
             .store(108, std::sync::atomic::Ordering::SeqCst);
 
         // Call handle_events directly to get the actual SSE response stream produced by the handler
-        let sse_resp = crate::routes::handle_events(axum::extract::State(state.clone()))
-            .await
-            .into_response();
+        let sse_resp = crate::routes::handle_events(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap()
+        .into_response();
 
         let mut data_stream = sse_resp.into_body().into_data_stream();
 

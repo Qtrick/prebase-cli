@@ -1,19 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prebase_core::index::GraphIndex;
 use prebase_core::model::{GraphSnapshot, IndexingStatus, RepositoryInfo, WatcherHealth};
 use prebase_git::GitEngine;
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tracing::info;
 
 pub const GIT_REFRESH_IDLE: u8 = 0;
 pub const GIT_REFRESH_RUNNING: u8 = 1;
 pub const GIT_REFRESH_RUNNING_PENDING: u8 = 2;
+pub const MAX_TRACKED_SSE_CLIENTS: usize = 128;
+pub const MAX_PENDING_NAV_ACKS: usize = 64;
 
 #[derive(Clone)]
 pub struct PublishedNetworkState {
@@ -40,8 +42,51 @@ pub enum ServerEvent {
     },
     #[serde(rename = "reconcile.required")]
     ReconcileRequired { current_revision: u64 },
+    #[serde(rename = "workspace.navigate")]
+    WorkspaceNavigate {
+        request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_client_id: Option<String>,
+        view: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
+    },
     #[serde(rename = "heartbeat")]
     Heartbeat { timestamp: u64 },
+}
+
+/// Validate a bounded client/request identifier (1..=64 ASCII alphanumeric, `-`, `_`).
+pub fn validate_bounded_id(id: &str) -> Option<String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+pub struct SseClientGuard {
+    state: Arc<AppState>,
+    client_id: String,
+    conn_id: u64,
+}
+
+impl Drop for SseClientGuard {
+    fn drop(&mut self) {
+        self.state
+            .unregister_sse_client(&self.client_id, self.conn_id);
+    }
+}
+
+pub struct PendingNavAck {
+    pub target_client_id: String,
+    pub tx: oneshot::Sender<String>,
 }
 
 pub struct AppState {
@@ -64,6 +109,9 @@ pub struct AppState {
     pub is_analyzing: AtomicBool,
     pub process_output_paths: RwLock<HashSet<PathBuf>>,
     pub git_refresh_state: Arc<AtomicU8>,
+    pub sse_clients: Mutex<HashMap<String, u64>>,
+    pub sse_conn_counter: AtomicU64,
+    pub pending_nav_acks: Mutex<HashMap<String, PendingNavAck>>,
 }
 
 impl AppState {
@@ -107,6 +155,9 @@ impl AppState {
             is_analyzing: AtomicBool::new(false),
             process_output_paths: RwLock::new(detect_process_output_paths(&canonical_root)),
             git_refresh_state: Arc::new(AtomicU8::new(GIT_REFRESH_IDLE)),
+            sse_clients: Mutex::new(HashMap::new()),
+            sse_conn_counter: AtomicU64::new(0),
+            pending_nav_acks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -169,6 +220,108 @@ impl AppState {
             }
         }
         None
+    }
+
+    /// Mint and store a fresh single-use bootstrap token (for `-n`/`--new` or tabless reuse).
+    pub fn mint_bootstrap_token(&self) -> String {
+        let token = crate::auth::generate_bootstrap_token();
+        let mut guard = self.bootstrap_token.write().unwrap();
+        *guard = Some(token.clone());
+        token
+    }
+
+    pub fn next_sse_conn_id(&self) -> u64 {
+        self.sse_conn_counter.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn register_sse_client(self: &Arc<Self>, client_id: String) -> SseClientGuard {
+        let conn_id = self.next_sse_conn_id();
+        {
+            let mut guard = self.sse_clients.lock().unwrap();
+            if !guard.contains_key(&client_id) && guard.len() >= MAX_TRACKED_SSE_CLIENTS {
+                if let Some(oldest_key) = guard
+                    .iter()
+                    .min_by_key(|(_, cid)| *cid)
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.remove(&oldest_key);
+                }
+            }
+            guard.insert(client_id.clone(), conn_id);
+        }
+        SseClientGuard {
+            state: Arc::clone(self),
+            client_id,
+            conn_id,
+        }
+    }
+
+    pub fn unregister_sse_client(&self, client_id: &str, conn_id: u64) {
+        let mut guard = self.sse_clients.lock().unwrap();
+        if guard.get(client_id) == Some(&conn_id) {
+            guard.remove(client_id);
+        }
+    }
+
+    pub fn active_sse_client_count(&self) -> usize {
+        self.sse_clients.lock().unwrap().len()
+    }
+
+    /// Returns the most recently connected non-anonymous SSE client ID (or any client if none).
+    pub fn most_recent_sse_client(&self) -> Option<String> {
+        let guard = self.sse_clients.lock().unwrap();
+        guard
+            .iter()
+            .filter(|(id, _)| !id.starts_with("anon_"))
+            .max_by_key(|(_, cid)| *cid)
+            .or_else(|| guard.iter().max_by_key(|(_, cid)| *cid))
+            .map(|(id, _)| id.clone())
+    }
+
+    pub fn register_nav_ack(
+        &self,
+        request_id: String,
+        target_client_id: String,
+    ) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        let mut guard = self.pending_nav_acks.lock().unwrap();
+        if guard.len() >= MAX_PENDING_NAV_ACKS {
+            guard.retain(|_, entry| !entry.tx.is_closed());
+            if guard.len() >= MAX_PENDING_NAV_ACKS {
+                if let Some(first_key) = guard.keys().next().cloned() {
+                    guard.remove(&first_key);
+                }
+            }
+        }
+        guard.insert(
+            request_id,
+            PendingNavAck {
+                target_client_id,
+                tx,
+            },
+        );
+        rx
+    }
+
+    pub fn ack_nav(&self, request_id: &str, client_id: &str) -> bool {
+        let tx = {
+            let mut guard = self.pending_nav_acks.lock().unwrap();
+            match guard.get(request_id) {
+                Some(entry) if entry.target_client_id == client_id => {
+                    guard.remove(request_id).map(|e| e.tx)
+                }
+                _ => None,
+            }
+        };
+        match tx {
+            Some(sender) => sender.send(client_id.to_string()).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn remove_nav_ack(&self, request_id: &str) {
+        let mut guard = self.pending_nav_acks.lock().unwrap();
+        guard.remove(request_id);
     }
 
     pub fn get_status(&self) -> IndexingStatus {

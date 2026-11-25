@@ -11,6 +11,7 @@ import {
 } from '../types/graph';
 import { CommitSummary, GitStatus, ServerEvent } from '../types/temporal';
 import { api, initSession, defaultNetworkCoordinator } from '../transport/api';
+import { registerWorkspaceNavigateHandler } from '../transport/workspaceNavigation';
 import { NetworkCanvas, RevealRequest } from '../graphs/network/NetworkCanvas';
 import { RelationshipCanvas, Viewport2D } from '../graphs/relationship/RelationshipCanvas';
 import {
@@ -58,6 +59,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { PreBaseMark } from './PreBaseMark';
 import './App.css';
 
 export interface InitialUrlParams {
@@ -184,6 +186,7 @@ export const App: React.FC = () => {
   const [independent2DViewport, setIndependent2DViewport] = useState<Viewport2D>({ panX: 0, panY: 0, zoom: 1.0 });
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const focusResolvedRef = useRef(false);
+  const pendingNavFocusRef = useRef<string | null>(null);
   const liveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLiveNoticeTimeRef = useRef<number>(0);
   const commitsRequestTokenRef = useRef(0);
@@ -372,10 +375,11 @@ export const App: React.FC = () => {
             setSnapshot(snap);
             setLiveRevision(snap.revision);
 
-            // Resolve initial focus target from CLI or URL parameters
-            if (initialParams.initialFocusPath && !focusResolvedRef.current) {
+            // Resolve initial or queued CLI navigation focus target once snapshot is available
+            const targetPath = pendingNavFocusRef.current ?? initialParams.initialFocusPath;
+            if (targetPath && !focusResolvedRef.current) {
               focusResolvedRef.current = true;
-              const targetPath = initialParams.initialFocusPath;
+              pendingNavFocusRef.current = null;
               const matched = resolveInitialFocusNode(targetPath, snap.nodes);
               if (matched) {
                 setSelectedNode(matched);
@@ -690,10 +694,11 @@ export const App: React.FC = () => {
           showLiveNotice(`Live update: ${fileNotice} (rev ${newSnap.revision})`);
         }
 
-        // Defect D: Resolve initial focus target from CLI or URL parameters once first snapshot is applied
-        if (initialParams.initialFocusPath && !focusResolvedRef.current) {
+        // Defect D: Resolve initial or queued CLI navigation focus target once first snapshot is applied
+        const targetPath = pendingNavFocusRef.current ?? initialParams.initialFocusPath;
+        if (targetPath && !focusResolvedRef.current) {
           focusResolvedRef.current = true;
-          const targetPath = initialParams.initialFocusPath;
+          pendingNavFocusRef.current = null;
           const matched = resolveInitialFocusNode(targetPath, newSnap.nodes);
           if (matched) {
             setSelectedNode(matched);
@@ -825,6 +830,37 @@ export const App: React.FC = () => {
       unsubscribe();
     };
   }, [sessionInitialized, error, coordinator, scheduleSnapshotReconciliation, showLiveNotice]);
+
+  // Wire CLI session-reuse workspace navigation hook
+  useEffect(() => {
+    return registerWorkspaceNavigateHandler(({ view, focus }) => {
+      if (view === 'temporal') {
+        setActiveTab('temporal');
+      } else {
+        setActiveTab('network');
+        setNetworkViewMode(view);
+      }
+
+      if (focus) {
+        const currentSnap = snapshotRef.current;
+        if (currentSnap) {
+          pendingNavFocusRef.current = null;
+          focusResolvedRef.current = true;
+          const matched = resolveInitialFocusNode(focus, currentSnap.nodes);
+          if (matched) {
+            setSelectedNode(matched);
+            setFocusNodeId(matched.id);
+            setMissingFocusPath(null);
+          } else {
+            setMissingFocusPath(focus);
+          }
+        } else {
+          pendingNavFocusRef.current = focus;
+          focusResolvedRef.current = false;
+        }
+      }
+    });
+  }, []);
 
   // 4. Global Keyboard Shortcuts
   useEffect(() => {
@@ -1102,7 +1138,7 @@ export const App: React.FC = () => {
       <aside className="sidebar">
         <div className="brand-header">
           <div className="brand-logo">
-            <div className="logo-orb" />
+            <PreBaseMark size={18} />
             <span className="brand-name">PreBase</span>
           </div>
           <div className="header-actions">

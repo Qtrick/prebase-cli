@@ -523,12 +523,206 @@ pub async fn handle_git_status(
 }
 
 // -------------------------------------------------------------
+// Session Bootstrap & Workspace Control Routes
+// -------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct MintBootstrapResponse {
+    pub bootstrap_token: String,
+}
+
+fn require_cli_session_header(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(), (StatusCode, &'static str)> {
+    let header_token = headers
+        .get("x-prebase-session")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if !crate::auth::constant_time_eq(header_token, &state.session_token) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Forbidden: Explicit X-Prebase-Session header required",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn handle_mint_bootstrap(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<MintBootstrapResponse>, (StatusCode, &'static str)> {
+    require_cli_session_header(&headers, &state)?;
+
+    let bootstrap_token = state.mint_bootstrap_token();
+    Ok(Json(MintBootstrapResponse { bootstrap_token }))
+}
+
+#[derive(Deserialize)]
+pub struct WorkspaceNavigateRequest {
+    pub view: String,
+    #[serde(default)]
+    pub focus: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct WorkspaceNavigateResponse {
+    pub delivered: bool,
+    pub acknowledged: bool,
+    pub active_clients: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+pub async fn handle_workspace_navigate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<WorkspaceNavigateRequest>,
+) -> Result<Json<WorkspaceNavigateResponse>, (StatusCode, &'static str)> {
+    require_cli_session_header(&headers, &state)?;
+    let view = payload.view.trim();
+    if !matches!(view, "3d" | "2d" | "temporal") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid view: expected '3d', '2d', or 'temporal'",
+        ));
+    }
+
+    let focus = match payload.focus {
+        Some(f) => {
+            let trimmed = f.trim();
+            if trimmed.is_empty() {
+                None
+            } else if trimmed.len() > 4096 {
+                return Err((StatusCode::BAD_REQUEST, "Focus path exceeds maximum length"));
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => None,
+    };
+
+    let active_clients = state.active_sse_client_count();
+    let Some(target_client_id) = state.most_recent_sse_client() else {
+        return Ok(Json(WorkspaceNavigateResponse {
+            delivered: false,
+            acknowledged: false,
+            active_clients: 0,
+            client_id: None,
+            request_id: None,
+        }));
+    };
+    if active_clients == 0 {
+        return Ok(Json(WorkspaceNavigateResponse {
+            delivered: false,
+            acknowledged: false,
+            active_clients: 0,
+            client_id: None,
+            request_id: None,
+        }));
+    }
+
+    let request_id = format!("nav_{}", &crate::auth::generate_bootstrap_token()[..24]);
+    let rx = state.register_nav_ack(request_id.clone(), target_client_id.clone());
+
+    let _ = state
+        .event_sender
+        .send(crate::state::ServerEvent::WorkspaceNavigate {
+            request_id: request_id.clone(),
+            target_client_id: Some(target_client_id),
+            view: view.to_string(),
+            focus,
+        });
+
+    let wait_ms = payload.timeout_ms.unwrap_or(1500).clamp(100, 5000);
+    match tokio::time::timeout(Duration::from_millis(wait_ms), rx).await {
+        Ok(Ok(client_id)) => Ok(Json(WorkspaceNavigateResponse {
+            delivered: true,
+            acknowledged: true,
+            active_clients: state.active_sse_client_count(),
+            client_id: Some(client_id),
+            request_id: Some(request_id),
+        })),
+        _ => {
+            state.remove_nav_ack(&request_id);
+            Ok(Json(WorkspaceNavigateResponse {
+                delivered: true,
+                acknowledged: false,
+                active_clients: state.active_sse_client_count(),
+                client_id: None,
+                request_id: Some(request_id),
+            }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WorkspaceAckRequest {
+    pub request_id: String,
+    pub client_id: String,
+}
+
+#[derive(Serialize)]
+pub struct WorkspaceAckResponse {
+    pub accepted: bool,
+}
+
+pub async fn handle_workspace_ack(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WorkspaceAckRequest>,
+) -> Result<Json<WorkspaceAckResponse>, (StatusCode, &'static str)> {
+    let request_id = crate::state::validate_bounded_id(&payload.request_id)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid request_id"))?;
+    let client_id = crate::state::validate_bounded_id(&payload.client_id)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id"))?;
+
+    let accepted = state.ack_nav(&request_id, &client_id);
+    Ok(Json(WorkspaceAckResponse { accepted }))
+}
+
+// -------------------------------------------------------------
 // Live Events Route (SSE)
 // -------------------------------------------------------------
 
+#[derive(Deserialize, Default)]
+pub struct EventsQuery {
+    pub client_id: Option<String>,
+}
+
+struct GuardedStream<S> {
+    inner: std::pin::Pin<Box<S>>,
+    _guard: crate::state::SseClientGuard,
+}
+
+impl<S: Stream> Stream for GuardedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
 pub async fn handle_events(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    Query(query): Query<EventsQuery>,
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, &'static str),
+> {
+    let client_id = match query.client_id {
+        Some(raw) if !raw.trim().is_empty() => crate::state::validate_bounded_id(&raw)
+            .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id"))?,
+        _ => format!("anon_{}", state.next_sse_conn_id()),
+    };
+
+    let guard = state.register_sse_client(client_id);
     let rx = state.event_sender.subscribe();
     let state_clone = state.clone();
     let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
@@ -544,9 +738,14 @@ pub async fn handle_events(
         }
     });
 
-    Sse::new(stream).keep_alive(
+    let guarded = GuardedStream {
+        inner: Box::pin(stream),
+        _guard: guard,
+    };
+
+    Ok(Sse::new(guarded).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("heartbeat"),
-    )
+    ))
 }
