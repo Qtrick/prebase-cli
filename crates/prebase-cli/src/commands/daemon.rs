@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+const MAX_LOCAL_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DaemonSession {
@@ -36,8 +38,19 @@ struct MintBootstrapResult {
 }
 
 #[derive(Deserialize, Debug)]
-struct RepositoryCheckResult {
+#[allow(dead_code)]
+struct ServerIdentityResult {
+    pid: u32,
+    port: u16,
     repository_id: String,
+    canonical_root: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+struct ServerShutdownResult {
+    shutting_down: bool,
+    pid: u32,
 }
 
 pub fn get_session_file(repo_root: &Path) -> PathBuf {
@@ -57,7 +70,7 @@ fn reject_if_symlink(path: &Path) -> Result<(), Box<dyn std::error::Error + Send
     Ok(())
 }
 
-fn ensure_prebase_dir(
+pub fn ensure_prebase_dir(
     repo_root: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let prebase_dir = repo_root.join(".prebase");
@@ -68,16 +81,42 @@ fn ensure_prebase_dir(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&prebase_dir, fs::Permissions::from_mode(0o700));
+        fs::set_permissions(&prebase_dir, fs::Permissions::from_mode(0o700))?;
     }
 
-    // Ensure .prebase directory is ignored by git if located inside a repository
+    // Ensure .prebase directory is ignored by git without following symlinks
     let gitignore_file = prebase_dir.join(".gitignore");
-    if !gitignore_file.exists() {
-        let _ = fs::write(&gitignore_file, "*\n");
+    let mut gitignore_opts = OpenOptions::new();
+    gitignore_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        gitignore_opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    if let Ok(mut file) = gitignore_opts.open(&gitignore_file) {
+        let _ = file.write_all(b"*\n");
     }
 
     Ok(prebase_dir)
+}
+
+pub fn open_secure_log_file(
+    repo_root: &Path,
+) -> Result<(PathBuf, fs::File), Box<dyn std::error::Error + Send + Sync>> {
+    let prebase_dir = ensure_prebase_dir(repo_root)?;
+    let log_path = prebase_dir.join("server.log");
+    reject_if_symlink(&log_path)?;
+
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let file = opts.open(&log_path)?;
+    Ok((log_path, file))
 }
 
 pub fn save_session(
@@ -104,6 +143,7 @@ pub fn save_session(
     };
 
     let session_file = get_session_file(repo_root);
+    reject_if_symlink(&session_file)?;
     let json = serde_json::to_string_pretty(&session)?;
 
     // Atomic 0600 write via unique temporary file + sync_all + rename
@@ -118,7 +158,7 @@ pub fn save_session(
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
 
     let write_res = (|| -> std::io::Result<()> {
@@ -138,7 +178,7 @@ pub fn save_session(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&session_file, fs::Permissions::from_mode(0o600));
+        fs::set_permissions(&session_file, fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(())
@@ -150,21 +190,35 @@ pub fn read_session(repo_root: &Path) -> Option<DaemonSession> {
         return None;
     }
     let session_file = get_session_file(repo_root);
-    if reject_if_symlink(&session_file).is_err() || !session_file.exists() {
+    if reject_if_symlink(&session_file).is_err() {
         return None;
     }
-    let content = fs::read_to_string(&session_file).ok()?;
+
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let mut file = opts.open(&session_file).ok()?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
     serde_json::from_str(&content).ok()
 }
 
 pub fn remove_session(repo_root: &Path) {
     let session_file = get_session_file(repo_root);
-    let _ = fs::remove_file(session_file);
+    if reject_if_symlink(&session_file).is_ok() {
+        let _ = fs::remove_file(session_file);
+    }
 }
 
-/// Remove `server.json` only if it still matches our `(pid, port)` so a shutting-down
-/// instance never deletes a newer instance's session file.
+/// Remove `server.json` under startup lock only if it still matches our `(pid, port)`
+/// so a shutting-down instance never deletes a newer instance's session file.
 pub fn remove_session_if_owned(repo_root: &Path, pid: u32, port: u16) {
+    let _lock = acquire_startup_lock(repo_root).ok();
     if let Some(current) = read_session(repo_root) {
         if current.pid == pid && current.port == port {
             remove_session(repo_root);
@@ -245,8 +299,19 @@ pub fn acquire_startup_lock(
                 .create_new(true)
                 .open(&lock_path)
             {
-                Ok(_) => return Ok(StartupLockGuard { lock_path }),
+                Ok(mut f) => {
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(StartupLockGuard { lock_path });
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Ok(meta) = fs::metadata(&lock_path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified.elapsed().unwrap_or_default() > Duration::from_secs(30) {
+                                let _ = fs::remove_file(&lock_path);
+                                continue;
+                            }
+                        }
+                    }
                     if Instant::now() >= deadline {
                         return Err("Timed out waiting for PreBase startup lock".into());
                     }
@@ -286,7 +351,10 @@ async fn local_http_request(
         stream.flush().await?;
 
         let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
+        stream
+            .take(MAX_LOCAL_HTTP_RESPONSE_BYTES as u64)
+            .read_to_end(&mut buf)
+            .await?;
         let raw = String::from_utf8_lossy(&buf);
 
         let (head, resp_body) = raw
@@ -306,7 +374,8 @@ async fn local_http_request(
 }
 
 /// Verify that a stored session corresponds to a live, authenticated PreBase server
-/// for the exact `expected_repo_id` and `repo_root`, protecting against stale files and PID reuse.
+/// for the exact `expected_repo_id`, `repo_root`, `pid`, and `port`, protecting against
+/// stale files and PID reuse.
 pub async fn validate_live_session(
     repo_root: &Path,
     expected_repo_id: &str,
@@ -325,7 +394,7 @@ pub async fn validate_live_session(
     match local_http_request(
         session.port,
         "GET",
-        "/api/v1/repository",
+        "/api/v1/server/identity",
         &session.session_token,
         None,
         Duration::from_millis(800),
@@ -333,8 +402,12 @@ pub async fn validate_live_session(
     .await
     {
         Ok((200, body)) => {
-            if let Ok(info) = serde_json::from_str::<RepositoryCheckResult>(&body) {
-                if info.repository_id == expected_repo_id {
+            if let Ok(id) = serde_json::from_str::<ServerIdentityResult>(&body) {
+                if id.repository_id == expected_repo_id
+                    && id.canonical_root == repo_root.display().to_string()
+                    && id.pid == session.pid
+                    && id.port == session.port
+                {
                     return Some(session);
                 }
             }
@@ -366,7 +439,7 @@ pub async fn navigate_existing_workspace(
         "/api/v1/workspace/navigate",
         &session.session_token,
         Some(&body),
-        Duration::from_millis(2500),
+        Duration::from_millis(4500),
     )
     .await?;
 
@@ -379,13 +452,18 @@ pub async fn navigate_existing_workspace(
 
 pub async fn mint_bootstrap_token(
     session: &DaemonSession,
+    mark_launch_pending: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let body = serde_json::json!({
+        "mark_launch_pending": mark_launch_pending,
+    })
+    .to_string();
     let (status, resp_body) = local_http_request(
         session.port,
         "POST",
         "/api/v1/auth/bootstrap",
         &session.session_token,
-        Some("{}"),
+        Some(&body),
         Duration::from_millis(1000),
     )
     .await?;
@@ -398,14 +476,58 @@ pub async fn mint_bootstrap_token(
     Ok(parsed.bootstrap_token)
 }
 
+async fn request_authenticated_shutdown(
+    session: &DaemonSession,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let (status, resp_body) = local_http_request(
+        session.port,
+        "POST",
+        "/api/v1/server/shutdown",
+        &session.session_token,
+        Some("{}"),
+        Duration::from_millis(1500),
+    )
+    .await?;
+
+    if status != 200 {
+        return Err(format!("Server shutdown failed (HTTP {status}): {resp_body}").into());
+    }
+
+    let parsed: ServerShutdownResult = serde_json::from_str(&resp_body)?;
+    Ok(parsed.shutting_down)
+}
+
+fn is_valid_pid(pid: u32) -> bool {
+    pid > 0 && pid <= i32::MAX as u32
+}
+
 #[cfg(unix)]
 pub fn is_process_running(pid: u32) -> bool {
+    if !is_valid_pid(pid) {
+        return false;
+    }
     let res = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if res == 0 {
+    res == 0
+}
+
+#[cfg(unix)]
+fn has_process_exited(pid: u32) -> bool {
+    if !is_process_running(pid) {
         return true;
     }
-    // Check ESRCH (process does not exist) vs EPERM (exists but different user)
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    // On macOS/Unix, kill(pid, 0) returns 0 for zombie ('Z') processes that have already
+    // terminated and released all resources while awaiting parent/init reaping.
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+    {
+        if !output.status.success() {
+            return true;
+        }
+        let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return stat.is_empty() || stat.starts_with('Z');
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -423,22 +545,24 @@ pub fn is_prebase_process(pid: u32) -> bool {
             return comm.contains("prebase");
         }
     }
-    // Fallback to is_process_running if ps cannot be queried
-    true
+    false
 }
 
 #[cfg(not(unix))]
-pub fn is_process_running(_pid: u32) -> bool {
-    true
+pub fn is_process_running(pid: u32) -> bool {
+    is_valid_pid(pid)
 }
 
 #[cfg(not(unix))]
 pub fn is_prebase_process(pid: u32) -> bool {
-    is_process_running(pid)
+    is_valid_pid(pid)
 }
 
 #[cfg(unix)]
 pub fn terminate_process(pid: u32) -> bool {
+    if !is_valid_pid(pid) {
+        return false;
+    }
     let res = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     res == 0
 }
@@ -448,21 +572,14 @@ pub fn terminate_process(_pid: u32) -> bool {
     false
 }
 
-pub fn run_status(
+pub async fn run_status(
     canonical_root: &Path,
+    repo_id: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let session_opt = read_session(canonical_root);
-
-    let (is_active, session) = match session_opt {
-        Some(s) if is_prebase_process(s.pid) => (true, Some(s)),
-        Some(_) => {
-            // Stale session file
-            remove_session(canonical_root);
-            (false, None)
-        }
-        None => (false, None),
-    };
+    let _lock = acquire_startup_lock(canonical_root)?;
+    let session = validate_live_session(canonical_root, repo_id).await;
+    let is_active = session.is_some();
 
     if json {
         // Redact session_token from JSON status output
@@ -499,41 +616,89 @@ pub fn run_status(
     Ok(())
 }
 
-pub fn run_stop(
+pub async fn run_stop(
     canonical_root: &Path,
+    repo_id: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let session_opt = read_session(canonical_root);
+    let lock = acquire_startup_lock(canonical_root)?;
+    let session_opt = validate_live_session(canonical_root, repo_id).await;
+    // Release startup lock before waiting for the server process to exit so
+    // the server's own `remove_session_if_owned()` cannot deadlock on `server.lock`.
+    drop(lock);
 
     match session_opt {
         Some(s) => {
-            if is_prebase_process(s.pid) {
-                let success = terminate_process(s.pid);
-                if success {
-                    // Bounded wait up to 2 seconds for process to exit
+            let shutdown_ok = matches!(request_authenticated_shutdown(&s).await, Ok(true));
+
+            #[cfg(unix)]
+            let stopped = {
+                let mut exited = false;
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if has_process_exited(s.pid) {
+                        exited = true;
+                        break;
+                    }
+                }
+                // Fallback SIGTERM only if authenticated process is still alive
+                if !exited && terminate_process(s.pid) {
                     for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        if !is_process_running(s.pid) {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        if has_process_exited(s.pid) {
+                            exited = true;
                             break;
                         }
                     }
                 }
-                remove_session(canonical_root);
-                if json {
-                    println!("{}", serde_json::json!({ "stopped": true, "pid": s.pid }));
-                } else {
-                    println!("Stopped PreBase server (PID {}).", s.pid);
+                exited
+            };
+
+            #[cfg(not(unix))]
+            let stopped = {
+                let mut exited = false;
+                if shutdown_ok {
+                    for _ in 0..20 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let still_up = local_http_request(
+                            s.port,
+                            "GET",
+                            "/api/v1/server/identity",
+                            &s.session_token,
+                            None,
+                            Duration::from_millis(200),
+                        )
+                        .await
+                        .is_ok();
+                        if !still_up {
+                            exited = true;
+                            break;
+                        }
+                    }
                 }
-            } else {
-                remove_session(canonical_root);
+                exited
+            };
+
+            #[cfg(unix)]
+            let _ = shutdown_ok;
+
+            if !stopped {
                 if json {
                     println!(
                         "{}",
-                        serde_json::json!({ "stopped": false, "reason": "Process was not running" })
+                        serde_json::json!({ "stopped": false, "pid": s.pid, "reason": "Server process did not exit" })
                     );
                 } else {
-                    println!("PreBase server was not running. Removed stale session file.");
+                    eprintln!("Error: Failed to stop PreBase server (PID {}).", s.pid);
                 }
+                return Err(format!("PreBase server (PID {}) did not exit", s.pid).into());
+            }
+
+            remove_session_if_owned(canonical_root, s.pid, s.port);
+            if json {
+                println!("{}", serde_json::json!({ "stopped": true, "pid": s.pid }));
+            } else {
+                println!("Stopped PreBase server (PID {}).", s.pid);
             }
         }
         None => {
@@ -628,9 +793,7 @@ mod tests {
         assert!(validate_live_session(&root_a, "repo-id-a").await.is_none());
         assert!(!get_session_file(&root_a).exists());
 
-        // Save valid session for repo-a (note: in test binary `comm` may not contain "prebase",
-        // so we test HTTP + repo_id verification directly when PID check is satisfied, or
-        // verify multi-repo isolation with mismatched repo_id)
+        // Multi-repo isolation: repo-b pointing at repo-a must reject and clean up!
         save_session(
             &root_b,
             std::process::id(),
@@ -640,7 +803,6 @@ mod tests {
             &server_a.session_token,
         )
         .unwrap();
-        // Asking for repo-id-b against repo-b's session pointing at repo-a must reject and clean up!
         assert!(validate_live_session(&root_b, "repo-id-b").await.is_none());
         assert!(!get_session_file(&root_b).exists());
 
@@ -654,7 +816,7 @@ mod tests {
             watch_filesystem: false,
             session_token: server_a.session_token.clone(),
         };
-        let boot = mint_bootstrap_token(&session).await.unwrap();
+        let boot = mint_bootstrap_token(&session, false).await.unwrap();
         assert!(!boot.is_empty());
 
         let nav = navigate_existing_workspace(&session, "2d", Some("src/main.rs"))
@@ -664,5 +826,25 @@ mod tests {
         assert_eq!(nav.active_clients, 0);
 
         let _ = server_a.shutdown_tx.send(());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_protection_and_pid_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let target = temp.path().join("outside");
+        fs::create_dir_all(&target).unwrap();
+
+        // Symlinked .prebase directory must be rejected
+        std::os::unix::fs::symlink(&target, root.join(".prebase")).unwrap();
+        assert!(ensure_prebase_dir(&root).is_err());
+        assert!(read_session(&root).is_none());
+
+        // PID sign/group guard
+        assert!(!is_process_running(0));
+        assert!(!is_process_running(u32::MAX));
+        assert!(!terminate_process(0));
+        assert!(!terminate_process(u32::MAX));
     }
 }

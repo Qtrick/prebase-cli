@@ -7,7 +7,7 @@ use prebase_parser::RepositoryAnalyzer;
 use prebase_server::start_server;
 
 use crate::commands::daemon::{
-    acquire_startup_lock, mint_bootstrap_token, navigate_existing_workspace,
+    acquire_startup_lock, mint_bootstrap_token, navigate_existing_workspace, open_secure_log_file,
     remove_session_if_owned, save_session, validate_live_session, DaemonSession,
 };
 
@@ -41,6 +41,13 @@ fn build_bootstrap_url(
         url.push_str(&percent_encode_query_param(focus_path));
     }
     url
+}
+
+fn open_browser_url(url: &str) -> std::io::Result<()> {
+    if std::env::var_os("PREBASE_NO_OS_OPEN").is_some() {
+        return Ok(());
+    }
+    open::that(url)
 }
 
 fn is_session_compatible(session: &DaemonSession, port: Option<u16>, no_watch: bool) -> bool {
@@ -84,7 +91,7 @@ async fn reuse_existing_server(
         }
     }
 
-    let bootstrap_token = mint_bootstrap_token(session).await?;
+    let bootstrap_token = mint_bootstrap_token(session, !new_window).await?;
     let url = build_bootstrap_url(session.port, &bootstrap_token, view, focus);
     if new_window {
         println!(
@@ -98,7 +105,7 @@ async fn reuse_existing_server(
         );
     }
 
-    if let Err(err) = open::that(&url) {
+    if let Err(err) = open_browser_url(&url) {
         println!(
             "  \x1b[33mNotice:\x1b[0m Could not open browser automatically: {}. Please visit the link above.",
             err
@@ -145,12 +152,15 @@ pub async fn run_server(
         drop(lock_guard);
         return run_detached_server(
             &canonical_root,
+            &repo_id,
             port,
             no_open,
             no_watch,
+            new_window,
             view,
             focus.as_deref(),
-        );
+        )
+        .await;
     }
 
     // Configure tracing exclusively to stderr so stdout is never polluted
@@ -188,20 +198,31 @@ pub async fn run_server(
     let url = build_bootstrap_url(server.port, &server.bootstrap_token, view, focus.as_deref());
 
     let pid = std::process::id();
-    let _ = save_session(
+    save_session(
         &canonical_root,
         pid,
         server.port,
         &repo_id,
         watch_filesystem,
         &server.session_token,
-    );
+    )?;
+    if !no_open {
+        server.state.mark_launch_pending(Duration::from_secs(3));
+    }
     drop(lock_guard);
 
-    println!(
-        "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34m{}\x1b[0m",
-        url
-    );
+    let is_detached_child = std::env::var_os("PREBASE_DETACHED_CHILD").is_some();
+    if no_open && is_detached_child {
+        println!(
+            "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34mhttp://127.0.0.1:{}/\x1b[0m",
+            server.port
+        );
+    } else {
+        println!(
+            "\x1b[32m✔\x1b[0m Server running at: \x1b[4;34m{}\x1b[0m",
+            url
+        );
+    }
 
     if watch_filesystem {
         println!("  \x1b[36mℹ\x1b[0m Live filesystem monitoring enabled (SSE stream active)");
@@ -209,7 +230,7 @@ pub async fn run_server(
 
     if !no_open {
         println!("  Launching default web browser...");
-        if let Err(err) = open::that(&url) {
+        if let Err(err) = open_browser_url(&url) {
             println!("  \x1b[33mNotice:\x1b[0m Could not open browser automatically: {}. Please visit the link above.", err);
         }
     } else {
@@ -290,46 +311,53 @@ pub async fn run_server(
             _ = sigterm.recv() => {
                 println!("\nReceived SIGTERM. Stopping PreBase server...");
             }
+            _ = server.state.shutdown_notify.notified() => {
+                println!("\nReceived authenticated shutdown request. Stopping PreBase server...");
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        tokio::signal::ctrl_c().await?;
-        println!("\nReceived shutdown signal. Stopping PreBase server...");
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                res?;
+                println!("\nReceived shutdown signal. Stopping PreBase server...");
+            }
+            _ = server.state.shutdown_notify.notified() => {
+                println!("\nReceived authenticated shutdown request. Stopping PreBase server...");
+            }
+        }
     }
 
     server.state.set_shutting_down();
     let _ = server.shutdown_tx.send(());
+    if let Some(watcher) = server.watcher_handle {
+        let _ = watcher.shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_millis(500), watcher.task_handle).await;
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(500), server.server_handle).await;
     indexing_handle.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(200), indexing_handle).await;
     remove_session_if_owned(&canonical_root, pid, server.port);
-
-    Ok(())
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(0);
 }
 
-fn run_detached_server(
+#[allow(clippy::too_many_arguments)]
+async fn run_detached_server(
     canonical_root: &Path,
+    repo_id: &str,
     port: Option<u16>,
     no_open: bool,
     no_watch: bool,
+    new_window: bool,
     view: &str,
     focus: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let current_exe = std::env::current_exe()?;
-    let prebase_dir = canonical_root.join(".prebase");
-    std::fs::create_dir_all(&prebase_dir)?;
-
-    let log_path = prebase_dir.join("server.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
-    }
+    let (log_path, log_file) = open_secure_log_file(canonical_root)?;
 
     let mut cmd = std::process::Command::new(current_exe);
     cmd.arg(canonical_root);
@@ -345,9 +373,10 @@ fn run_detached_server(
     if let Some(p) = port {
         cmd.arg("--port").arg(p.to_string());
     }
-    if no_open {
-        cmd.arg("--no-open");
-    }
+    // Always pass --no-open and PREBASE_DETACHED_CHILD=1 to detached child so bootstrap tokens
+    // are never persisted in server.log; the parent mints a fresh token after verifying readiness.
+    cmd.env("PREBASE_DETACHED_CHILD", "1");
+    cmd.arg("--no-open");
     if no_watch {
         cmd.arg("--no-watch");
     }
@@ -356,36 +385,56 @@ fn run_detached_server(
     cmd.stdout(log_file.try_clone()?);
     cmd.stderr(log_file);
 
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     let pid = child.id();
 
-    // Poll server.log for startup URL (bounded wait up to 4s)
     let start_wait = Instant::now();
-    let mut server_url = None;
-
-    while start_wait.elapsed() < Duration::from_secs(4) {
-        if let Ok(content) = std::fs::read_to_string(&log_path) {
-            for line in content.lines() {
-                if line.contains("Server running at:") {
-                    if let Some(part) = line.split("Server running at:").nth(1) {
-                        server_url = Some(part.trim().to_string());
-                        break;
+    let mut ready_session = None;
+    while start_wait.elapsed() < Duration::from_secs(5) {
+        if let Some(status) = child.try_wait()? {
+            // If another concurrent invocation won the startup lock and this child reused it
+            // cleanly with --no-open (exit code 0), reuse that live session rather than failing.
+            if status.success() {
+                if let Some(session) = validate_live_session(canonical_root, repo_id).await {
+                    if is_session_compatible(&session, port, no_watch) {
+                        return reuse_existing_server(&session, no_open, new_window, view, focus)
+                            .await;
                     }
                 }
             }
+            return Err(format!(
+                "Detached PreBase server (PID {pid}) exited early with status {status}. See {}",
+                log_path.display()
+            )
+            .into());
         }
-        if server_url.is_some() {
-            break;
+        if let Some(session) = validate_live_session(canonical_root, repo_id).await {
+            if session.pid == pid {
+                ready_session = Some(session);
+                break;
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    let session = ready_session.ok_or_else(|| {
+        format!(
+            "Timed out waiting for detached PreBase server (PID {pid}) to become ready. See {}",
+            log_path.display()
+        )
+    })?;
+
     println!("\x1b[32m✔\x1b[0m PreBase background server started \x1b[1m(PID {pid})\x1b[0m");
-    if let Some(url) = server_url {
-        println!("  \x1b[36m→\x1b[0m Web interface: \x1b[4;34m{}\x1b[0m", url);
-    }
+    println!(
+        "  \x1b[36m→\x1b[0m Web interface: \x1b[4;34mhttp://127.0.0.1:{}/\x1b[0m",
+        session.port
+    );
     println!("  \x1b[36m→\x1b[0m Log output:    {}", log_path.display());
     println!("  \x1b[36m→\x1b[0m To stop:       \x1b[1mprebase stop\x1b[0m\n");
+
+    if !no_open {
+        reuse_existing_server(&session, false, new_window, view, focus).await?;
+    }
 
     Ok(())
 }

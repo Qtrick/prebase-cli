@@ -28,17 +28,9 @@ export const PreBaseMark: React.FC<PreBaseMarkProps> = ({ size = 18, className =
       strokeLinecap="round"
       strokeLinejoin="round"
     />
-    {/* Outer B top bar, upper loop, middle bar */}
+    {/* Outer B top bar, upper loop, middle bar, lower loop, bottom bar (continuous) */}
     <path
-      d="M5.7 4H19.5C23.4 4 26.3 7.1 26.3 11C26.3 14.9 23.4 18 19.5 18H11.8"
-      stroke="currentColor"
-      strokeWidth="2.65"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    {/* Outer B lower loop + bottom bar */}
-    <path
-      d="M19.8 18C24.1 18 27.1 20.2 27.1 23C27.1 25.8 24.1 28 19.8 28H11.5"
+      d="M5.7 4H19.5C23.4 4 26.3 7.1 26.3 11C26.3 14.9 23.4 18 19.5 18H11.8M19.5 18C24.0 18 27.1 20.2 27.1 23C27.1 25.8 24.0 28 19.5 28H11.5"
       stroke="currentColor"
       strokeWidth="2.65"
       strokeLinecap="round"

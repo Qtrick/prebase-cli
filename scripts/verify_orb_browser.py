@@ -319,10 +319,10 @@ def main():
             horiz_nodes = after_horiz["nodes"]
 
             log(f"After Horizontal Drag: yaw={horiz_cam['yaw']:.4f}, pitch={horiz_cam['pitch']:.4f}, panX={horiz_cam['panX']:.2f}, panY={horiz_cam['panY']:.2f}")
-            # Confirm yaw changed while pan remained stable within justified center-lock bounds!
+            # Confirm yaw changed while pan remained strictly zero-drift under centerAtPivot=true!
             assert abs(horiz_cam["yaw"] - init_cam["yaw"]) > 0.1, "Yaw must change significantly during horizontal drag"
-            assert abs(horiz_cam["panX"] - init_cam["panX"]) < 25.0, f"PanX must remain stable within justified center-lock bounds (drift: {abs(horiz_cam['panX'] - init_cam['panX']):.2f}px)"
-            assert abs(horiz_cam["panY"] - init_cam["panY"]) < 25.0, f"PanY must remain stable within justified center-lock bounds (drift: {abs(horiz_cam['panY'] - init_cam['panY']):.2f}px)"
+            assert abs(horiz_cam["panX"] - init_cam["panX"]) < 0.5, f"PanX must remain strictly stationary during rotation (drift: {abs(horiz_cam['panX'] - init_cam['panX']):.2f}px)"
+            assert abs(horiz_cam["panY"] - init_cam["panY"]) < 0.5, f"PanY must remain strictly stationary during rotation (drift: {abs(horiz_cam['panY'] - init_cam['panY']):.2f}px)"
 
             # Confirm projected visual midpoint of the formation remains anchored within perspective projection tolerance
             # Note: For an asymmetric discrete 22-node point cloud under perspective projection (f=1000), rotating ~66°
@@ -406,8 +406,8 @@ def main():
                 pitch_diff = abs(after_vert["pitch"] - horiz_cam["pitch"])
                 yaw_diff = abs(after_vert["yaw"] - horiz_cam["yaw"])
                 assert pitch_diff > 0.05 or yaw_diff > 0.05, f"Camera orientation must change significantly (pitch_diff={pitch_diff:.4f}, yaw_diff={yaw_diff:.4f})"
-            assert abs(after_vert["panX"] - init_cam["panX"]) < 25.0, f"PanX remains within center-lock bounds (drift: {abs(after_vert['panX'] - init_cam['panX']):.2f}px)"
-            assert abs(after_vert["panY"] - init_cam["panY"]) < 25.0, f"PanY remains within center-lock bounds (drift: {abs(after_vert['panY'] - init_cam['panY']):.2f}px)"
+            assert abs(after_vert["panX"] - init_cam["panX"]) < 0.5, f"PanX remains strictly stationary during vertical rotation (drift: {abs(after_vert['panX'] - init_cam['panX']):.2f}px)"
+            assert abs(after_vert["panY"] - init_cam["panY"]) < 0.5, f"PanY remains strictly stationary during vertical rotation (drift: {abs(after_vert['panY'] - init_cam['panY']):.2f}px)"
 
             # Consistent with horizontal midpoint bounds (lines 328-335): a discrete 22-node clustered point cloud
             # under 3D quaternion rotation + perspective projection (fl=1100, zoom=1.55) shifts its bounding-box
@@ -487,7 +487,7 @@ def main():
             log("Verifying drag starting directly on a node does NOT select it...")
             canvas_box = page.locator(".network-canvas").bounding_box()
             nodes_now = page.evaluate("() => window.__prebaseNetworkDebug.getProjectedNodes()")
-            target_node = nodes_now[-1]  # Frontmost node
+            target_node = min(nodes_now, key=lambda n: n["z"])  # True frontmost node (smallest z)
             target_x = canvas_box["x"] + target_node["screenX"]
             target_y = canvas_box["y"] + target_node["screenY"]
             log(f"Target node for drag-over test: {target_node['id']} at screen ({target_x:.1f}, {target_y:.1f})")
@@ -507,7 +507,7 @@ def main():
             # --- TEST STEP 11: Normal single click selects node without moving camera ---
             log("Executing normal single click on a node...")
             nodes_now2 = page.evaluate("() => window.__prebaseNetworkDebug.getProjectedNodes()")
-            first_node = nodes_now2[-1]  # Frontmost node
+            first_node = min(nodes_now2, key=lambda n: n["z"])  # True frontmost node (smallest z)
             cam_before_click = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
 
             canvas_box = page.locator(".network-canvas").bounding_box()

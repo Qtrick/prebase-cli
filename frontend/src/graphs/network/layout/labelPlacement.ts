@@ -1,9 +1,10 @@
 /**
- * PreBase — Collision-Aware Architectural Label Placement Engine
+ * PreBase — Continuous Geometry-Driven Area Label Placement Engine
  *
- * Implements deterministic multi-candidate placement, obstacle collision avoidance,
- * spatial hashing, and temporal hysteresis to guarantee that area labels never
- * unintentionally obscure or collide with file nodes or other labels.
+ * Computes smooth, sliding anchor-relative label positions on a directional support
+ * perimeter around each area anchor using continuous penetration/clearance costs
+ * and local coherence regularization — with zero discrete candidate cliffs,
+ * zero interaction locks, and zero timer-driven jumps.
  */
 
 import { ScreenRect, LabelCollisionGrid } from '../render/networkRenderMath';
@@ -17,16 +18,11 @@ export type CandidatePlacement =
   | 'below-right'
   | 'below-left';
 
-export interface LabelCandidate {
-  placement: CandidatePlacement;
-  rect: ScreenRect;
-  index: number;
-}
-
 export interface LabelPlacementResult {
   rect: ScreenRect;
+  theta: number;
+  offset: { x: number; y: number };
   placement: CandidatePlacement;
-  candidateIndex: number;
   isSuppressed: boolean;
 }
 
@@ -39,109 +35,55 @@ export interface LabelPlacementAnchor {
   isHovered?: boolean;
 }
 
-export const CANDIDATE_PLACEMENTS: CandidatePlacement[] = [
-  'below',
-  'above',
-  'right',
-  'left',
-  'below-right',
-  'below-left',
-];
+export const DEFAULT_LABEL_GAP = 4;
+export const DEFAULT_BELOW_THETA = Math.PI / 2;
 
-export const TEMPORAL_HYSTERESIS_BONUS = 60;
-export const SOFT_SWITCH_COOLDOWN_MS = 350;
-
-export interface LabelHysteresisContext {
-  now: number;
-  lastSwitchTime?: number;
-  minSwitchCooldownMs?: number;
+/**
+ * Directional support distance from anchor center to label center along unit vector (ux, uy).
+ * Guarantees the label box never overlaps the circular anchor monogram of `radius` + `gap`.
+ */
+export function computeSupportDistance(
+  radius: number,
+  gap: number,
+  halfWidth: number,
+  halfHeight: number,
+  ux: number,
+  uy: number
+): number {
+  return radius + gap + halfWidth * Math.abs(ux) + halfHeight * Math.abs(uy);
 }
 
 /**
- * Generates bounded candidate positions for an area label around its anchor.
+ * Computes the anchor-relative top-left offset { x, y } for a label box at angle `theta`
+ * on the anchor's directional support perimeter.
  */
-export function generateLabelCandidates(
-  anchor: LabelPlacementAnchor,
+export function computeOffsetForAngle(
+  theta: number,
+  radius: number,
+  gap: number,
   boxWidth: number,
-  boxHeight: number,
-  gap = 4
-): LabelCandidate[] {
-  const candidates: LabelCandidate[] = [];
-  const { screenX, screenY, radius } = anchor;
+  boxHeight: number
+): { x: number; y: number } {
+  const ux = Math.cos(theta);
+  const uy = Math.sin(theta);
+  const dist = computeSupportDistance(radius, gap, boxWidth / 2, boxHeight / 2, ux, uy);
+  return {
+    x: ux * dist - boxWidth / 2,
+    y: uy * dist - boxHeight / 2,
+  };
+}
 
-  // 0: Below (default standard)
-  candidates.push({
-    placement: 'below',
-    index: 0,
-    rect: {
-      x1: screenX - boxWidth / 2,
-      y1: screenY + radius + gap,
-      x2: screenX + boxWidth / 2,
-      y2: screenY + radius + gap + boxHeight,
-    },
-  });
-
-  // 1: Above
-  candidates.push({
-    placement: 'above',
-    index: 1,
-    rect: {
-      x1: screenX - boxWidth / 2,
-      y1: screenY - radius - gap - boxHeight,
-      x2: screenX + boxWidth / 2,
-      y2: screenY - radius - gap,
-    },
-  });
-
-  // 2: Right
-  candidates.push({
-    placement: 'right',
-    index: 2,
-    rect: {
-      x1: screenX + radius + gap + 2,
-      y1: screenY - boxHeight / 2,
-      x2: screenX + radius + gap + 2 + boxWidth,
-      y2: screenY + boxHeight / 2,
-    },
-  });
-
-  // 3: Left
-  candidates.push({
-    placement: 'left',
-    index: 3,
-    rect: {
-      x1: screenX - radius - gap - 2 - boxWidth,
-      y1: screenY - boxHeight / 2,
-      x2: screenX - radius - gap - 2,
-      y2: screenY + boxHeight / 2,
-    },
-  });
-
-  // 4: Below-Right (staggered)
-  candidates.push({
-    placement: 'below-right',
-    index: 4,
-    rect: {
-      x1: screenX - boxWidth * 0.2,
-      y1: screenY + radius + gap,
-      x2: screenX - boxWidth * 0.2 + boxWidth,
-      y2: screenY + radius + gap + boxHeight,
-    },
-  });
-
-  // 5: Below-Left (staggered)
-  candidates.push({
-    placement: 'below-left',
-    index: 5,
-    rect: {
-      x1: screenX - boxWidth * 0.8,
-      y1: screenY + radius + gap,
-      x2: screenX - boxWidth * 0.8 + boxWidth,
-      y2: screenY + radius + gap + boxHeight,
-    },
-  });
-
-  return candidates;
+/**
+ * Maps a continuous angle `theta` to the nearest descriptive placement label (for telemetry/ARIA).
+ */
+export function classifyAnglePlacement(theta: number): CandidatePlacement {
+  const a = Math.atan2(Math.sin(theta), Math.cos(theta));
+  if (a >= Math.PI * 0.375 && a <= Math.PI * 0.625) return 'below';
+  if (a > Math.PI * 0.125 && a < Math.PI * 0.375) return 'below-right';
+  if (a > Math.PI * 0.625 && a < Math.PI * 0.875) return 'below-left';
+  if (a >= -Math.PI * 0.625 && a <= -Math.PI * 0.375) return 'above';
+  if (Math.abs(a) <= Math.PI * 0.375) return 'right';
+  return 'left';
 }
 
 /**
@@ -159,52 +101,85 @@ export function isRectInsideViewport(
   const minY = (insets?.top ?? 0) + margin;
   const maxY = viewportHeight - (insets?.bottom ?? 0) - margin;
 
-  return (
-    rect.x1 >= minX &&
-    rect.x2 <= maxX &&
-    rect.y1 >= minY &&
-    rect.y2 <= maxY
-  );
+  return rect.x1 >= minX && rect.x2 <= maxX && rect.y1 >= minY && rect.y2 <= maxY;
 }
 
 /**
- * Returns the exact bounding rectangle for a given candidate index.
+ * Computes minimum signed distance from `rect` to the usable viewport edges.
+ * Positive when comfortably inside; negative when overflowing.
  */
-export function getCandidateRect(
+export function computeViewportEdgeMargin(
+  rect: ScreenRect,
+  viewportWidth: number,
+  viewportHeight: number,
+  insets?: ViewportInsets,
+  margin = 6
+): number {
+  const minX = (insets?.left ?? 0) + margin;
+  const maxX = viewportWidth - (insets?.right ?? 0) - margin;
+  const minY = (insets?.top ?? 0) + margin;
+  const maxY = viewportHeight - (insets?.bottom ?? 0) - margin;
+
+  return Math.min(rect.x1 - minX, maxX - rect.x2, rect.y1 - minY, maxY - rect.y2);
+}
+
+/**
+ * Evaluates continuous penetration, viewport overflow, directional preference, and
+ * local angular coherence cost for a label at angle `theta` around `anchor`.
+ */
+function evaluateAngleCost(
+  theta: number,
   anchor: LabelPlacementAnchor,
-  candidateIndex: number,
   boxWidth: number,
   boxHeight: number,
-  gap = 4
-): ScreenRect {
-  const candidates = generateLabelCandidates(anchor, boxWidth, boxHeight, gap);
-  const validIndex = Math.max(0, Math.min(candidates.length - 1, candidateIndex));
-  return candidates[validIndex].rect;
+  collisionGrid: LabelCollisionGrid,
+  viewportWidth: number,
+  viewportHeight: number,
+  insets?: ViewportInsets,
+  placedLabelsGrid?: LabelCollisionGrid,
+  previousTheta?: number,
+  gap = DEFAULT_LABEL_GAP
+): { cost: number; rect: ScreenRect; offset: { x: number; y: number }; hardArea: number } {
+  const offset = computeOffsetForAngle(theta, anchor.radius, gap, boxWidth, boxHeight);
+  const rect: ScreenRect = {
+    x1: anchor.screenX + offset.x,
+    y1: anchor.screenY + offset.y,
+    x2: anchor.screenX + offset.x + boxWidth,
+    y2: anchor.screenY + offset.y + boxHeight,
+  };
+
+  // 1. Continuous viewport overflow penalty
+  const minX = (insets?.left ?? 0) + 6;
+  const maxX = viewportWidth - (insets?.right ?? 0) - 6;
+  const minY = (insets?.top ?? 0) + 6;
+  const maxY = viewportHeight - (insets?.bottom ?? 0) - 6;
+  const overflowX = Math.max(0, minX - rect.x1) + Math.max(0, rect.x2 - maxX);
+  const overflowY = Math.max(0, minY - rect.y1) + Math.max(0, rect.y2 - maxY);
+  let cost = (overflowX + overflowY) * 80 + (overflowX * overflowX + overflowY * overflowY) * 4;
+
+  // 2. Continuous hard collision penalty (other placed area labels & anchor badges, 3px soft margin)
+  const hardArea = placedLabelsGrid ? placedLabelsGrid.queryOverlapArea(rect, 3) : 0;
+  cost += hardArea * 25;
+
+  // 3. Continuous soft collision penalty (foreground file nodes)
+  const softArea = collisionGrid.queryOverlapArea(rect, 0);
+  cost += softArea * 0.4;
+
+  // 4. Gentle directional preference for 'below' (theta = PI/2)
+  cost += (1 - Math.sin(theta)) * 4 + Math.abs(Math.cos(theta)) * 1.5;
+
+  // 5. Local coherence regularizer (hysteresis without hard lock)
+  if (previousTheta !== undefined) {
+    const dTheta = Math.atan2(Math.sin(theta - previousTheta), Math.cos(theta - previousTheta));
+    cost += dTheta * dTheta * 18;
+  }
+
+  return { cost, rect, offset, hardArea };
 }
 
 /**
- * Returns the candidate placement name for a given candidate index.
- */
-export function getCandidatePlacement(candidateIndex: number): CandidatePlacement {
-  const validIndex = Math.max(0, Math.min(CANDIDATE_PLACEMENTS.length - 1, candidateIndex));
-  return CANDIDATE_PLACEMENTS[validIndex];
-}
-
-/**
- * Evaluates candidate placements against the spatial obstacle grid and selects
- * the candidate with the lowest collision penalty, applying temporal hysteresis
- * to prevent frame-to-frame jumping during continuous camera motion.
- *
- * Architecture Invariants:
- * 1. Continuous Evaluation: Candidate placement is evaluated continuously on every
- *    frame — including during active drag, inertia, zoom, pan, and direction reversals.
- *    Labels never freeze or defer repositioning until interaction end.
- * 2. Hysteresis Over Hard Lock: Once a candidate placement is established, it is
- *    preserved while it satisfies hard constraints (usable viewport containment and no
- *    overlap with other area labels) and has fewer than 2 file-node collisions.
- *    Soft-only switches are additionally damped by a short cooldown to prevent
- *    ping-ponging across grazing boundaries, while hard constraints always resolve immediately.
- * 3. Priority & Non-Suppression: Selected and hovered area labels are never suppressed.
+ * Resolves the continuous optimal target angle and offset on the anchor's support
+ * perimeter using coarse ring sampling followed by local angular refinement.
  */
 export function resolveAreaLabelPlacement(
   anchor: LabelPlacementAnchor,
@@ -214,110 +189,92 @@ export function resolveAreaLabelPlacement(
   viewportWidth: number,
   viewportHeight: number,
   insets?: ViewportInsets,
-  previousCandidateIndex?: number,
+  previousTheta?: number,
   placedLabelsGrid?: LabelCollisionGrid,
-  hysteresisContext?: LabelHysteresisContext
+  gap = DEFAULT_LABEL_GAP
 ): LabelPlacementResult {
-  const candidates = generateLabelCandidates(anchor, boxWidth, boxHeight);
+  const seedAngles: number[] = [];
+  if (previousTheta !== undefined) {
+    seedAngles.push(previousTheta);
+  }
+  seedAngles.push(DEFAULT_BELOW_THETA);
 
-  // Hysteresis: preserve the previously selected candidate as long as it satisfies
-  // hard constraints (inside usable viewport and no hard collision with another area
-  // label/anchor) and is not heavily obstructed (nodeCollisions < 2), or when a
-  // soft-only switch is still within the anti-oscillation cooldown window.
-  if (
-    previousCandidateIndex !== undefined &&
-    previousCandidateIndex >= 0 &&
-    previousCandidateIndex < candidates.length
-  ) {
-    const prevCand = candidates[previousCandidateIndex];
-    const insideViewport = isRectInsideViewport(
-      prevCand.rect,
+  // 24 uniform samples around the support ring (15-degree resolution)
+  const ringSamples = 24;
+  for (let i = 0; i < ringSamples; i++) {
+    seedAngles.push((i / ringSamples) * Math.PI * 2 - Math.PI);
+  }
+
+  let bestTheta = seedAngles[0];
+  let bestEval = evaluateAngleCost(
+    bestTheta,
+    anchor,
+    boxWidth,
+    boxHeight,
+    collisionGrid,
+    viewportWidth,
+    viewportHeight,
+    insets,
+    placedLabelsGrid,
+    previousTheta,
+    gap
+  );
+
+  for (let i = 1; i < seedAngles.length; i++) {
+    const t = seedAngles[i];
+    const ev = evaluateAngleCost(
+      t,
+      anchor,
+      boxWidth,
+      boxHeight,
+      collisionGrid,
       viewportWidth,
       viewportHeight,
       insets,
-      6
+      placedLabelsGrid,
+      previousTheta,
+      gap
     );
-    const hardCollision = placedLabelsGrid ? placedLabelsGrid.collides(prevCand.rect) : false;
-    const nodeCollisions = collisionGrid.countCollisions(prevCand.rect);
-
-    const cooldownMs = hysteresisContext?.minSwitchCooldownMs ?? SOFT_SWITCH_COOLDOWN_MS;
-    const withinSoftCooldown =
-      hysteresisContext?.lastSwitchTime !== undefined &&
-      hysteresisContext.now - hysteresisContext.lastSwitchTime >= 0 &&
-      hysteresisContext.now - hysteresisContext.lastSwitchTime < cooldownMs;
-
-    if (insideViewport && !hardCollision && (nodeCollisions < 2 || withinSoftCooldown)) {
-      return {
-        rect: prevCand.rect,
-        placement: prevCand.placement,
-        candidateIndex: prevCand.index,
-        isSuppressed: false,
-      };
+    if (ev.cost < bestEval.cost) {
+      bestTheta = t;
+      bestEval = ev;
     }
   }
 
-  // Invariant 3: Initial placement or hard-invalidated candidate: evaluate all candidates
-  let bestCandidate = candidates[0];
-  let minPenalty = Infinity;
-
-  for (let i = 0; i < candidates.length; i++) {
-    const cand = candidates[i];
-    let penalty = 0;
-
-    // Viewport containment penalty
-    const insideViewport = isRectInsideViewport(
-      cand.rect,
-      viewportWidth,
-      viewportHeight,
-      insets,
-      6
-    );
-    if (!insideViewport) {
-      penalty += 10000;
-    }
-
-    // Hard collision penalty: overlapping other placed area labels or area anchors
-    if (placedLabelsGrid && placedLabelsGrid.collides(cand.rect)) {
-      penalty += 3000;
-    }
-
-    // Soft collision penalty: overlapping foreground file nodes (fewer overlapping nodes is strongly preferred)
-    const nodeCollisions = collisionGrid.countCollisions(cand.rect);
-    if (nodeCollisions > 0) {
-      penalty += nodeCollisions * 45;
-    }
-
-    // Placement preference bias: prefer 'below' (0), then 'above' (1), then 'right'/'left'
-    if (cand.placement === 'below') {
-      penalty += 0;
-    } else if (cand.placement === 'above') {
-      penalty += 5;
-    } else if (cand.placement === 'right' || cand.placement === 'left') {
-      penalty += 10;
-    } else {
-      penalty += 15;
-    }
-
-    // Temporal Hysteresis: strongly prefer keeping the previous frame's candidate position
-    // if it remains collision-free or lightly contested, completely eliminating position oscillation
-    if (previousCandidateIndex !== undefined && previousCandidateIndex === cand.index) {
-      penalty -= TEMPORAL_HYSTERESIS_BONUS;
-    }
-
-    if (penalty < minPenalty) {
-      minPenalty = penalty;
-      bestCandidate = cand;
+  // Local continuous angular refinement (7.5 deg -> 3 deg -> 1 deg)
+  const refineSteps = [0.13, 0.05, 0.017];
+  for (const step of refineSteps) {
+    for (const dir of [-1, 1]) {
+      const candTheta = bestTheta + dir * step;
+      const ev = evaluateAngleCost(
+        candTheta,
+        anchor,
+        boxWidth,
+        boxHeight,
+        collisionGrid,
+        viewportWidth,
+        viewportHeight,
+        insets,
+        placedLabelsGrid,
+        previousTheta,
+        gap
+      );
+      if (ev.cost < bestEval.cost) {
+        bestTheta = candTheta;
+        bestEval = ev;
+      }
     }
   }
 
-  // An area label is only suppressed if it suffers a hard collision (e.g. overlap with another area label)
-  // or falls outside the viewport, AND is not currently selected or hovered.
-  const isSeverelyBlocked = minPenalty >= 2000 && !anchor.isSelected && !anchor.isHovered;
+  const normalizedTheta = Math.atan2(Math.sin(bestTheta), Math.cos(bestTheta));
+  const isSeverelyBlocked =
+    bestEval.hardArea > 4.0 && !anchor.isSelected && !anchor.isHovered;
 
   return {
-    rect: bestCandidate.rect,
-    placement: bestCandidate.placement,
-    candidateIndex: bestCandidate.index,
+    rect: bestEval.rect,
+    theta: normalizedTheta,
+    offset: bestEval.offset,
+    placement: classifyAnglePlacement(normalizedTheta),
     isSuppressed: isSeverelyBlocked,
   };
 }

@@ -68,12 +68,22 @@ export async function dispatchWorkspaceNavigate(
     focus: data.focus ?? null,
   };
 
+  let succeededCount = 0;
+  let lastError: unknown = null;
   for (const handler of activeHandlers) {
     try {
       handler(target);
-    } catch {
-      // Isolate handler errors so acknowledgment still reflects workspace dispatch
+      succeededCount += 1;
+    } catch (err) {
+      lastError = err;
     }
+  }
+
+  if (succeededCount === 0) {
+    if (lastError !== null) {
+      throw lastError;
+    }
+    return false;
   }
 
   try {
@@ -86,7 +96,11 @@ export async function dispatchWorkspaceNavigate(
         client_id: getWorkspaceClientId(),
       }),
     });
-    return response.ok;
+    if (!response.ok) {
+      return false;
+    }
+    const payload = (await response.json()) as { accepted?: boolean };
+    return payload?.accepted === true;
   } catch {
     return false;
   }

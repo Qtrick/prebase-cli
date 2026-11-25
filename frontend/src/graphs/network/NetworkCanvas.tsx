@@ -66,6 +66,7 @@ import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
 import { fitTextEnd, fitTextMiddle } from '../../utils/textFitting';
 import {
   resolveAreaLabelPlacement,
+  computeViewportEdgeMargin,
   LabelPlacementAnchor,
 } from './layout/labelPlacement';
 import {
@@ -75,12 +76,8 @@ import {
 } from './layout/labelFade';
 import {
   AreaMotionState,
-  SynchronizedMotionTimeline,
-  computeAnchorRelativeOffset,
-  registerLabelMotionTarget,
-  stepSynchronizedMotion,
+  adaptLabelOffsetToGeometry,
   computeRenderedLabelRect,
-  DEFAULT_MOTION_DURATION_MS,
 } from './layout/labelMotion';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
@@ -321,18 +318,36 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     name: string;
     rect: ScreenRect;
     placement: string;
-    candidateIndex?: number;
+    theta: number;
     opacity: number;
   }
   const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
   const previouslyRenderedAreaIdsRef = useRef<Set<string>>(new Set());
   const labelFadeStatesRef = useRef<Map<string, AreaFadeState>>(new Map());
   const labelMotionStatesRef = useRef<Map<string, AreaMotionState>>(new Map());
-  const motionTimelineRef = useRef<SynchronizedMotionTimeline>({
-    startTime: 0,
-    durationMs: 220,
-    activeAreaIds: new Set<string>(),
-  });
+  const areaLabelMetricsCacheRef = useRef<
+    Map<string, { key: string; labelText: string; countText: string; boxWidth: number; boxHeight: number }>
+  >(new Map());
+  const prevCameraGeomRef = useRef<{ orientation: [number, number, number, number]; zoom: number } | null>(null);
+  const prevAreaGeomRef = useRef<Map<string, { radius: number; edgeDist: number }>>(new Map());
+  const frameSnapshotRef = useRef<{
+    timestamp: number;
+    camera: NetworkCamera;
+    anchors: {
+      areaId: string;
+      name: string;
+      fileCount: number;
+      screenX: number;
+      screenY: number;
+      radius: number;
+      isFront: boolean;
+      z: number;
+    }[];
+    renderedLabels: RenderedAreaLabel[];
+    fadeStates: (AreaFadeState & { id: string })[];
+    isAnyFadeActive: boolean;
+    rafScheduled: boolean;
+  } | null>(null);
 
   const renderedEdgesRef = useRef<{
     fileEdges: { edge: DependencyEdge; p1: { screenX: number; screenY: number }; p2: { screenX: number; screenY: number } }[];
@@ -363,6 +378,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             isFront: a.isFront,
             z: a.proj.z,
           })),
+        getFrameSnapshot: () => frameSnapshotRef.current,
         getRenderedAreaLabels: () => Array.from(renderedAreaLabelsRef.current.values()),
         getFadeStates: () =>
           Array.from(labelFadeStatesRef.current.entries()).map(([k, v]) => ({
@@ -372,17 +388,16 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         getMotionStates: () =>
           Array.from(labelMotionStatesRef.current.entries()).map(([k, v]) => ({
             areaId: k,
+            currentTheta: v.currentTheta,
+            targetTheta: v.targetTheta,
             currentOffset: { ...v.currentOffset },
-            startOffset: { ...v.startOffset },
             targetOffset: { ...v.targetOffset },
-            candidateIndex: v.candidateIndex,
-            isRelocating: !!v.isRelocating,
           })),
         getMotionTimeline: () => ({
-          startTime: motionTimelineRef.current.startTime,
-          durationMs: motionTimelineRef.current.durationMs,
-          activeCount: motionTimelineRef.current.activeAreaIds.size,
-          activeAreaIds: Array.from(motionTimelineRef.current.activeAreaIds),
+          startTime: 0,
+          durationMs: 0,
+          activeCount: 0,
+          activeAreaIds: [],
         }),
         getRenderedEdgesCount: () => ({
           fileEdges: renderedEdgesRef.current.fileEdges.length,
@@ -432,12 +447,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     for (const id of labelMotionStatesRef.current.keys()) {
       if (!validAreaIds.has(id)) {
         labelMotionStatesRef.current.delete(id);
-        motionTimelineRef.current.activeAreaIds.delete(id);
+        prevAreaGeomRef.current.delete(id);
+        areaLabelMetricsCacheRef.current.delete(id);
       }
     }
     if (scope !== 'overview') {
       renderedAreaLabelsRef.current.clear();
-      motionTimelineRef.current.activeAreaIds.clear();
+      prevAreaGeomRef.current.clear();
       previouslyRenderedAreaIdsRef.current.clear();
     }
   }, [repoStructure, scope]);
@@ -826,7 +842,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       ctx.clearRect(0, 0, width, height);
 
       let isAnyLabelTransitionActive = false;
-      let isAnyMotionActive = false;
 
       try {
         const camera = cameraRef.current;
@@ -1394,28 +1409,33 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
         }
 
-        // 4.5 Draw Architectural Area Labels (Collision-Aware Multi-Candidate Placement + Smooth Depth Fade + Synchronized Motion)
+        // 4.5 Draw Architectural Area Labels (Continuous Geometry-Driven Placement + Smooth Depth Fade)
         isAnyLabelTransitionActive = false;
-        isAnyMotionActive = false;
         renderedAreaLabelsRef.current.clear();
 
         if (scope === 'overview' && !isSmallRepo) {
           const now = timestamp || performance.now();
           const fadeMap = labelFadeStatesRef.current;
           const motionMap = labelMotionStatesRef.current;
-          const motionTimeline = motionTimelineRef.current;
+          const metricsCache = areaLabelMetricsCacheRef.current;
+          const prevAreaGeom = prevAreaGeomRef.current;
           const placedLabelsGrid = new LabelCollisionGrid(90);
+          const renderedLabelOnlyGrid = new LabelCollisionGrid(90);
 
-          // Advance critically-damped label motion for active transitions
-          const timelineStillActive = stepSynchronizedMotion(
-            motionMap,
-            motionTimeline,
-            now,
-            prefersReducedMotion
-          );
-          if (timelineStillActive) {
-            isAnyMotionActive = true;
+          // Pure-pan-invariant camera rotation & zoom delta for geometry-budgeted adaptation
+          const currOri: [number, number, number, number] = camera.orientation ?? [0, 0, 0, 1];
+          let cameraRotZoomDelta = 0;
+          if (prevCameraGeomRef.current) {
+            const po = prevCameraGeomRef.current.orientation;
+            const dot = Math.min(
+              1,
+              Math.abs(po[0] * currOri[0] + po[1] * currOri[1] + po[2] * currOri[2] + po[3] * currOri[3])
+            );
+            const angleDelta = 2 * Math.acos(dot);
+            cameraRotZoomDelta =
+              angleDelta * sphereRadius + Math.abs(camera.zoom - prevCameraGeomRef.current.zoom) * 100;
           }
+          prevCameraGeomRef.current = { orientation: [currOri[0], currOri[1], currOri[2], currOri[3]], zoom: camera.zoom };
 
           // Populate placedLabelsGrid with all area anchor badges so labels never cover anchor monograms
           for (const a of areaAnchorsMap.values()) {
@@ -1438,6 +1458,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             }
             return a.area.id.localeCompare(b.area.id);
           });
+
+          const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          const countFont = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
 
           for (let i = 0; i < allAnchors.length; i++) {
             const pAnchor = allAnchors[i];
@@ -1478,20 +1501,29 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               continue;
             }
 
-            const rawLabelText = pAnchor.area.name;
+            // Cached label text measurements (zero per-frame ctx.measureText on cache hit)
             const countText =
               pAnchor.area.fileCount === 1 ? '1 file' : `${pAnchor.area.fileCount} files`;
-
-            ctx.save();
-            const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            ctx.font = areaFont;
-            const labelText = fitTextEnd(rawLabelText, 160, (s) => ctx.measureText(s).width, areaFont);
-            const nameWidth = ctx.measureText(labelText).width;
-            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-            const countWidth = ctx.measureText(countText).width;
-
-            const boxWidth = Math.max(nameWidth, countWidth) + 16;
-            const boxHeight = 32;
+            const cacheKey = `${pAnchor.area.name}\0${countText}`;
+            let cachedMetrics = metricsCache.get(pAnchor.area.id);
+            if (!cachedMetrics || cachedMetrics.key !== cacheKey) {
+              ctx.save();
+              ctx.font = areaFont;
+              const labelText = fitTextEnd(pAnchor.area.name, 160, (s) => ctx.measureText(s).width, areaFont);
+              const nameWidth = ctx.measureText(labelText).width;
+              ctx.font = countFont;
+              const countWidth = ctx.measureText(countText).width;
+              ctx.restore();
+              cachedMetrics = {
+                key: cacheKey,
+                labelText,
+                countText,
+                boxWidth: Math.max(nameWidth, countWidth) + 16,
+                boxHeight: 32,
+              };
+              metricsCache.set(pAnchor.area.id, cachedMetrics);
+            }
+            const { labelText, boxWidth, boxHeight } = cachedMetrics;
 
             const placementAnchor: LabelPlacementAnchor = {
               id: pAnchor.area.id,
@@ -1503,8 +1535,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             };
 
             const existingMotionState = motionMap.get(pAnchor.area.id);
-            const prevCandidateIndex = existingMotionState?.candidateIndex ?? fadeState.candidateIndex;
-
             const placementResult = resolveAreaLabelPlacement(
               placementAnchor,
               boxWidth,
@@ -1513,46 +1543,47 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               width,
               height,
               insets,
-              prevCandidateIndex,
-              placedLabelsGrid,
-              {
-                now,
-                lastSwitchTime: existingMotionState?.lastCandidateSwitchTime,
-              }
+              existingMotionState?.currentTheta,
+              placedLabelsGrid
             );
 
-            fadeState.candidateIndex = placementResult.candidateIndex;
-
             if (placementResult.isSuppressed && !isPriority) {
-              ctx.restore();
               continue;
             }
 
             const wasRenderedLastFrame = previouslyRenderedAreaIdsRef.current.has(pAnchor.area.id);
             const isReentry = !wasRenderedLastFrame;
 
-            // Register candidate placement with synchronized motion engine
-            const targetOffset = computeAnchorRelativeOffset(
-              pAnchor.screenX,
-              pAnchor.screenY,
-              placementResult.rect
+            const edgeDist = computeViewportEdgeMargin(
+              placementResult.rect,
+              width,
+              height,
+              insets,
+              6
             );
-            const motionJoined = registerLabelMotionTarget(
-              motionMap,
-              motionTimeline,
-              pAnchor.area.id,
-              placementResult.candidateIndex,
-              targetOffset,
-              now,
-              prefersReducedMotion,
-              DEFAULT_MOTION_DURATION_MS,
-              isReentry
-            );
-            if (motionJoined) {
-              isAnyMotionActive = true;
-            }
+            const prevGeom = prevAreaGeom.get(pAnchor.area.id);
+            const dRadius = prevGeom ? Math.abs(pAnchor.radius - prevGeom.radius) : 0;
+            const viewportEdgeDelta =
+              prevGeom && (edgeDist < 24 || prevGeom.edgeDist < 24)
+                ? Math.abs(edgeDist - prevGeom.edgeDist)
+                : 0;
+            prevAreaGeom.set(pAnchor.area.id, { radius: pAnchor.radius, edgeDist });
 
-            const motionState = motionMap.get(pAnchor.area.id)!;
+            const relevantGeometryDisplacement = cameraRotZoomDelta + dRadius + viewportEdgeDelta;
+
+            const motionState = adaptLabelOffsetToGeometry(
+              motionMap,
+              pAnchor.area.id,
+              placementResult.theta,
+              placementResult.offset,
+              pAnchor.radius,
+              boxWidth,
+              boxHeight,
+              relevantGeometryDisplacement,
+              isReentry,
+              prefersReducedMotion
+            );
+
             const rect = computeRenderedLabelRect(
               pAnchor.screenX,
               pAnchor.screenY,
@@ -1561,18 +1592,26 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               boxHeight
             );
 
+            // Suppress lower-priority labels whose geometry-budgeted rendered rect still
+            // overlaps an already-placed higher-priority area label.
+            if (!isPriority && renderedLabelOnlyGrid.queryOverlapArea(rect, 0) > 4.0) {
+              continue;
+            }
+
             obstacleGrid.insert(rect);
             placedLabelsGrid.insert(rect);
+            renderedLabelOnlyGrid.insert(rect);
 
             renderedAreaLabelsRef.current.set(pAnchor.area.id, {
               areaId: pAnchor.area.id,
               name: pAnchor.area.name,
               rect,
               placement: placementResult.placement,
-              candidateIndex: placementResult.candidateIndex,
+              theta: motionState.currentTheta,
               opacity: fadeState.currentOpacity,
             });
 
+            ctx.save();
             ctx.globalAlpha = (isLight ? 0.95 : 0.90) * fadeState.currentOpacity;
 
             // Pill background
@@ -1603,7 +1642,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             ctx.fillText(labelText, textCenterX, rect.y1 + 3);
 
             // File count
-            ctx.font = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+            ctx.font = countFont;
             ctx.fillStyle = isLight ? '#6b7280' : '#9aa3b2';
             ctx.fillText(countText, textCenterX, rect.y1 + 17);
 
@@ -1746,8 +1785,30 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         ctx.restore();
       }
 
-      // If animation is still running, mark dirty and schedule next frame
-      if (cameraAnimRef.current || isAnyLabelTransitionActive || isAnyMotionActive) {
+      // If animation or opacity fade is still running, mark dirty and schedule next frame
+      const rafScheduled = Boolean(cameraAnimRef.current || isAnyLabelTransitionActive);
+      frameSnapshotRef.current = {
+        timestamp: timestamp || performance.now(),
+        camera: { ...cameraRef.current },
+        anchors: Array.from(projectedAreaAnchorsRef.current.values()).map((a) => ({
+          areaId: a.area.id,
+          name: a.area.name,
+          fileCount: a.area.fileCount,
+          screenX: a.screenX,
+          screenY: a.screenY,
+          radius: a.radius,
+          isFront: a.isFront,
+          z: a.proj.z,
+        })),
+        renderedLabels: Array.from(renderedAreaLabelsRef.current.values()),
+        fadeStates: Array.from(labelFadeStatesRef.current.entries()).map(([id, v]) => ({
+          id,
+          ...v,
+        })),
+        isAnyFadeActive: isAnyLabelTransitionActive,
+        rafScheduled,
+      };
+      if (rafScheduled) {
         isDirtyRef.current = true;
         rafIdRef.current = requestAnimationFrame((ts) => renderLoopRef.current(ts));
       }
@@ -1839,7 +1900,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       const list = projData.projectedList;
       for (let i = 0; i < list.length; i++) {
         const pNode = list[i];
-        const screenR = pNode.radius * camera.zoom;
+        const screenR =
+          scope === 'overview' && !isSmallRepo
+            ? Math.min(5.0, pNode.radius * 0.75 * camera.zoom)
+            : pNode.radius * camera.zoom;
         const hitTargetRadius = Math.max(screenR + 4, 10);
         const dist = Math.hypot(pNode.screenX - screenX, pNode.screenY - screenY);
 
@@ -1849,7 +1913,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
       return null;
     },
-    []
+    [scope, isSmallRepo]
   );
 
   const findEdgeAtPoint = useCallback(
@@ -1928,7 +1992,22 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           bestArea = projAnchor.area;
         }
       }
-      return bestArea;
+      if (bestArea) return bestArea;
+
+      // Exact rendered label pill hit-testing aligned with renderedAreaLabelsRef
+      for (const rendered of renderedAreaLabelsRef.current.values()) {
+        const { rect } = rendered;
+        if (
+          screenX >= rect.x1 &&
+          screenX <= rect.x2 &&
+          screenY >= rect.y1 &&
+          screenY <= rect.y2
+        ) {
+          const anchor = projectedAreaAnchorsRef.current.get(rendered.areaId);
+          if (anchor) return anchor.area;
+        }
+      }
+      return null;
     },
     []
   );

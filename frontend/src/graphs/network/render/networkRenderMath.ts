@@ -1111,6 +1111,40 @@ export class LabelCollisionGrid {
     return count;
   }
 
+  /**
+   * Computes total continuous overlap area between `rect` (expanded by optional `margin`)
+   * and nearby obstacles in the spatial grid. Returns 0 when completely clear.
+   */
+  queryOverlapArea(rect: ScreenRect, margin = 0): number {
+    const queryRect: ScreenRect =
+      margin > 0
+        ? {
+            x1: rect.x1 - margin,
+            y1: rect.y1 - margin,
+            x2: rect.x2 + margin,
+            y2: rect.y2 + margin,
+          }
+        : rect;
+    const keys = this.getCellKeys(queryRect);
+    const seen = new Set<ScreenRect>();
+    let totalArea = 0;
+    for (const key of keys) {
+      const cellRects = this.grid.get(key);
+      if (!cellRects) continue;
+      for (let i = 0; i < cellRects.length; i++) {
+        const r = cellRects[i];
+        if (seen.has(r)) continue;
+        seen.add(r);
+        const ox = Math.min(queryRect.x2, r.x2) - Math.max(queryRect.x1, r.x1);
+        const oy = Math.min(queryRect.y2, r.y2) - Math.max(queryRect.y1, r.y1);
+        if (ox > 0 && oy > 0) {
+          totalArea += ox * oy;
+        }
+      }
+    }
+    return totalArea;
+  }
+
   insert(rect: ScreenRect): void {
     const keys = this.getCellKeys(rect);
     for (const key of keys) {

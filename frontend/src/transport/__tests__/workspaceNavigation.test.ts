@@ -42,7 +42,11 @@ describe('Workspace Navigation Transport Hook', () => {
   });
 
   it('dispatches 3d, 2d, temporal, and focus to registered handler and sends correlated ack', async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accepted: true }),
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const received: Array<{ requestId: string; view: string; focus: string | null }> = [];
@@ -99,6 +103,42 @@ describe('Workspace Navigation Transport Hook', () => {
 
     expect(handled).toBe(false);
     expect(handler).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns false when server responds HTTP 200 with accepted: false', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accepted: false }),
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    registerWorkspaceNavigateHandler(() => {});
+
+    const ok = await dispatchWorkspaceNavigate({
+      request_id: 'nav_req_rejected',
+      view: '3d',
+      focus: null,
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('does not send ACK when workspace handler throws', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    registerWorkspaceNavigateHandler(() => {
+      throw new Error('navigation failed');
+    });
+
+    await expect(
+      dispatchWorkspaceNavigate({
+        request_id: 'nav_req_err',
+        view: '2d',
+        focus: 'src/main.rs',
+      })
+    ).rejects.toThrow('navigation failed');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

@@ -247,7 +247,11 @@ export const api = {
       credentials: 'same-origin',
       body: JSON.stringify({ request_id: requestId, client_id: clientId }),
     });
-    return response.ok;
+    if (!response.ok) {
+      return false;
+    }
+    const payload = (await response.json()) as { accepted?: boolean };
+    return payload?.accepted === true;
   },
 
   subscribeToEvents: (
@@ -271,7 +275,9 @@ export const api = {
         if (!e.data || e.data === 'heartbeat') return;
         const parsed = JSON.parse(e.data) as ServerEvent;
         if (parsed.type === 'workspace.navigate') {
-          void dispatchWorkspaceNavigate(parsed.data);
+          void dispatchWorkspaceNavigate(parsed.data).catch(() => {
+            // Handler failures intentionally skip workspace ACK so CLI can fall back cleanly
+          });
         }
         onEvent(parsed);
       } catch (err) {
@@ -290,8 +296,30 @@ export const api = {
       }
     };
 
+    const handlePageHide = () => {
+      if (isExplicitlyClosed) return;
+      try {
+        void fetch('/api/v1/workspace/disconnect', {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: clientId }),
+        });
+      } catch {
+        // Ignore best-effort unload disconnect
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', handlePageHide);
+    }
+
     return () => {
       isExplicitlyClosed = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pagehide', handlePageHide);
+      }
       eventSource.close();
     };
   },

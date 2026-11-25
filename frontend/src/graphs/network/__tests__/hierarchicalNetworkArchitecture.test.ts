@@ -445,7 +445,7 @@ describe('Hierarchical Network Graph Architecture Regression Suite', () => {
     });
 
     it('scales base line width logarithmically with edgeCount', () => {
-      // Formula: Math.min(4.5, Math.max(1.8, 1.2 + 0.7 * Math.log2(1 + edgeCount)))
+      // Formula: Math.min(3.4, Math.max(1.3, 0.95 + 0.55 * Math.log2(1 + edgeCount)))
       const edge1 = mockAreaEdge(1);
       const edge3 = mockAreaEdge(3);
       const edge7 = mockAreaEdge(7);
@@ -462,8 +462,8 @@ describe('Hierarchical Network Graph Architecture Regression Suite', () => {
       expect(v3.width).toBeGreaterThan(v1.width);
       expect(v7.width).toBeGreaterThan(v3.width);
       expect(v15.width).toBeGreaterThan(v7.width);
-      // Clamped at 4.5
-      expect(v100.width).toBe(4.5);
+      // Clamped at 3.4
+      expect(v100.width).toBe(3.4);
     });
 
     it('elevates selected area edges to priority 150 with full opacity and electric cyan/sky color', () => {
@@ -478,12 +478,12 @@ describe('Hierarchical Network Graph Architecture Regression Suite', () => {
       expect(visualLight.color).toBe('#0284c7');
     });
 
-    it('elevates hovered area edges to priority 120 with high opacity and electric indigo color', () => {
+    it('elevates hovered area edges to priority 120 with high opacity and brand accent color', () => {
       const edge = mockAreaEdge(5);
       const visualDark = resolveAreaEdgeVisual(edge, false, true, 1.0, 'dark');
       expect(visualDark.priority).toBe(120);
       expect(visualDark.alpha).toBe(0.95);
-      expect(visualDark.color).toBe('#818cf8');
+      expect(visualDark.color).toBe('#5e6ad2');
       expect(visualDark.showArrow).toBe(true);
 
       const visualLight = resolveAreaEdgeVisual(edge, false, true, 1.0, 'light');

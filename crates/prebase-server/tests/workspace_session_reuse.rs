@@ -282,7 +282,7 @@ async fn test_workspace_navigate_ack_timeout_and_auth_boundaries() {
     let nav_json: serde_json::Value = serde_json::from_slice(&nav_bytes).unwrap();
     assert_eq!(nav_json["delivered"], true);
     assert_eq!(nav_json["acknowledged"], false);
-    assert_eq!(nav_json["active_clients"], 1);
+    assert_eq!(nav_json["active_clients"], 0);
 
     // 3. Unknown request_id ack returns ok with acknowledged: false
     let stale_ack_req = Request::builder()
@@ -456,4 +456,82 @@ async fn test_single_target_tab_routing_ignores_non_target_ack() {
     drop(sse_old);
     drop(sse_new);
     let _ = server.shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_multi_slot_bootstrap_anonymous_sse_exclusion_and_server_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = start_server(
+        temp.path().to_path_buf(),
+        "test-repo".into(),
+        "repo-sec".into(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let state = server.state.clone();
+    let app = create_router(state.clone());
+
+    // 1. Multi-slot bootstrap: minting a second token does NOT invalidate the initial token
+    let boot2 = state.mint_bootstrap_token();
+    assert!(state
+        .exchange_bootstrap_token(&server.bootstrap_token)
+        .is_some());
+    assert!(state.exchange_bootstrap_token(&boot2).is_some());
+    // Single-use still enforced
+    assert!(state.exchange_bootstrap_token(&boot2).is_none());
+
+    // 2. Anonymous SSE connections are excluded from workspace client count and navigation
+    let anon_sse = Request::builder()
+        .uri("/api/v1/events")
+        .header(header::HOST, format!("127.0.0.1:{}", server.port))
+        .header("x-prebase-session", &server.session_token)
+        .body(Body::empty())
+        .unwrap();
+    let _anon_resp = app.clone().oneshot(anon_sse).await.unwrap();
+    assert_eq!(state.active_sse_client_count(), 0);
+    assert!(state.most_recent_sse_client().is_none());
+
+    // 3. /api/v1/server/identity & /api/v1/server/shutdown enforce X-Prebase-Session (403 on cookie)
+    let cookie_id = Request::builder()
+        .uri("/api/v1/server/identity")
+        .header(header::HOST, format!("127.0.0.1:{}", server.port))
+        .header(
+            header::COOKIE,
+            format!("prebase_session_{}={}", server.port, server.session_token),
+        )
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(cookie_id).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let cli_id = Request::builder()
+        .uri("/api/v1/server/identity")
+        .header(header::HOST, format!("127.0.0.1:{}", server.port))
+        .header("x-prebase-session", &server.session_token)
+        .body(Body::empty())
+        .unwrap();
+    let id_resp = app.clone().oneshot(cli_id).await.unwrap();
+    assert_eq!(id_resp.status(), StatusCode::OK);
+    let id_bytes = axum::body::to_bytes(id_resp.into_body(), 1024 * 64)
+        .await
+        .unwrap();
+    let id_json: serde_json::Value = serde_json::from_slice(&id_bytes).unwrap();
+    assert_eq!(id_json["repository_id"], "repo-sec");
+    assert_eq!(id_json["pid"], std::process::id());
+
+    let cli_shutdown = Request::builder()
+        .method("POST")
+        .uri("/api/v1/server/shutdown")
+        .header(header::HOST, format!("127.0.0.1:{}", server.port))
+        .header("x-prebase-session", &server.session_token)
+        .body(Body::from("{}"))
+        .unwrap();
+    let shut_resp = app.clone().oneshot(cli_shutdown).await.unwrap();
+    assert_eq!(shut_resp.status(), StatusCode::OK);
+    assert!(state.is_shutting_down());
 }

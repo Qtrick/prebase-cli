@@ -761,12 +761,10 @@ body,
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: rgba(13, 18, 31, 0.82);
+  background: var(--bg-surface-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
   font-size: 12px;
   user-select: none;
   animation: fadeIn 0.18s ease-out;
@@ -2011,29 +2009,31 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: rgba(56, 189, 248, 0.1);
-  border-bottom: 1px solid rgba(56, 189, 248, 0.25);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
   padding: 8px 18px;
   font-size: 12px;
-  color: #e0f2fe;
+  color: var(--text-primary);
 }
 
 .clear-filter-btn {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 
 .clear-filter-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
 .inspector-action-buttons {

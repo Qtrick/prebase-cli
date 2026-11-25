@@ -842,6 +842,13 @@ export const App: React.FC = () => {
       }
 
       if (focus) {
+        // Clear stale selection/overlay state when CLI explicitly navigates to a new focus target
+        setSelectedEdge(null);
+        setSelectedCycleGroup(null);
+        setActiveDependencyPath(null);
+        setSelectedCommit(null);
+        setRevealRequest(null);
+
         const currentSnap = snapshotRef.current;
         if (currentSnap) {
           pendingNavFocusRef.current = null;

@@ -1,5 +1,6 @@
 import { DependencyEdge } from '../../../types/graph';
 import { AreaEdge } from '../../../utils/repositoryAreas';
+import { getCanvasThemeTokens } from '../../../utils/canvasTheme';
 
 export interface EdgeVisualDescriptor {
   color: string;
@@ -17,13 +18,13 @@ export function resolveAreaEdgeVisual(
   zoom: number,
   theme: 'dark' | 'light' = 'dark'
 ): EdgeVisualDescriptor {
-  const isLight = theme === 'light';
-  const baseWeight = Math.min(4.5, Math.max(1.8, 1.2 + 0.7 * Math.log2(1 + areaEdge.edgeCount)));
+  const tokens = getCanvasThemeTokens(theme);
+  const baseWeight = Math.min(3.4, Math.max(1.3, 0.95 + 0.55 * Math.log2(1 + areaEdge.edgeCount)));
 
   if (isSelected) {
     return {
-      color: isLight ? '#0284c7' : '#38bdf8',
-      width: Math.max(3.0, (baseWeight + 1.5) / zoom),
+      color: tokens.accentSky,
+      width: Math.max(2.6, (baseWeight + 1.4) / zoom),
       alpha: 1.0,
       dash: [],
       priority: 150,
@@ -33,8 +34,8 @@ export function resolveAreaEdgeVisual(
 
   if (isHovered) {
     return {
-      color: isLight ? '#4f46e5' : '#818cf8',
-      width: Math.max(2.5, (baseWeight + 1.0) / zoom),
+      color: tokens.accentBrand,
+      width: Math.max(2.2, (baseWeight + 0.9) / zoom),
       alpha: 0.95,
       dash: [],
       priority: 120,
@@ -43,9 +44,9 @@ export function resolveAreaEdgeVisual(
   }
 
   return {
-    color: isLight ? 'rgba(79, 70, 229, 0.60)' : 'rgba(129, 140, 248, 0.60)',
-    width: Math.max(1.6, baseWeight / Math.max(0.6, zoom)),
-    alpha: 0.60,
+    color: tokens.areaEdgeDefault,
+    width: Math.max(1.2, baseWeight / Math.max(0.6, zoom)),
+    alpha: 0.38,
     dash: [],
     priority: 50,
     showArrow: zoom >= 0.45,

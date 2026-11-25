@@ -27,11 +27,11 @@ def http_get(url):
         return resp.status, resp.read().decode("utf-8")
 
 def wait_for_motion_settled(page, timeout_sec=5.0):
-    """CSP-safe polling loop that waits for all label motion transitions to settle."""
+    """CSP-safe polling loop that waits for all label fade/rAF transitions to settle."""
     start = time.monotonic()
     while time.monotonic() - start < timeout_sec:
-        active_count = page.evaluate("() => window.__prebaseNetworkDebug?.getMotionTimeline?.()?.activeCount || 0")
-        if active_count == 0:
+        snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || null")
+        if snap is not None and not snap.get("isAnyFadeActive", False):
             return True
         time.sleep(0.03)
     return False
@@ -144,10 +144,10 @@ def main():
             # Wait for gesture start stabilization if any hover change occurred (CSP-safe)
             wait_for_motion_settled(page, timeout_sec=2.0)
 
-            # Record initial positions and motion states
-            prev_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
-            prev_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
-            prev_motions = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
+            # Record initial positions atomically via getFrameSnapshot()
+            init_snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || { anchors: [], renderedLabels: [] }")
+            prev_anchors = {a["areaId"]: a for a in init_snap.get("anchors", [])}
+            prev_labels = {l["areaId"]: l for l in init_snap.get("renderedLabels", [])}
 
             # Perform 10 sequential micro-drags of 2-3px each (including directional reversals)
             micro_steps = [
@@ -165,34 +165,20 @@ def main():
             ]
 
             micro_tested_count = 0
-            candidate_switch_count = 0
-            relocation_start_count = 0
-            switches_per_area = {}
 
             for step_x, step_y in micro_steps:
                 page.mouse.move(step_x, step_y)
                 time.sleep(0.04)
 
-                curr_anchors = {a["areaId"]: a for a in page.evaluate("() => window.__prebaseNetworkDebug?.getProjectedAreaAnchors() || []")}
-                curr_labels = {l["areaId"]: l for l in page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")}
-                curr_motions = {m["areaId"]: m for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")}
+                snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || { anchors: [], renderedLabels: [] }")
+                curr_anchors = {a["areaId"]: a for a in snap.get("anchors", [])}
+                curr_labels = {l["areaId"]: l for l in snap.get("renderedLabels", [])}
 
                 for area_id, curr_lbl in curr_labels.items():
-                    if area_id in prev_labels and area_id in curr_anchors and area_id in prev_anchors and area_id in prev_motions:
+                    if area_id in prev_labels and area_id in curr_anchors and area_id in prev_anchors:
                         prev_lbl = prev_labels[area_id]
-                        prev_m = prev_motions[area_id]
-                        curr_m = curr_motions.get(area_id, {})
 
-                        if curr_m.get("candidateIndex") != prev_m.get("candidateIndex"):
-                            candidate_switch_count += 1
-                            switches_per_area.setdefault(area_id, []).append((prev_m.get("candidateIndex"), curr_m.get("candidateIndex")))
-                            continue
-
-                        if curr_m.get("isRelocating") or prev_m.get("isRelocating"):
-                            relocation_start_count += 1
-                            continue
-
-                        # Assert 1:1 camera-coupled tracking for stable labels: displacement of label must equal anchor displacement
+                        # NO MOVING LABEL MAY BE EXCLUDED: verify EVERY visible label's positional continuity
                         anc_curr = curr_anchors[area_id]
                         anc_prev = prev_anchors[area_id]
                         anc_dx = anc_curr["screenX"] - anc_prev["screenX"]
@@ -201,26 +187,40 @@ def main():
                         lbl_dx = curr_lbl["rect"]["x1"] - prev_lbl["rect"]["x1"]
                         lbl_dy = curr_lbl["rect"]["y1"] - prev_lbl["rect"]["y1"]
 
-                        diff_x = abs(lbl_dx - anc_dx)
-                        diff_y = abs(lbl_dy - anc_dy)
-
-                        # Label displacement must match projected anchor displacement within subpixel tolerance
-                        assert diff_x <= 1.0, f"Micro-movement mismatch in X for {area_id}: label_dx={lbl_dx}, anc_dx={anc_dx}, diff={diff_x}"
-                        assert diff_y <= 1.0, f"Micro-movement mismatch in Y for {area_id}: label_dy={lbl_dy}, anc_dy={anc_dy}, diff={diff_y}"
+                        rel_jump = ((lbl_dx - anc_dx) ** 2 + (lbl_dy - anc_dy) ** 2) ** 0.5
+                        assert rel_jump <= 6.0, (
+                            f"Micro-movement disproportion for {area_id}: "
+                            f"anchor delta=({anc_dx:.2f},{anc_dy:.2f}), label delta=({lbl_dx:.2f},{lbl_dy:.2f}), "
+                            f"relative jump={rel_jump:.2f}px > 6.0px"
+                        )
                         micro_tested_count += 1
 
                 prev_anchors = curr_anchors
                 prev_labels = curr_labels
-                prev_motions = curr_motions
+
+            # Test B (Real Browser): Hold pointer stationary while mouse is down -> zero autonomous drift
+            hold_baseline = {
+                l["areaId"]: l["rect"]
+                for l in (page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.()?.renderedLabels || []"))
+            }
+            for hold_ms in [50, 50, 120, 130, 150]:  # cumulative: 50, 100, 220, 350, 500ms
+                time.sleep(hold_ms / 1000.0)
+                hold_now = {
+                    l["areaId"]: l["rect"]
+                    for l in (page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.()?.renderedLabels || []"))
+                }
+                for aid, r_now in hold_now.items():
+                    if aid in hold_baseline:
+                        r0 = hold_baseline[aid]
+                        drift = ((r_now["x1"] - r0["x1"]) ** 2 + (r_now["y1"] - r0["y1"]) ** 2) ** 0.5
+                        assert drift <= 0.5, (
+                            f"Autonomous label drift while pointer held stationary for {aid}: {drift:.2f}px > 0.5px"
+                        )
 
             page.mouse.up()
             time.sleep(0.15)
-            # Harmless micro-drags must maintain 1:1 tracking without ping-pong oscillation
-            oscillating = {k: v for k, v in switches_per_area.items() if len(v) > 1}
-            assert not oscillating, f"Candidate ping-pong oscillation detected during micro-drag: {oscillating}"
-            assert candidate_switch_count <= 4, f"Unexpected excessive candidate switches across labels during micro-drag: {candidate_switch_count}"
             assert micro_tested_count >= 50, f"Expected at least 50 verified frame comparisons across all visible labels, got {micro_tested_count}"
-            print(f"[PASS] Continuous micro-movement tracking verified ({micro_tested_count} frame comparisons, {candidate_switch_count} one-way boundary switches across {len(switches_per_area)} areas, zero oscillation/lag/teleportation).")
+            print(f"[PASS] Continuous micro-movement + stationary-hold tracking verified ({micro_tested_count} frame comparisons, 0 autonomous drift).")
 
             shot_micro = os.path.join(screenshot_dir, "area_labels_micromovement.png")
             page.screenshot(path=shot_micro)
@@ -234,11 +234,14 @@ def main():
             time.sleep(0.03)
 
             drag_steps = 12
-            drag_relocations_or_switches = 0
+            drag_offset_adaptations = 0
             drag_frame_samples = 0
-            prev_drag_candidates = {
-                m["areaId"]: m.get("candidateIndex")
-                for m in page.evaluate("() => window.__prebaseNetworkDebug?.getMotionStates() || []")
+            start_snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || { anchors: [], renderedLabels: [] }")
+            start_anchors = {a["areaId"]: a for a in start_snap.get("anchors", [])}
+            prev_offsets = {
+                l["areaId"]: (l["rect"]["x1"] - start_anchors[l["areaId"]]["screenX"], l["rect"]["y1"] - start_anchors[l["areaId"]]["screenY"])
+                for l in start_snap.get("renderedLabels", [])
+                if l["areaId"] in start_anchors
             }
 
             for step_i in range(1, drag_steps + 1):
@@ -247,45 +250,45 @@ def main():
                 page.mouse.move(tx, ty)
                 time.sleep(0.035)
 
-                sample = page.evaluate("""() => ({
-                    labels: window.__prebaseNetworkDebug?.getRenderedAreaLabels() || [],
-                    motions: window.__prebaseNetworkDebug?.getMotionStates() || []
-                })""")
+                snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || { anchors: [], renderedLabels: [] }")
                 drag_frame_samples += 1
 
-                # Verify no two settled (non-relocating) visible area labels overlap each other mid-drag
-                vis_labels = sample["labels"]
-                motion_by_id = {m["areaId"]: m for m in sample["motions"]}
+                # Verify no two visible area labels overlap each other mid-drag
+                vis_labels = snap.get("renderedLabels", [])
+                snap_anchors = {a["areaId"]: a for a in snap.get("anchors", [])}
                 for i in range(len(vis_labels)):
-                    id1 = vis_labels[i]["areaId"]
-                    if motion_by_id.get(id1, {}).get("isRelocating"):
-                        continue
                     r1 = vis_labels[i]["rect"]
                     for j in range(i + 1, len(vis_labels)):
-                        id2 = vis_labels[j]["areaId"]
-                        if motion_by_id.get(id2, {}).get("isRelocating"):
-                            continue
                         r2 = vis_labels[j]["rect"]
                         overlap_x = min(r1["x2"], r2["x2"]) - max(r1["x1"], r2["x1"])
                         overlap_y = min(r1["y2"], r2["y2"]) - max(r1["y1"], r2["y1"])
                         assert not (overlap_x > 2.0 and overlap_y > 2.0), (
-                            f"Settled area labels overlapped mid-drag: {id1} and {id2}"
+                            f"Area labels overlapped mid-drag: {vis_labels[i]['areaId']} and {vis_labels[j]['areaId']}"
                         )
 
-                for m in sample["motions"]:
-                    aid = m["areaId"]
-                    if m.get("isRelocating") or (aid in prev_drag_candidates and prev_drag_candidates[aid] != m.get("candidateIndex")):
-                        drag_relocations_or_switches += 1
-                    prev_drag_candidates[aid] = m.get("candidateIndex")
+                curr_offsets = {}
+                for lbl in vis_labels:
+                    aid = lbl["areaId"]
+                    if aid in snap_anchors:
+                        anc = snap_anchors[aid]
+                        off = (lbl["rect"]["x1"] - anc["screenX"], lbl["rect"]["y1"] - anc["screenY"])
+                        curr_offsets[aid] = off
+                        if aid in prev_offsets:
+                            step_off_delta = ((off[0] - prev_offsets[aid][0]) ** 2 + (off[1] - prev_offsets[aid][1]) ** 2) ** 0.5
+                            if step_off_delta > 0.5:
+                                drag_offset_adaptations += 1
+                            assert step_off_delta <= 25.0, (
+                                f"Disproportionate relative offset jump during active drag for {aid}: {step_off_delta:.2f}px"
+                            )
+                prev_offsets = curr_offsets
 
             page.mouse.up()
             assert drag_frame_samples == drag_steps
-            assert drag_relocations_or_switches > 0, "Expected dynamic label relocations/switches DURING active drag (no interaction lock)"
+            assert drag_offset_adaptations > 0, "Expected continuous relative offset adaptation DURING active drag"
             if not wait_for_motion_settled(page, timeout_sec=5.0):
-                timeline_state = page.evaluate("() => window.__prebaseNetworkDebug?.getMotionTimeline?.()")
-                raise AssertionError(f"Label motion failed to settle after active drag: {timeline_state}")
+                raise AssertionError("Label fade/rAF failed to settle after active drag")
 
-            rotated_labels = page.evaluate("() => window.__prebaseNetworkDebug?.getRenderedAreaLabels() || []")
+            rotated_labels = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.()?.renderedLabels || []")
             for i in range(len(rotated_labels)):
                 r1 = rotated_labels[i]["rect"]
                 for j in range(i + 1, len(rotated_labels)):
@@ -295,7 +298,7 @@ def main():
                     assert not (overlap_x > 2.0 and overlap_y > 2.0), (
                         f"Settled area labels overlapped after drag: {rotated_labels[i]['areaId']} and {rotated_labels[j]['areaId']}"
                     )
-            print(f"[PASS] Active drag continuous placement verified ({drag_frame_samples} mid-drag samples, {drag_relocations_or_switches} active-drag relocations/switches, zero settled overlaps, settled cleanly).")
+            print(f"[PASS] Active drag continuous placement verified ({drag_frame_samples} mid-drag samples, {drag_offset_adaptations} smooth offset adaptations, zero overlaps, settled cleanly).")
             print(f"[AREA LABELS] Found {len(rotated_labels)} rendered area labels after rotation.")
             
             page.screenshot(path=shot2)

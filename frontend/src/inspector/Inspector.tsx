@@ -1659,7 +1659,10 @@ export const Inspector: React.FC<InspectorProps> = ({
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <ArrowDownLeft size={14} color="#f59e0b" />
-                      <h4>Downstream Impact ({impactAnalysis.total_impact_count} files)</h4>
+                      <h4>
+                        Downstream Impact ({impactAnalysis.total_impact_count}{' '}
+                        {impactAnalysis.total_impact_count === 1 ? 'file' : 'files'})
+                      </h4>
                     </div>
                     {isImpactExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                   </div>

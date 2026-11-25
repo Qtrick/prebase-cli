@@ -313,10 +313,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
         Some(Commands::Status { .. }) => {
-            run_status(&canonical_root, args.json)?;
+            run_status(&canonical_root, &repo_id, args.json).await?;
         }
         Some(Commands::Stop { .. }) => {
-            run_stop(&canonical_root, args.json)?;
+            run_stop(&canonical_root, &repo_id, args.json).await?;
         }
         Some(Commands::Map {
             view,

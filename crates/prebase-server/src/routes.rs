@@ -548,14 +548,72 @@ fn require_cli_session_header(
     Ok(())
 }
 
+#[derive(Deserialize, Default)]
+pub struct MintBootstrapRequest {
+    #[serde(default)]
+    pub mark_launch_pending: bool,
+}
+
 pub async fn handle_mint_bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    payload: Option<Json<MintBootstrapRequest>>,
 ) -> Result<Json<MintBootstrapResponse>, (StatusCode, &'static str)> {
     require_cli_session_header(&headers, &state)?;
 
+    if payload.as_ref().is_some_and(|p| p.mark_launch_pending) {
+        state.mark_launch_pending(Duration::from_secs(3));
+    }
+
     let bootstrap_token = state.mint_bootstrap_token();
     Ok(Json(MintBootstrapResponse { bootstrap_token }))
+}
+
+#[derive(Serialize)]
+pub struct ServerIdentityResponse {
+    pub pid: u32,
+    pub port: u16,
+    pub repository_id: String,
+    pub canonical_root: String,
+    pub active_workspace_clients: usize,
+    pub launch_pending: bool,
+}
+
+pub async fn handle_server_identity(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ServerIdentityResponse>, (StatusCode, &'static str)> {
+    require_cli_session_header(&headers, &state)?;
+
+    Ok(Json(ServerIdentityResponse {
+        pid: std::process::id(),
+        port: state.allocated_port,
+        repository_id: state.repo_id.clone(),
+        canonical_root: state.canonical_root.display().to_string(),
+        active_workspace_clients: state.active_sse_client_count(),
+        launch_pending: state.is_launch_pending(),
+    }))
+}
+
+#[derive(Serialize)]
+pub struct ServerShutdownResponse {
+    pub shutting_down: bool,
+    pub pid: u32,
+}
+
+pub async fn handle_server_shutdown(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ServerShutdownResponse>, (StatusCode, &'static str)> {
+    require_cli_session_header(&headers, &state)?;
+
+    state.set_shutting_down();
+    state.shutdown_notify.notify_waiters();
+
+    Ok(Json(ServerShutdownResponse {
+        shutting_down: true,
+        pid: std::process::id(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -606,58 +664,90 @@ pub async fn handle_workspace_navigate(
         None => None,
     };
 
-    let active_clients = state.active_sse_client_count();
-    let Some(target_client_id) = state.most_recent_sse_client() else {
-        return Ok(Json(WorkspaceNavigateResponse {
-            delivered: false,
-            acknowledged: false,
-            active_clients: 0,
-            client_id: None,
-            request_id: None,
-        }));
-    };
-    if active_clients == 0 {
-        return Ok(Json(WorkspaceNavigateResponse {
-            delivered: false,
-            acknowledged: false,
-            active_clients: 0,
-            client_id: None,
-            request_id: None,
-        }));
-    }
-
-    let request_id = format!("nav_{}", &crate::auth::generate_bootstrap_token()[..24]);
-    let rx = state.register_nav_ack(request_id.clone(), target_client_id.clone());
-
-    let _ = state
-        .event_sender
-        .send(crate::state::ServerEvent::WorkspaceNavigate {
-            request_id: request_id.clone(),
-            target_client_id: Some(target_client_id),
-            view: view.to_string(),
-            focus,
-        });
-
-    let wait_ms = payload.timeout_ms.unwrap_or(1500).clamp(100, 5000);
-    match tokio::time::timeout(Duration::from_millis(wait_ms), rx).await {
-        Ok(Ok(client_id)) => Ok(Json(WorkspaceNavigateResponse {
-            delivered: true,
-            acknowledged: true,
-            active_clients: state.active_sse_client_count(),
-            client_id: Some(client_id),
-            request_id: Some(request_id),
-        })),
-        _ => {
-            state.remove_nav_ack(&request_id);
-            Ok(Json(WorkspaceNavigateResponse {
-                delivered: true,
-                acknowledged: false,
-                active_clients: state.active_sse_client_count(),
-                client_id: None,
-                request_id: Some(request_id),
-            }))
+    // If the first browser tab was just launched, briefly wait for its SSE workspace registration
+    // so concurrent `prebase` calls reuse it instead of opening duplicate tabs.
+    if state.active_sse_client_count() == 0 && state.is_launch_pending() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2000);
+        while state.active_sse_client_count() == 0
+            && state.is_launch_pending()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+
+    let active_clients = state.active_sse_client_count();
+    let mut target_client_id = match state.most_recent_sse_client() {
+        Some(id) if active_clients > 0 => id,
+        _ => {
+            return Ok(Json(WorkspaceNavigateResponse {
+                delivered: false,
+                acknowledged: false,
+                active_clients: 0,
+                client_id: None,
+                request_id: None,
+            }));
+        }
+    };
+
+    let wait_ms = payload.timeout_ms.unwrap_or(1500).clamp(100, 5000);
+    for attempt in 0..2 {
+        let request_id = format!("nav_{}", &crate::auth::generate_bootstrap_token()[..24]);
+        let rx = state.register_nav_ack(request_id.clone(), target_client_id.clone());
+
+        let _ = state
+            .event_sender
+            .send(crate::state::ServerEvent::WorkspaceNavigate {
+                request_id: request_id.clone(),
+                target_client_id: Some(target_client_id.clone()),
+                view: view.to_string(),
+                focus: focus.clone(),
+            });
+
+        match tokio::time::timeout(Duration::from_millis(wait_ms), rx).await {
+            Ok(Ok(client_id)) => {
+                tracing::info!(
+                    "Workspace navigate ACKed: req={} client={} view={}",
+                    request_id,
+                    client_id,
+                    view
+                );
+                return Ok(Json(WorkspaceNavigateResponse {
+                    delivered: true,
+                    acknowledged: true,
+                    active_clients: state.active_sse_client_count(),
+                    client_id: Some(client_id),
+                    request_id: Some(request_id),
+                }));
+            }
+            _ => {
+                state.remove_nav_ack(&request_id);
+                // Evict unresponsive/closed target and fall back once to any remaining live tab
+                state.remove_sse_client(&target_client_id);
+                if attempt == 0 {
+                    if let Some(next_id) = state.most_recent_sse_client() {
+                        target_client_id = next_id;
+                        continue;
+                    }
+                }
+                return Ok(Json(WorkspaceNavigateResponse {
+                    delivered: true,
+                    acknowledged: false,
+                    active_clients: state.active_sse_client_count(),
+                    client_id: None,
+                    request_id: Some(request_id),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(WorkspaceNavigateResponse {
+        delivered: false,
+        acknowledged: false,
+        active_clients: state.active_sse_client_count(),
+        client_id: None,
+        request_id: None,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -682,6 +772,21 @@ pub async fn handle_workspace_ack(
 
     let accepted = state.ack_nav(&request_id, &client_id);
     Ok(Json(WorkspaceAckResponse { accepted }))
+}
+
+#[derive(Deserialize)]
+pub struct WorkspaceDisconnectRequest {
+    pub client_id: String,
+}
+
+pub async fn handle_workspace_disconnect(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WorkspaceDisconnectRequest>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    let client_id = crate::state::validate_bounded_id(&payload.client_id)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id"))?;
+    state.remove_sse_client(&client_id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // -------------------------------------------------------------
@@ -717,9 +822,16 @@ pub async fn handle_events(
     (StatusCode, &'static str),
 > {
     let client_id = match query.client_id {
-        Some(raw) if !raw.trim().is_empty() => crate::state::validate_bounded_id(&raw)
-            .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id"))?,
-        _ => format!("anon_{}", state.next_sse_conn_id()),
+        Some(raw) if !raw.trim().is_empty() => {
+            let validated = crate::state::validate_bounded_id(&raw)
+                .ok_or((StatusCode::BAD_REQUEST, "Invalid client_id"))?;
+            if validated.starts_with("anon_") {
+                None
+            } else {
+                Some(validated)
+            }
+        }
+        _ => None,
     };
 
     let guard = state.register_sse_client(client_id);

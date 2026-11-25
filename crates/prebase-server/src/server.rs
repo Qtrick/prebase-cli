@@ -35,8 +35,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(handle_health))
         .route("/auth/session", post(handle_auth_session))
         .route("/auth/bootstrap", post(handle_mint_bootstrap))
+        .route("/server/identity", get(handle_server_identity))
+        .route("/server/shutdown", post(handle_server_shutdown))
         .route("/workspace/navigate", post(handle_workspace_navigate))
         .route("/workspace/ack", post(handle_workspace_ack))
+        .route("/workspace/disconnect", post(handle_workspace_disconnect))
         .route("/status", get(handle_status))
         .route("/repository", get(handle_repository))
         .route("/network", get(handle_network))
@@ -96,11 +99,15 @@ pub async fn start_server(
     let app = create_router(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state_shutdown = state.clone();
+    let shutdown_notify = state.shutdown_notify.clone();
 
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
+                tokio::select! {
+                    _ = shutdown_rx => {}
+                    _ = shutdown_notify.notified() => {}
+                }
                 info!("Server received shutdown signal");
                 state_shutdown.set_shutting_down();
             })

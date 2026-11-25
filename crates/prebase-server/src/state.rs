@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prebase_core::index::GraphIndex;
 use prebase_core::model::{GraphSnapshot, IndexingStatus, RepositoryInfo, WatcherHealth};
 use prebase_git::GitEngine;
 use serde::Serialize;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Notify};
 use tracing::info;
 
 pub const GIT_REFRESH_IDLE: u8 = 0;
@@ -16,6 +16,8 @@ pub const GIT_REFRESH_RUNNING: u8 = 1;
 pub const GIT_REFRESH_RUNNING_PENDING: u8 = 2;
 pub const MAX_TRACKED_SSE_CLIENTS: usize = 128;
 pub const MAX_PENDING_NAV_ACKS: usize = 64;
+pub const MAX_BOOTSTRAP_TOKENS: usize = 16;
+pub const BOOTSTRAP_TOKEN_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct PublishedNetworkState {
@@ -73,14 +75,15 @@ pub fn validate_bounded_id(id: &str) -> Option<String> {
 
 pub struct SseClientGuard {
     state: Arc<AppState>,
-    client_id: String,
+    client_id: Option<String>,
     conn_id: u64,
 }
 
 impl Drop for SseClientGuard {
     fn drop(&mut self) {
-        self.state
-            .unregister_sse_client(&self.client_id, self.conn_id);
+        if let Some(ref client_id) = self.client_id {
+            self.state.unregister_sse_client(client_id, self.conn_id);
+        }
     }
 }
 
@@ -91,7 +94,7 @@ pub struct PendingNavAck {
 
 pub struct AppState {
     pub session_token: String,
-    pub bootstrap_token: RwLock<Option<String>>,
+    pub bootstrap_tokens: Mutex<HashMap<String, Instant>>,
     pub allocated_port: u16,
     pub root_path: PathBuf,
     pub canonical_root: PathBuf,
@@ -106,12 +109,14 @@ pub struct AppState {
     pub git_engine: Arc<GitEngine>,
     pub event_sender: broadcast::Sender<ServerEvent>,
     pub is_shutting_down: Arc<AtomicBool>,
+    pub shutdown_notify: Arc<Notify>,
     pub is_analyzing: AtomicBool,
     pub process_output_paths: RwLock<HashSet<PathBuf>>,
     pub git_refresh_state: Arc<AtomicU8>,
     pub sse_clients: Mutex<HashMap<String, u64>>,
     pub sse_conn_counter: AtomicU64,
     pub pending_nav_acks: Mutex<HashMap<String, PendingNavAck>>,
+    pub launch_pending_until: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -135,9 +140,14 @@ impl AppState {
             .canonicalize()
             .unwrap_or_else(|_| root_path.clone());
 
+        let mut initial_tokens = HashMap::new();
+        if let Some(tok) = bootstrap_token {
+            initial_tokens.insert(tok, Instant::now());
+        }
+
         Self {
             session_token,
-            bootstrap_token: RwLock::new(bootstrap_token),
+            bootstrap_tokens: Mutex::new(initial_tokens),
             allocated_port,
             root_path,
             canonical_root: canonical_root.clone(),
@@ -152,12 +162,14 @@ impl AppState {
             git_engine,
             event_sender,
             is_shutting_down: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
             is_analyzing: AtomicBool::new(false),
             process_output_paths: RwLock::new(detect_process_output_paths(&canonical_root)),
             git_refresh_state: Arc::new(AtomicU8::new(GIT_REFRESH_IDLE)),
             sse_clients: Mutex::new(HashMap::new()),
             sse_conn_counter: AtomicU64::new(0),
             pending_nav_acks: Mutex::new(HashMap::new()),
+            launch_pending_until: Mutex::new(None),
         }
     }
 
@@ -210,23 +222,38 @@ impl AppState {
         false
     }
 
-    /// Validates and consumes the single-use bootstrap token, returning the session token.
+    /// Validates and consumes a short-TTL single-use bootstrap token, returning the session token.
     pub fn exchange_bootstrap_token(&self, candidate: &str) -> Option<String> {
-        let mut guard = self.bootstrap_token.write().unwrap();
-        if let Some(ref current) = *guard {
-            if crate::auth::constant_time_eq(current, candidate) {
-                *guard = None; // Single-use consumption
-                return Some(self.session_token.clone());
-            }
+        let now = Instant::now();
+        let mut guard = self.bootstrap_tokens.lock().unwrap();
+        guard.retain(|_, created| now.duration_since(*created) <= BOOTSTRAP_TOKEN_TTL);
+        let matched = guard
+            .keys()
+            .find(|tok| crate::auth::constant_time_eq(tok, candidate))
+            .cloned();
+        if let Some(key) = matched {
+            guard.remove(&key);
+            return Some(self.session_token.clone());
         }
         None
     }
 
-    /// Mint and store a fresh single-use bootstrap token (for `-n`/`--new` or tabless reuse).
+    /// Mint and store a fresh short-TTL single-use bootstrap token (bounded to MAX_BOOTSTRAP_TOKENS).
     pub fn mint_bootstrap_token(&self) -> String {
+        let now = Instant::now();
         let token = crate::auth::generate_bootstrap_token();
-        let mut guard = self.bootstrap_token.write().unwrap();
-        *guard = Some(token.clone());
+        let mut guard = self.bootstrap_tokens.lock().unwrap();
+        guard.retain(|_, created| now.duration_since(*created) <= BOOTSTRAP_TOKEN_TTL);
+        if guard.len() >= MAX_BOOTSTRAP_TOKENS {
+            if let Some(oldest_key) = guard
+                .iter()
+                .min_by_key(|(_, created)| *created)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest_key);
+            }
+        }
+        guard.insert(token.clone(), now);
         token
     }
 
@@ -234,20 +261,23 @@ impl AppState {
         self.sse_conn_counter.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub fn register_sse_client(self: &Arc<Self>, client_id: String) -> SseClientGuard {
+    pub fn register_sse_client(self: &Arc<Self>, client_id: Option<String>) -> SseClientGuard {
         let conn_id = self.next_sse_conn_id();
-        {
-            let mut guard = self.sse_clients.lock().unwrap();
-            if !guard.contains_key(&client_id) && guard.len() >= MAX_TRACKED_SSE_CLIENTS {
-                if let Some(oldest_key) = guard
-                    .iter()
-                    .min_by_key(|(_, cid)| *cid)
-                    .map(|(k, _)| k.clone())
-                {
-                    guard.remove(&oldest_key);
+        if let Some(ref cid) = client_id {
+            {
+                let mut guard = self.sse_clients.lock().unwrap();
+                if !guard.contains_key(cid) && guard.len() >= MAX_TRACKED_SSE_CLIENTS {
+                    if let Some(oldest_key) = guard
+                        .iter()
+                        .min_by_key(|(_, id)| *id)
+                        .map(|(k, _)| k.clone())
+                    {
+                        guard.remove(&oldest_key);
+                    }
                 }
+                guard.insert(cid.clone(), conn_id);
             }
-            guard.insert(client_id.clone(), conn_id);
+            self.clear_launch_pending();
         }
         SseClientGuard {
             state: Arc::clone(self),
@@ -263,19 +293,43 @@ impl AppState {
         }
     }
 
+    pub fn remove_sse_client(&self, client_id: &str) {
+        self.sse_clients.lock().unwrap().remove(client_id);
+    }
+
     pub fn active_sse_client_count(&self) -> usize {
         self.sse_clients.lock().unwrap().len()
     }
 
-    /// Returns the most recently connected non-anonymous SSE client ID (or any client if none).
+    /// Returns the most recently connected authenticated workspace client ID (never anonymous).
     pub fn most_recent_sse_client(&self) -> Option<String> {
         let guard = self.sse_clients.lock().unwrap();
         guard
             .iter()
-            .filter(|(id, _)| !id.starts_with("anon_"))
             .max_by_key(|(_, cid)| *cid)
-            .or_else(|| guard.iter().max_by_key(|(_, cid)| *cid))
             .map(|(id, _)| id.clone())
+    }
+
+    pub fn mark_launch_pending(&self, window: Duration) {
+        let mut guard = self.launch_pending_until.lock().unwrap();
+        *guard = Some(Instant::now() + window);
+    }
+
+    pub fn clear_launch_pending(&self) {
+        let mut guard = self.launch_pending_until.lock().unwrap();
+        *guard = None;
+    }
+
+    pub fn is_launch_pending(&self) -> bool {
+        let mut guard = self.launch_pending_until.lock().unwrap();
+        match *guard {
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                *guard = None;
+                false
+            }
+            None => false,
+        }
     }
 
     pub fn register_nav_ack(
