@@ -111,13 +111,18 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       target = computeLabelTargetOpacity(true, 0.24, false, opacity);
       expect(target).toBe(0.0);
 
-      // Step 7: Fades down over 100ms
+      // Step 7: First frame after being idle at 1.0 clamps initial delta to 16ms (0.08 step -> 0.92)
       stepLabelFade(state, target, 1300, false, 200);
       opacity = state.currentOpacity;
-      expect(opacity).toBeCloseTo(0.50, 2);
+      expect(opacity).toBeCloseTo(0.92, 2);
 
-      // Step 8: Fades completely out over another 100ms
+      // Subsequent 100ms frame advances normally (0.50 step -> 0.42)
       stepLabelFade(state, target, 1400, false, 200);
+      opacity = state.currentOpacity;
+      expect(opacity).toBeCloseTo(0.42, 2);
+
+      // Step 8: Fades completely out over another 85ms
+      stepLabelFade(state, target, 1485, false, 200);
       opacity = state.currentOpacity;
       expect(opacity).toBe(0.0);
 
@@ -187,8 +192,10 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       let target = computeLabelTargetOpacity(false, 0.1, true, state.currentOpacity);
       expect(target).toBe(1.0);
 
-      // 2. Fades up for 100ms to 0.50
+      // 2. First frame after idle at 0.0 clamps initial delta to 16ms (0.08), then 84ms reaches 0.50
       stepLabelFade(state, target, 1100, false, 200);
+      expect(state.currentOpacity).toBeCloseTo(0.08, 2);
+      stepLabelFade(state, target, 1184, false, 200);
       expect(state.currentOpacity).toBeCloseTo(0.50, 2);
 
       // 3. User unhovers: isPriority = false -> target becomes 0.0 immediately
@@ -196,7 +203,7 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       expect(target).toBe(0.0);
 
       // 4. Smoothly fades back down to 0.0 over 100ms
-      const isTransitioning = stepLabelFade(state, target, 1200, false, 200);
+      const isTransitioning = stepLabelFade(state, target, 1284, false, 200);
       expect(isTransitioning).toBe(false);
       expect(state.currentOpacity).toBe(0.0);
     });
@@ -215,6 +222,67 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       // Reaches target within epsilon -> returns false to let animation loop sleep
       expect(stepLabelFade(state, 1.0, 1200, false, 200)).toBe(false);
       expect(state.currentOpacity).toBe(1.0);
+    });
+
+    it('idle-timestamp fix: after being idle at 1.0 for 10,000ms, transitioning to 0.0 steps gradually without snapping', () => {
+      const state: AreaFadeState = {
+        currentOpacity: 1.0,
+        targetOpacity: 1.0,
+        lastTimestamp: 1000,
+      };
+
+      // Simulate 10,000ms idle period before a fade-out begins
+      const isTransitioning = stepLabelFade(state, 0.0, 11000, false, 200);
+
+      // Initial frame delta is clamped to 16ms (step = 16 / 200 = 0.08), not 500ms or 10000ms
+      expect(isTransitioning).toBe(true);
+      expect(state.currentOpacity).toBeCloseTo(0.92, 4);
+      expect(state.currentOpacity).toBeGreaterThan(0.8);
+      expect(state.targetOpacity).toBe(0.0);
+
+      // Subsequent frame advances normally from 0.92 (e.g. +50ms -> step = 0.25 -> 0.67)
+      const isTransitioningNext = stepLabelFade(state, 0.0, 11050, false, 200);
+      expect(isTransitioningNext).toBe(true);
+      expect(state.currentOpacity).toBeCloseTo(0.67, 4);
+    });
+
+    it('idle-timestamp fix: after being idle at 0.0 for 10,000ms, transitioning to 1.0 steps gradually without snapping', () => {
+      const state: AreaFadeState = {
+        currentOpacity: 0.0,
+        targetOpacity: 0.0,
+        lastTimestamp: 1000,
+      };
+
+      const isTransitioning = stepLabelFade(state, 1.0, 11000, false, 200);
+      expect(isTransitioning).toBe(true);
+      expect(state.currentOpacity).toBeCloseTo(0.08, 4);
+      expect(state.currentOpacity).toBeLessThan(0.2);
+    });
+
+    it('mid-flight reversal from partial opacity starts from current opacity without snapping', () => {
+      // Case 1: Fading in (0 -> 1), paused mid-flight at 0.64, then target reverses to 0.0
+      const fadeInState: AreaFadeState = {
+        currentOpacity: 0.64,
+        targetOpacity: 1.0,
+        lastTimestamp: 1000,
+      };
+
+      const isTransitioningOut = stepLabelFade(fadeInState, 0.0, 1020, false, 200);
+      // delta = 20ms -> step = 0.10 -> 0.64 - 0.10 = 0.54 (no snap to 1.0 or 0.0)
+      expect(isTransitioningOut).toBe(true);
+      expect(fadeInState.currentOpacity).toBeCloseTo(0.54, 4);
+
+      // Case 2: Fading out (1 -> 0), at 0.35, then target reverses back to 1.0
+      const fadeOutState: AreaFadeState = {
+        currentOpacity: 0.35,
+        targetOpacity: 0.0,
+        lastTimestamp: 2000,
+      };
+
+      const isTransitioningIn = stepLabelFade(fadeOutState, 1.0, 2020, false, 200);
+      // delta = 20ms -> step = 0.10 -> 0.35 + 0.10 = 0.45
+      expect(isTransitioningIn).toBe(true);
+      expect(fadeOutState.currentOpacity).toBeCloseTo(0.45, 4);
     });
   });
 });

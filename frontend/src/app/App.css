@@ -579,6 +579,11 @@ body,
   right: 0;
 }
 
+.toolbar-dropdown-menu.view-options-menu {
+  min-width: 274px;
+  max-width: min(320px, calc(100vw - 24px));
+}
+
 [data-theme="light"] .toolbar-dropdown-menu {
   background: var(--bg-secondary);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
@@ -596,10 +601,12 @@ body,
 .menu-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   width: 100%;
+  min-height: 30px;
   padding: 6px 10px;
   font-size: 12px;
+  line-height: 1.3;
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -615,11 +622,59 @@ body,
   color: var(--text-primary);
 }
 
+.menu-item:focus-visible {
+  outline: 2px solid var(--accent-brand);
+  outline-offset: -2px;
+  color: var(--text-primary);
+}
+
 .menu-item.selected,
 .menu-item.active {
   color: var(--text-primary);
   font-weight: 500;
   background: var(--bg-selected);
+}
+
+.menu-item-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.menu-item:hover .menu-item-icon {
+  color: var(--text-primary);
+}
+
+.menu-item-label {
+  flex: 1;
+  text-align: left;
+}
+
+.menu-item > svg:last-child:not(:first-child) {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.menu-checkbox-box {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  border: 1.5px solid var(--text-muted);
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.menu-checkbox-box.checked {
+  background: var(--accent-brand);
+  border-color: var(--accent-brand);
+}
+
+.menu-item-checkbox:hover .menu-checkbox-box:not(.checked) {
+  border-color: var(--text-primary);
 }
 
 .menu-shortcut {
@@ -629,8 +684,9 @@ body,
   background: var(--bg-hover);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  padding: 1px 4px;
+  padding: 1px 5px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .menu-divider {

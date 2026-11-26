@@ -50,6 +50,7 @@ export function stepLabelFade(
   prefersReducedMotion = false,
   fadeDurationMs = FADE_DURATION_MS
 ): boolean {
+  const previousTarget = state.targetOpacity;
   state.targetOpacity = targetOpacity;
 
   if (prefersReducedMotion) {
@@ -58,7 +59,22 @@ export function stepLabelFade(
     return false;
   }
 
-  const delta = Math.min(500, Math.max(1, now - (state.lastTimestamp || now)));
+  // If already at target, keep lastTimestamp fresh so a future fade after an
+  // idle period does not consume stale elapsed time on its first frame.
+  if (Math.abs(state.currentOpacity - targetOpacity) <= 0.001) {
+    state.currentOpacity = targetOpacity;
+    state.lastTimestamp = now;
+    return false;
+  }
+
+  // When a new transition starts after being idle at the previous target,
+  // clamp the initial frame delta so long idle gaps never snap the fade.
+  const rawDelta = now - (state.lastTimestamp || now);
+  const wasIdleAtPreviousTarget =
+    previousTarget !== targetOpacity && Math.abs(state.currentOpacity - previousTarget) <= 0.005;
+  const delta = wasIdleAtPreviousTarget
+    ? Math.min(16, Math.max(1, rawDelta))
+    : Math.min(500, Math.max(1, rawDelta));
   state.lastTimestamp = now;
 
   const rate = 1.0 / fadeDurationMs;
@@ -75,5 +91,10 @@ export function stepLabelFade(
     state.currentOpacity = Math.max(targetOpacity, state.currentOpacity - step);
   }
 
-  return Math.abs(state.currentOpacity - targetOpacity) > 0.005;
+  if (Math.abs(state.currentOpacity - targetOpacity) <= 0.005) {
+    state.currentOpacity = targetOpacity;
+    return false;
+  }
+
+  return true;
 }

@@ -60,6 +60,10 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { PreBaseMark } from './PreBaseMark';
+import {
+  readHideGroupLabelsPreference,
+  writeHideGroupLabelsPreference,
+} from '../utils/graphPreferences';
 import './App.css';
 
 export interface InitialUrlParams {
@@ -197,6 +201,19 @@ export const App: React.FC = () => {
     const stored = localStorage.getItem('prebase_theme');
     return stored === 'light' ? 'light' : 'dark';
   });
+
+  // 3D Network Graph preference: hide group labels while holding the graph
+  const [hideGroupLabelsOnMovement, setHideGroupLabelsOnMovement] = useState<boolean>(() =>
+    readHideGroupLabelsPreference()
+  );
+
+  const toggleHideGroupLabelsOnMovement = useCallback(() => {
+    setHideGroupLabelsOnMovement((prev) => {
+      const next = !prev;
+      writeHideGroupLabelsPreference(next);
+      return next;
+    });
+  }, []);
 
   const toggleTheme = useCallback(() => {
     setTheme((prev) => {
@@ -1489,8 +1506,9 @@ export const App: React.FC = () => {
                       <SlidersHorizontal size={14} />
                     </button>
                     {isViewMenuOpen && (
-                      <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
+                      <div className="toolbar-dropdown-menu right-aligned view-options-menu" role="menu" aria-label="View options">
                         <button
+                          type="button"
                           className="menu-item"
                           role="menuitem"
                           onClick={() => {
@@ -1498,10 +1516,12 @@ export const App: React.FC = () => {
                             setIsViewMenuOpen(false);
                           }}
                         >
-                          <ZoomIn size={13} />
-                          <span>Zoom In (+)</span>
+                          <ZoomIn size={13} className="menu-item-icon" aria-hidden="true" />
+                          <span className="menu-item-label">Zoom In</span>
+                          <span className="menu-shortcut">+</span>
                         </button>
                         <button
+                          type="button"
                           className="menu-item"
                           role="menuitem"
                           onClick={() => {
@@ -1509,10 +1529,12 @@ export const App: React.FC = () => {
                             setIsViewMenuOpen(false);
                           }}
                         >
-                          <ZoomOut size={13} />
-                          <span>Zoom Out (-)</span>
+                          <ZoomOut size={13} className="menu-item-icon" aria-hidden="true" />
+                          <span className="menu-item-label">Zoom Out</span>
+                          <span className="menu-shortcut">-</span>
                         </button>
                         <button
+                          type="button"
                           className="menu-item"
                           role="menuitem"
                           onClick={() => {
@@ -1520,10 +1542,12 @@ export const App: React.FC = () => {
                             setIsViewMenuOpen(false);
                           }}
                         >
-                          <Maximize2 size={13} />
-                          <span>Fit View (F)</span>
+                          <Maximize2 size={13} className="menu-item-icon" aria-hidden="true" />
+                          <span className="menu-item-label">Fit View</span>
+                          <span className="menu-shortcut">F</span>
                         </button>
                         <button
+                          type="button"
                           className="menu-item"
                           role="menuitem"
                           onClick={() => {
@@ -1531,11 +1555,33 @@ export const App: React.FC = () => {
                             setIsViewMenuOpen(false);
                           }}
                         >
-                          <RotateCcw size={13} />
-                          <span>Reset Camera (R)</span>
+                          <RotateCcw size={13} className="menu-item-icon" aria-hidden="true" />
+                          <span className="menu-item-label">Reset Camera</span>
+                          <span className="menu-shortcut">R</span>
                         </button>
+                        {networkViewMode === '3d' && (
+                          <>
+                            <div className="menu-divider" />
+                            <button
+                              type="button"
+                              className="menu-item menu-item-checkbox"
+                              role="menuitemcheckbox"
+                              aria-checked={hideGroupLabelsOnMovement}
+                              onClick={toggleHideGroupLabelsOnMovement}
+                            >
+                              <span
+                                className={`menu-checkbox-box ${hideGroupLabelsOnMovement ? 'checked' : ''}`}
+                                aria-hidden="true"
+                              >
+                                {hideGroupLabelsOnMovement && <Check size={10} strokeWidth={3} />}
+                              </span>
+                              <span className="menu-item-label">Hide group labels upon graph movement</span>
+                            </button>
+                          </>
+                        )}
                         <div className="menu-divider" />
                         <button
+                          type="button"
                           id="exportPNG"
                           className="menu-item"
                           role="menuitem"
@@ -1545,8 +1591,8 @@ export const App: React.FC = () => {
                           }}
                           title="Export active view as PNG image"
                         >
-                          <Download size={13} />
-                          <span>Export PNG</span>
+                          <Download size={13} className="menu-item-icon" aria-hidden="true" />
+                          <span className="menu-item-label">Export PNG</span>
                         </button>
                       </div>
                     )}
@@ -1743,6 +1789,7 @@ export const App: React.FC = () => {
                       onAnnounce={setAnnouncement}
                       theme={theme}
                       hideInternalBreadcrumb={true}
+                      hideGroupLabelsOnMovement={hideGroupLabelsOnMovement}
                     />
                   </div>
                   <div

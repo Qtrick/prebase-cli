@@ -51,6 +51,7 @@ import {
   computeCameraDepthShading,
   computeEdgeDepthAttenuation,
   resolveNodeVisualDescriptor,
+  isSupportedPointerGestureButton,
 } from './render/networkRenderMath';
 import { resolveNetworkEdgeVisual, resolveAreaEdgeVisual } from './render/networkEdgeVisual';
 import { getAreaColor, ENTRY_NODE_COLOR } from './fileTypeColors';
@@ -65,20 +66,15 @@ import { computeAreaAnchors } from './layout/sphereLayout';
 import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
 import { fitTextEnd, fitTextMiddle } from '../../utils/textFitting';
 import {
-  resolveAreaLabelPlacement,
-  computeViewportEdgeMargin,
-  LabelPlacementAnchor,
+  computeAttachedLabelRect,
+  isRectInsideViewport,
+  DEFAULT_LABEL_GAP,
 } from './layout/labelPlacement';
 import {
   computeLabelTargetOpacity,
   stepLabelFade,
   AreaFadeState,
 } from './layout/labelFade';
-import {
-  AreaMotionState,
-  adaptLabelOffsetToGeometry,
-  computeRenderedLabelRect,
-} from './layout/labelMotion';
 import { computeDisambiguatedLabels } from '../../utils/pathDisambiguation';
 import { matchesLanguageFilter } from '../../utils/languageFilter';
 import {
@@ -121,6 +117,7 @@ interface NetworkCanvasProps {
   onAnnounce?: (message: string) => void;
   theme?: 'dark' | 'light';
   hideInternalBreadcrumb?: boolean;
+  hideGroupLabelsOnMovement?: boolean;
 }
 
 interface CameraAnimation {
@@ -157,6 +154,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   onAnnounce,
   theme = 'dark',
   hideInternalBreadcrumb = false,
+  hideGroupLabelsOnMovement = false,
 }): React.ReactElement => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -317,19 +315,22 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     areaId: string;
     name: string;
     rect: ScreenRect;
-    placement: string;
-    theta: number;
+    placement: 'below';
     opacity: number;
   }
   const renderedAreaLabelsRef = useRef<Map<string, RenderedAreaLabel>>(new Map());
-  const previouslyRenderedAreaIdsRef = useRef<Set<string>>(new Set());
   const labelFadeStatesRef = useRef<Map<string, AreaFadeState>>(new Map());
-  const labelMotionStatesRef = useRef<Map<string, AreaMotionState>>(new Map());
+  const gestureLabelFadeRef = useRef<AreaFadeState>({
+    currentOpacity: 1.0,
+    targetOpacity: 1.0,
+    lastTimestamp: 0,
+  });
+  const isGraphGestureHeldRef = useRef<boolean>(false);
+  const hideGroupLabelsOnMovementRef = useRef<boolean>(hideGroupLabelsOnMovement);
+  hideGroupLabelsOnMovementRef.current = hideGroupLabelsOnMovement;
   const areaLabelMetricsCacheRef = useRef<
     Map<string, { key: string; labelText: string; countText: string; boxWidth: number; boxHeight: number }>
   >(new Map());
-  const prevCameraGeomRef = useRef<{ orientation: [number, number, number, number]; zoom: number } | null>(null);
-  const prevAreaGeomRef = useRef<Map<string, { radius: number; edgeDist: number }>>(new Map());
   const frameSnapshotRef = useRef<{
     timestamp: number;
     camera: NetworkCamera;
@@ -347,6 +348,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     fadeStates: (AreaFadeState & { id: string })[];
     isAnyFadeActive: boolean;
     rafScheduled: boolean;
+    isGestureHeld: boolean;
+    hideGroupLabelsOnMovement: boolean;
+    gestureLabelOpacity: number;
   } | null>(null);
 
   const renderedEdgesRef = useRef<{
@@ -385,20 +389,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             id: k,
             ...v,
           })),
-        getMotionStates: () =>
-          Array.from(labelMotionStatesRef.current.entries()).map(([k, v]) => ({
-            areaId: k,
-            currentTheta: v.currentTheta,
-            targetTheta: v.targetTheta,
-            currentOffset: { ...v.currentOffset },
-            targetOffset: { ...v.targetOffset },
-          })),
-        getMotionTimeline: () => ({
-          startTime: 0,
-          durationMs: 0,
-          activeCount: 0,
-          activeAreaIds: [],
-        }),
+        isGestureHeld: () => isGraphGestureHeldRef.current,
+        getHideGroupLabelsOnMovement: () => hideGroupLabelsOnMovementRef.current,
+        getGestureLabelOpacity: () => gestureLabelFadeRef.current.currentOpacity,
         getRenderedEdgesCount: () => ({
           fileEdges: renderedEdgesRef.current.fileEdges.length,
           areaEdges: renderedEdgesRef.current.areaEdges.length,
@@ -436,7 +429,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     };
   }, [keepGraphCentered, sphereRadius, theme, scope, selectedAreaId, selectedAreaEdge, repoStructure]);
 
-  // Reconcile label fade and motion states when repository structure or scope updates
+  // Reconcile label fade and cached text metrics when repository structure or scope updates
   useEffect(() => {
     const validAreaIds = new Set(repoStructure.areas.map((a) => a.id));
     for (const id of labelFadeStatesRef.current.keys()) {
@@ -444,17 +437,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         labelFadeStatesRef.current.delete(id);
       }
     }
-    for (const id of labelMotionStatesRef.current.keys()) {
+    for (const id of areaLabelMetricsCacheRef.current.keys()) {
       if (!validAreaIds.has(id)) {
-        labelMotionStatesRef.current.delete(id);
-        prevAreaGeomRef.current.delete(id);
         areaLabelMetricsCacheRef.current.delete(id);
       }
     }
     if (scope !== 'overview') {
       renderedAreaLabelsRef.current.clear();
-      prevAreaGeomRef.current.clear();
-      previouslyRenderedAreaIdsRef.current.clear();
     }
   }, [repoStructure, scope]);
   const applyCenterLock = useCallback(
@@ -1409,37 +1398,33 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
         }
 
-        // 4.5 Draw Architectural Area Labels (Continuous Geometry-Driven Placement + Smooth Depth Fade)
+        // 4.5 Draw Architectural Area Labels (Fixed Anchor Attachment + Collision Visibility + Hold Fade)
         isAnyLabelTransitionActive = false;
         renderedAreaLabelsRef.current.clear();
 
         if (scope === 'overview' && !isSmallRepo) {
           const now = timestamp || performance.now();
           const fadeMap = labelFadeStatesRef.current;
-          const motionMap = labelMotionStatesRef.current;
           const metricsCache = areaLabelMetricsCacheRef.current;
-          const prevAreaGeom = prevAreaGeomRef.current;
-          const placedLabelsGrid = new LabelCollisionGrid(90);
-          const renderedLabelOnlyGrid = new LabelCollisionGrid(90);
+          const intendedLabelsGrid = new LabelCollisionGrid(90);
 
-          // Pure-pan-invariant camera rotation & zoom delta for geometry-budgeted adaptation
-          const currOri: [number, number, number, number] = camera.orientation ?? [0, 0, 0, 1];
-          let cameraRotZoomDelta = 0;
-          if (prevCameraGeomRef.current) {
-            const po = prevCameraGeomRef.current.orientation;
-            const dot = Math.min(
-              1,
-              Math.abs(po[0] * currOri[0] + po[1] * currOri[1] + po[2] * currOri[2] + po[3] * currOri[3])
-            );
-            const angleDelta = 2 * Math.acos(dot);
-            cameraRotZoomDelta =
-              angleDelta * sphereRadius + Math.abs(camera.zoom - prevCameraGeomRef.current.zoom) * 100;
+          const shouldHideOnHold =
+            hideGroupLabelsOnMovementRef.current && isGraphGestureHeldRef.current;
+          const gestureTargetOpacity = shouldHideOnHold ? 0.0 : 1.0;
+          const gestureTransitionActive = stepLabelFade(
+            gestureLabelFadeRef.current,
+            gestureTargetOpacity,
+            now,
+            prefersReducedMotion
+          );
+          if (gestureTransitionActive) {
+            isAnyLabelTransitionActive = true;
           }
-          prevCameraGeomRef.current = { orientation: [currOri[0], currOri[1], currOri[2], currOri[3]], zoom: camera.zoom };
+          const gestureOpacity = gestureLabelFadeRef.current.currentOpacity;
 
-          // Populate placedLabelsGrid with all area anchor badges so labels never cover anchor monograms
+          // Populate intendedLabelsGrid with all area anchor badges so labels never cover anchor monograms
           for (const a of areaAnchorsMap.values()) {
-            placedLabelsGrid.insert({
+            intendedLabelsGrid.insert({
               x1: a.screenX - a.radius - 2,
               y1: a.screenY - a.radius - 2,
               x2: a.screenX + a.radius + 2,
@@ -1447,6 +1432,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             });
           }
 
+          // Deterministic priority order: selected > hovered > file count > area id
           const allAnchors = Array.from(areaAnchorsMap.values());
           allAnchors.sort((a, b) => {
             if (a.area.id === selectedAreaId) return -1;
@@ -1459,7 +1445,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             return a.area.id.localeCompare(b.area.id);
           });
 
-          const areaFont = `600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          const areaFont = `600 11.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
           const countFont = `500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
 
           for (let i = 0; i < allAnchors.length; i++) {
@@ -1468,17 +1454,65 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             const isHovered = pAnchor.area.id === hoveredAreaId;
             const isPriority = isSelected || isHovered;
 
+            // Cached label text measurements (zero per-frame ctx.measureText on cache hit)
+            const countText =
+              pAnchor.area.fileCount === 1 ? '1 file' : `${pAnchor.area.fileCount} files`;
+            const cacheKey = `${pAnchor.area.name}\0${countText}`;
+            let cachedMetrics = metricsCache.get(pAnchor.area.id);
+            if (!cachedMetrics || cachedMetrics.key !== cacheKey) {
+              ctx.save();
+              ctx.font = areaFont;
+              const labelText = fitTextEnd(pAnchor.area.name, 156, (s) => ctx.measureText(s).width, areaFont);
+              const nameWidth = ctx.measureText(labelText).width;
+              ctx.font = countFont;
+              const countWidth = ctx.measureText(countText).width;
+              ctx.restore();
+              cachedMetrics = {
+                key: cacheKey,
+                labelText,
+                countText,
+                boxWidth: Math.max(nameWidth, countWidth) + 14,
+                boxHeight: 30,
+              };
+              metricsCache.set(pAnchor.area.id, cachedMetrics);
+            }
+            const { labelText, boxWidth, boxHeight } = cachedMetrics;
+
+            // Fixed screen-space attachment directly beneath the projected anchor
+            const rect = computeAttachedLabelRect(pAnchor, boxWidth, boxHeight, DEFAULT_LABEL_GAP);
+
             const existingFadeState = fadeMap.get(pAnchor.area.id);
-            const targetOpacity = computeLabelTargetOpacity(
+            const currentIndividualOpacity = existingFadeState ? existingFadeState.currentOpacity : 0.0;
+
+            const depthTarget = computeLabelTargetOpacity(
               pAnchor.isFront,
               pAnchor.depthShading.prominence,
               isPriority,
-              existingFadeState ? existingFadeState.currentOpacity : 0.0
+              currentIndividualOpacity
             );
 
+            const viewportEligible = isPriority
+              ? rect.x2 > 0 && rect.x1 < width && rect.y2 > 0 && rect.y1 < height
+              : isRectInsideViewport(rect, width, height, insets, 2);
+
+            let collisionEligible = true;
+            if (!isPriority && depthTarget > 0.5 && viewportEligible) {
+              const wasVisible = currentIndividualOpacity > 0.05;
+              // Hysteresis: stricter margin to enter, small tolerance to stay visible
+              collisionEligible = wasVisible
+                ? intendedLabelsGrid.queryOverlapArea(rect, 0) <= 16
+                : intendedLabelsGrid.queryOverlapArea(rect, 3) <= 2;
+            }
+
+            const intendedVisible = depthTarget > 0.5 && viewportEligible && collisionEligible;
+            if (intendedVisible) {
+              intendedLabelsGrid.insert(rect);
+              obstacleGrid.insert(rect);
+            }
+
+            const targetOpacity = intendedVisible ? 1.0 : 0.0;
             let fadeState = existingFadeState;
             if (!fadeState) {
-              // Initial state: front-facing labels start immediately visible at targetOpacity
               fadeState = {
                 currentOpacity: targetOpacity,
                 targetOpacity,
@@ -1497,158 +1531,59 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               isAnyLabelTransitionActive = true;
             }
 
-            if (fadeState.currentOpacity <= 0.01) {
+            const effectiveOpacity = fadeState.currentOpacity * gestureOpacity;
+            if (effectiveOpacity <= 0.01) {
               continue;
             }
-
-            // Cached label text measurements (zero per-frame ctx.measureText on cache hit)
-            const countText =
-              pAnchor.area.fileCount === 1 ? '1 file' : `${pAnchor.area.fileCount} files`;
-            const cacheKey = `${pAnchor.area.name}\0${countText}`;
-            let cachedMetrics = metricsCache.get(pAnchor.area.id);
-            if (!cachedMetrics || cachedMetrics.key !== cacheKey) {
-              ctx.save();
-              ctx.font = areaFont;
-              const labelText = fitTextEnd(pAnchor.area.name, 160, (s) => ctx.measureText(s).width, areaFont);
-              const nameWidth = ctx.measureText(labelText).width;
-              ctx.font = countFont;
-              const countWidth = ctx.measureText(countText).width;
-              ctx.restore();
-              cachedMetrics = {
-                key: cacheKey,
-                labelText,
-                countText,
-                boxWidth: Math.max(nameWidth, countWidth) + 16,
-                boxHeight: 32,
-              };
-              metricsCache.set(pAnchor.area.id, cachedMetrics);
-            }
-            const { labelText, boxWidth, boxHeight } = cachedMetrics;
-
-            const placementAnchor: LabelPlacementAnchor = {
-              id: pAnchor.area.id,
-              screenX: pAnchor.screenX,
-              screenY: pAnchor.screenY,
-              radius: pAnchor.radius,
-              isSelected,
-              isHovered,
-            };
-
-            const existingMotionState = motionMap.get(pAnchor.area.id);
-            const placementResult = resolveAreaLabelPlacement(
-              placementAnchor,
-              boxWidth,
-              boxHeight,
-              obstacleGrid,
-              width,
-              height,
-              insets,
-              existingMotionState?.currentTheta,
-              placedLabelsGrid
-            );
-
-            if (placementResult.isSuppressed && !isPriority) {
-              continue;
-            }
-
-            const wasRenderedLastFrame = previouslyRenderedAreaIdsRef.current.has(pAnchor.area.id);
-            const isReentry = !wasRenderedLastFrame;
-
-            const edgeDist = computeViewportEdgeMargin(
-              placementResult.rect,
-              width,
-              height,
-              insets,
-              6
-            );
-            const prevGeom = prevAreaGeom.get(pAnchor.area.id);
-            const dRadius = prevGeom ? Math.abs(pAnchor.radius - prevGeom.radius) : 0;
-            const viewportEdgeDelta =
-              prevGeom && (edgeDist < 24 || prevGeom.edgeDist < 24)
-                ? Math.abs(edgeDist - prevGeom.edgeDist)
-                : 0;
-            prevAreaGeom.set(pAnchor.area.id, { radius: pAnchor.radius, edgeDist });
-
-            const relevantGeometryDisplacement = cameraRotZoomDelta + dRadius + viewportEdgeDelta;
-
-            const motionState = adaptLabelOffsetToGeometry(
-              motionMap,
-              pAnchor.area.id,
-              placementResult.theta,
-              placementResult.offset,
-              pAnchor.radius,
-              boxWidth,
-              boxHeight,
-              relevantGeometryDisplacement,
-              isReentry,
-              prefersReducedMotion
-            );
-
-            const rect = computeRenderedLabelRect(
-              pAnchor.screenX,
-              pAnchor.screenY,
-              motionState.currentOffset,
-              boxWidth,
-              boxHeight
-            );
-
-            // Suppress lower-priority labels whose geometry-budgeted rendered rect still
-            // overlaps an already-placed higher-priority area label.
-            if (!isPriority && renderedLabelOnlyGrid.queryOverlapArea(rect, 0) > 4.0) {
-              continue;
-            }
-
-            obstacleGrid.insert(rect);
-            placedLabelsGrid.insert(rect);
-            renderedLabelOnlyGrid.insert(rect);
 
             renderedAreaLabelsRef.current.set(pAnchor.area.id, {
               areaId: pAnchor.area.id,
               name: pAnchor.area.name,
               rect,
-              placement: placementResult.placement,
-              theta: motionState.currentTheta,
-              opacity: fadeState.currentOpacity,
+              placement: 'below',
+              opacity: effectiveOpacity,
             });
 
             ctx.save();
-            ctx.globalAlpha = (isLight ? 0.95 : 0.90) * fadeState.currentOpacity;
+            ctx.globalAlpha = (isLight ? 0.94 : 0.90) * effectiveOpacity;
 
-            // Pill background
+            // Calm, minimal annotation backing
             ctx.beginPath();
             if (ctx.roundRect) {
-              ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 6);
+              ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 5);
             } else {
               ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
             }
-            ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.94)' : 'rgba(16, 19, 25, 0.90)';
+            ctx.fillStyle = isSelected
+              ? (isLight ? 'rgba(238, 242, 255, 0.96)' : 'rgba(28, 33, 52, 0.92)')
+              : isHovered
+                ? (isLight ? 'rgba(240, 249, 255, 0.96)' : 'rgba(20, 32, 46, 0.90)')
+                : (isLight ? 'rgba(248, 250, 252, 0.84)' : 'rgba(13, 16, 22, 0.76)');
             ctx.fill();
 
-            // Pill border (highlighted if selected or hovered)
-            ctx.strokeStyle = isSelected
-              ? (isLight ? '#4f46e5' : '#5e6ad2')
-              : isHovered
-                ? (isLight ? '#0284c7' : '#38bdf8')
-                : (isLight ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.10)');
-            ctx.lineWidth = isSelected || isHovered ? 1.5 : 1;
-            ctx.stroke();
+            if (isSelected || isHovered) {
+              ctx.strokeStyle = isSelected
+                ? (isLight ? 'rgba(79, 70, 229, 0.65)' : 'rgba(129, 140, 248, 0.60)')
+                : (isLight ? 'rgba(2, 132, 199, 0.55)' : 'rgba(56, 189, 248, 0.50)');
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
 
             // Area name
             const textCenterX = (rect.x1 + rect.x2) / 2;
             ctx.font = areaFont;
-            ctx.fillStyle = isLight ? '#111827' : '#f0f2f5';
+            ctx.fillStyle = isLight ? '#0f172a' : '#eef1f6';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
             ctx.fillText(labelText, textCenterX, rect.y1 + 3);
 
             // File count
             ctx.font = countFont;
-            ctx.fillStyle = isLight ? '#6b7280' : '#9aa3b2';
-            ctx.fillText(countText, textCenterX, rect.y1 + 17);
+            ctx.fillStyle = isLight ? '#64748b' : '#8b95a5';
+            ctx.fillText(countText, textCenterX, rect.y1 + 16);
 
             ctx.restore();
           }
-          previouslyRenderedAreaIdsRef.current = new Set(renderedAreaLabelsRef.current.keys());
         }
 
         // 5. Draw Node Labels (Spatial Collision Grid)
@@ -1807,6 +1742,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         })),
         isAnyFadeActive: isAnyLabelTransitionActive,
         rafScheduled,
+        isGestureHeld: isGraphGestureHeldRef.current,
+        hideGroupLabelsOnMovement: hideGroupLabelsOnMovementRef.current,
+        gestureLabelOpacity: gestureLabelFadeRef.current.currentOpacity,
       };
       if (rafScheduled) {
         isDirtyRef.current = true;
@@ -1996,6 +1934,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
       // Exact rendered label pill hit-testing aligned with renderedAreaLabelsRef
       for (const rendered of renderedAreaLabelsRef.current.values()) {
+        if (rendered.opacity <= 0.1) continue;
         const { rect } = rendered;
         if (
           screenX >= rect.x1 &&
@@ -2058,6 +1997,17 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
 
   // Pointer event handlers
   const handlePointerDown = (e: React.PointerEvent) => {
+    // Reserve right-click (and macOS Control-click) for future functionality;
+    // reject before focusing, cancelling inertia, or altering gesture/hide-on-hold state.
+    if (!isSupportedPointerGestureButton(e.button, e.ctrlKey)) {
+      return;
+    }
+
+    // Ignore secondary pointers while a gesture is already active so we don't leak pointer capture.
+    if (gestureRef.current.active) {
+      return;
+    }
+
     // Focus canvas on click for keyboard interaction
     canvasRef.current?.focus();
 
@@ -2073,7 +2023,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     velocityRef.current = { vx: 0, vy: 0 };
 
     // Distinguish primary drag (rotation) from Shift-drag or middle button (pan)
-    const isShiftOrMiddle = e.shiftKey || e.button === 1 || e.button === 2;
+    const isShiftOrMiddle = e.shiftKey || e.button === 1;
     const mode = isShiftOrMiddle ? 'panning' : 'rotating';
     if (canvasRef.current) {
       canvasRef.current.style.cursor = isShiftOrMiddle ? 'move' : 'grabbing';
@@ -2090,9 +2040,13 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       exceededThreshold: false,
     };
 
+    isGraphGestureHeldRef.current = true;
     const target = e.target as HTMLElement;
     pointerTargetRef.current = target;
     hoverControllerRef.current?.handleGestureStart();
+    if (hideGroupLabelsOnMovementRef.current) {
+      requestRender();
+    }
     try {
       target.setPointerCapture(e.pointerId);
     } catch {
@@ -2226,6 +2180,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const cleanUpPointerGesture = useCallback(
     (e?: React.PointerEvent) => {
       const gesture = gestureRef.current;
+      if (e && gesture.active && gesture.pointerId !== null && e.pointerId !== gesture.pointerId) {
+        return;
+      }
+      if (!gesture.active && !isGraphGestureHeldRef.current) {
+        return;
+      }
       const target = (e?.target as HTMLElement) || pointerTargetRef.current;
       if (target && gesture.pointerId !== null) {
         try {
@@ -2240,23 +2200,30 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       gesture.active = false;
       gesture.pointerId = null;
       gesture.mode = 'idle';
+      isGraphGestureHeldRef.current = false;
       hoverControllerRef.current?.handleGestureEnd();
       if (canvasRef.current) {
         canvasRef.current.style.cursor = '';
       }
+      if (hideGroupLabelsOnMovementRef.current) {
+        requestRender();
+      }
     },
-    []
+    [requestRender]
   );
 
   const handlePointerUp = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
+    if (!gesture.active || gesture.pointerId !== e.pointerId) {
+      return;
+    }
     const wasDragging = gesture.exceededThreshold;
     const previousMode = gesture.mode;
 
     cleanUpPointerGesture(e);
 
-    // If click below threshold: perform selection WITHOUT moving the camera
-    if (!wasDragging) {
+    // If primary click below threshold: perform selection WITHOUT moving the camera
+    if (!wasDragging && e.button === 0) {
       // 1. File nodes have first-class selection precedence over area anchors & edges
       const hitNode = findNodeAtPoint(e.clientX, e.clientY);
       if (hitNode) {
@@ -2367,18 +2334,33 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     cleanUpPointerGesture(e);
   };
 
-  const handleLostPointerCapture = () => {
-    cleanUpPointerGesture();
+  const handleLostPointerCapture = (e: React.PointerEvent) => {
+    cleanUpPointerGesture(e);
   };
 
-  // Window blur / visibility change cleanup
+  // Window blur / visibility change / unmount cleanup
   useEffect(() => {
     const handleBlur = () => {
       cleanUpPointerGesture();
     };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        cleanUpPointerGesture();
+      }
+    };
     window.addEventListener('blur', handleBlur);
-    return () => window.removeEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      cleanUpPointerGesture();
+    };
   }, [cleanUpPointerGesture]);
+
+  // Trigger render when hideGroupLabelsOnMovement preference changes
+  useEffect(() => {
+    requestRender();
+  }, [hideGroupLabelsOnMovement, requestRender]);
 
   const applyWheelZoom = useCallback(
     (e: { clientX: number; clientY: number; deltaY: number; deltaMode: number; ctrlKey: boolean }) => {
@@ -2687,6 +2669,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
         onPointerCancel={handlePointerCancel}
         onPointerLeave={() => hoverControllerRef.current?.handlePointerLeaveCanvas()}
         onLostPointerCapture={handleLostPointerCapture}
+        onContextMenu={(e) => e.preventDefault()}
         onKeyDown={handleKeyDown}
       />
 

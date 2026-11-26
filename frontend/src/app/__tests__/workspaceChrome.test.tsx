@@ -28,6 +28,7 @@ interface MockWorkspaceChromeProps {
   selectedNode?: FileNode | null;
   selectedAreaEdge?: { sourceAreaId: string; targetAreaId: string; edgeCount: number } | null;
   keepGraphCentered?: boolean;
+  hideGroupLabelsOnMovement?: boolean;
   isFilterMenuOpen?: boolean;
   isViewMenuOpen?: boolean;
   selectedLanguageFilter?: string;
@@ -41,6 +42,7 @@ function MockWorkspaceChrome({
   selectedNode = null,
   selectedAreaEdge = null,
   keepGraphCentered = true,
+  hideGroupLabelsOnMovement = false,
   isFilterMenuOpen = false,
   isViewMenuOpen = false,
   selectedLanguageFilter = 'all',
@@ -165,7 +167,17 @@ function MockWorkspaceChrome({
                   <SlidersHorizontal size={14} />
                 </button>
                 {isViewMenuOpen && (
-                  <div className="toolbar-dropdown-menu right-aligned" role="menu" aria-label="View options">
+                  <div className="toolbar-dropdown-menu right-aligned view-options-menu" role="menu" aria-label="View options">
+                    {networkViewMode === '3d' && (
+                      <button
+                        type="button"
+                        className="menu-item menu-item-checkbox"
+                        role="menuitemcheckbox"
+                        aria-checked={hideGroupLabelsOnMovement}
+                      >
+                        <span className="menu-item-label">Hide group labels upon graph movement</span>
+                      </button>
+                    )}
                     <button className="menu-item" role="menuitem">
                       <span>Export PNG</span>
                     </button>
@@ -410,15 +422,33 @@ describe('Workspace Chrome & Contextual Navigation Suite', () => {
       expect(html).toContain('Analyzed Code Only');
     });
 
-    it('renders view utilities dropdown with role="menu" when open', () => {
-      const html = renderToStaticMarkup(
-        <MockWorkspaceChrome activeTab="network" isViewMenuOpen={true} />
+    it('renders view utilities dropdown with role="menu" and Hide group labels checkbox when open', () => {
+      const htmlUnchecked = renderToStaticMarkup(
+        <MockWorkspaceChrome
+          activeTab="network"
+          networkViewMode="3d"
+          isViewMenuOpen={true}
+          hideGroupLabelsOnMovement={false}
+        />
       );
 
-      expect(html).toContain('class="toolbar-dropdown-menu right-aligned"');
-      expect(html).toContain('role="menu"');
-      expect(html).toContain('aria-label="View options"');
-      expect(html).toContain('Export PNG');
+      expect(htmlUnchecked).toContain('class="toolbar-dropdown-menu right-aligned view-options-menu"');
+      expect(htmlUnchecked).toContain('role="menu"');
+      expect(htmlUnchecked).toContain('aria-label="View options"');
+      expect(htmlUnchecked).toContain('role="menuitemcheckbox"');
+      expect(htmlUnchecked).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="false"[^>]*>.*Hide group labels upon graph movement/);
+      expect(htmlUnchecked).toContain('Export PNG');
+
+      const htmlChecked = renderToStaticMarkup(
+        <MockWorkspaceChrome
+          activeTab="network"
+          networkViewMode="3d"
+          isViewMenuOpen={true}
+          hideGroupLabelsOnMovement={true}
+        />
+      );
+
+      expect(htmlChecked).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="true"[^>]*>.*Hide group labels upon graph movement/);
     });
   });
 

@@ -812,6 +812,12 @@ export function getGestureThreshold(pointerType: string): number {
   return GESTURE_THRESHOLD_MOUSE;
 }
 
+export function isSupportedPointerGestureButton(button: number, ctrlKey = false): boolean {
+  if (button === 2) return false;
+  if (button === 0 && ctrlKey) return false;
+  return button === 0 || button === 1;
+}
+
 export function handleGesturePointerDown(
   params: {
     clientX: number;
@@ -819,11 +825,25 @@ export function handleGesturePointerDown(
     pointerId: number;
     pointerType: string;
     shiftKey?: boolean;
+    ctrlKey?: boolean;
     button?: number;
     currentCamera: NetworkCamera;
   }
 ): NetworkGestureState {
-  const isShiftOrMiddle = Boolean(params.shiftKey || params.button === 1 || params.button === 2);
+  const button = params.button ?? 0;
+  if (!isSupportedPointerGestureButton(button, Boolean(params.ctrlKey))) {
+    return {
+      active: false,
+      mode: 'idle',
+      startX: params.clientX,
+      startY: params.clientY,
+      startCamera: { ...params.currentCamera },
+      pointerId: null,
+      pointerType: params.pointerType,
+      exceededThreshold: false,
+    };
+  }
+  const isShiftOrMiddle = Boolean(params.shiftKey || button === 1);
   return {
     active: true,
     mode: isShiftOrMiddle ? 'panning' : 'rotating',

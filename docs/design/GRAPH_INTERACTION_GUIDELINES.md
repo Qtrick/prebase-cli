@@ -10,6 +10,7 @@
 - **Rotation Gestures**:
   - Primary Drag (Left Mouse / Single Touch): Rotates smoothly along screen-relative X and Y axes around the 3D centroid.
   - Shift + Drag (or Middle Mouse): Shifts Pan coordinates freely, automatically toggling Center-Lock to off.
+  - Right-Click: Reserved for future functionality; does not pan, rotate, select, or alter Center-Lock.
   - Mouse Wheel / Trackpad Pinch: Zooms continuously toward the cursor (when unlocked) or toward the center (when center-locked).
   - Rotational Inertia: Fast drag release imparts smooth exponential decay velocity; stationary pause prior to release cancels inertia cleanly.
 
@@ -28,9 +29,11 @@
 ### 1.4 Three-Level Progressive Disclosure & Label Collision Grid
 - **Overview Scope (Level 1)**:
   - Macro-architecture mode.
-  - Displays prominent Area Anchor Badges with monogram symbols, glow rings, and collision-avoiding area labels.
+  - Displays prominent Area Anchor Badges with monogram symbols and stable screen-space group annotations attached directly beneath each projected anchor.
+  - Collisions and depth affect annotation visibility via smooth opacity fades, never label position.
+  - Optional **Hide group labels upon graph movement** preference in the view-options menu smoothly fades out group annotations while a graph gesture is held and fades them back in on release.
   - Suppresses individual file-to-file edges and raw file labels. Only high-level aggregated inter-area dependency bundles are rendered with directional flow arrows.
-  - Uses `LabelCollisionGrid` (a 64px bucket spatial hash grid) to perform screen-space bounding box overlap checks before drawing labels, completely eliminating text collisions.
+  - Uses `LabelCollisionGrid` to perform deterministic priority-ordered visibility filtering, preventing label overlap without positional roaming.
   - Small repository fallback: Repositories with $\le 12$ files or $\le 1$ area directly render all files and edges.
 - **Area Scope (Level 2)**:
   - Focused area mode.
