@@ -8,6 +8,7 @@ pub mod watcher;
 pub use auth::generate_session_token;
 pub use server::{create_router, start_server, RunningServer};
 pub use state::{AppState, PublishedNetworkState, ServerEvent};
+pub use static_assets::has_frontend_assets;
 
 #[cfg(test)]
 mod tests {

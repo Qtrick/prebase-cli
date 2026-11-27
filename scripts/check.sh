@@ -20,8 +20,8 @@ npm test
 echo "--> Verifying Frontend TypeScript types..."
 npm run typecheck
 
-echo "--> Verifying Frontend TypeScript build..."
-npm run build
+echo "--> Building Frontend bundle..."
+npm run build:bundle
 cd "$ROOT_DIR"
 
 # 3. Rust formatting, lints, and tests

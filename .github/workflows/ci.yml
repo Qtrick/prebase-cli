@@ -67,7 +67,7 @@ jobs:
           npm --prefix frontend ci
           npm --prefix frontend run typecheck
           npm --prefix frontend test
-          npm --prefix frontend run build
+          npm --prefix frontend run build:bundle
 
       - name: Cache Cargo Dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -112,6 +112,9 @@ jobs:
 
       - name: Run CLI Installation & Symlink Verification
         run: python3 scripts/verify_installation_workflows.py
+
+      - name: Run Development Workflow & Decoupling Verification
+        run: python3 scripts/verify_dev_workflow.py
 
       - name: Run Real Product CLI & Graph Correctness Evaluation
         run: python3 scripts/real_product_cli_evaluation.py

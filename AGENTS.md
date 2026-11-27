@@ -88,6 +88,7 @@ Agents must utilize appropriate specialists throughout development:
 - **Root-Cause Remediation**: Fix underlying algorithmic and architectural causes, not surface symptoms. Grep all call sites.
 - **Meaningful Regression Tests**: Every non-trivial fix must have an automated test demonstrating that the bug cannot regress.
 - **Actual Runtime & Real Browser Verification**: Do not rely solely on unit tests or type checks. Verify behaviors in the running application and browser via Playwright.
+- **Fast Development Iteration**: During active iteration, prefer `./scripts/build.sh --dev` and `./scripts/dev.sh` (which skip unchanged frontend builds, use Cargo's incremental `dev` profile, and decouple frontend asset updates from Rust relinking). Reserve `./scripts/build.sh` / `cargo build --release` for final production verification and packaging, and never verify a Rust change against a stale running background server.
 
 ---
 

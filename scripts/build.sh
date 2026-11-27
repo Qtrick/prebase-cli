@@ -4,8 +4,10 @@ set -euo pipefail
 # PreBase CLI — Build and Installation Script
 # Supports:
 #   ./scripts/build.sh                   (build only: frontend + release binary)
-#   ./scripts/build.sh --install         (build + install standalone binary)
-#   ./scripts/build.sh --link            (build + create/update development symlink)
+#   ./scripts/build.sh --dev             (fast incremental dev build: frontend + debug binary)
+#   ./scripts/build.sh --install         (build + install standalone release binary)
+#   ./scripts/build.sh --link            (build + create/update release symlink)
+#   ./scripts/build.sh --dev --link      (build + create/update development symlink)
 #
 # Custom directories:
 #   --bin-dir <DIR>      Exact destination directory for the executable (<DIR>/prebase)
@@ -22,9 +24,11 @@ for tool_dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" "/opt/homeb
 done
 
 MODE="build"
+PROFILE="release"
 BIN_DIR=""
 PREFIX=""
 BUILD_FRONTEND=true
+FORCE_FRONTEND=false
 
 usage() {
   cat <<'EOF'
@@ -35,8 +39,10 @@ Usage:
 
 Modes:
   (default)           Build frontend distribution and Rust release binary without installing
+  --dev               Build using Cargo's fast incremental dev profile (target/debug/prebase)
   --install           Build and install the release binary to user bin directory
-  --link              Build and create/update a development symlink to target/release/prebase
+  --link              Build and create/update a symlink to the built binary
+                      (target/release/prebase by default, or target/debug/prebase with --dev)
 
 Directory Options:
   --bin-dir <DIR>     Exact destination directory for the executable (installs to <DIR>/prebase).
@@ -45,12 +51,14 @@ Directory Options:
                       Example: --prefix /usr/local (installs to /usr/local/bin/prebase)
 
 Build Flags:
-  --skip-frontend     Skip compiling frontend distribution (use existing embedded assets)
+  --skip-frontend     Skip compiling frontend distribution (use existing validated assets)
+  --force-frontend    Bypass frontend freshness check and rebuild frontend assets
   -h, --help          Display this help message and exit
 
 Environment Variables:
   PREBASE_BIN_DIR     Default destination directory for executable (overrides default, overridden by flags)
   PREBASE_PREFIX      Default root prefix (overrides default, overridden by flags)
+  CARGO_TARGET_DIR    Optional Cargo target directory override
 
 Default target directory: $HOME/.local/bin
 EOF
@@ -60,6 +68,10 @@ EOF
 # Parse command line options
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --dev)
+      PROFILE="dev"
+      shift 1
+      ;;
     --install)
       if [[ "$MODE" == "link" ]]; then
         echo "Error: Cannot specify both --install and --link." >&2
@@ -117,7 +129,19 @@ while [[ $# -gt 0 ]]; do
       shift 1
       ;;
     --skip-frontend|--no-frontend)
+      if [[ "$FORCE_FRONTEND" == "true" ]]; then
+        echo "Error: Cannot specify both --skip-frontend and --force-frontend." >&2
+        exit 1
+      fi
       BUILD_FRONTEND=false
+      shift 1
+      ;;
+    --force-frontend)
+      if [[ "$BUILD_FRONTEND" == "false" ]]; then
+        echo "Error: Cannot specify both --skip-frontend and --force-frontend." >&2
+        exit 1
+      fi
+      FORCE_FRONTEND=true
       shift 1
       ;;
     -h|--help)
@@ -131,6 +155,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$PROFILE" == "dev" && "$MODE" == "install" ]]; then
+  echo "Error: --install packages a standalone release binary and cannot be combined with --dev. Use --dev --link instead." >&2
+  exit 1
+fi
+
 # Expand tilde in directory paths if passed quoted
 if [[ -n "$BIN_DIR" ]]; then
   BIN_DIR="${BIN_DIR/#\~/$HOME}"
@@ -139,7 +168,7 @@ if [[ -n "$PREFIX" ]]; then
   PREFIX="${PREFIX/#\~/$HOME}"
 fi
 
-# Determine target directory
+# Determine destination directory
 DEST_DIR=""
 if [[ -n "$BIN_DIR" ]]; then
   DEST_DIR="$BIN_DIR"
@@ -153,43 +182,211 @@ else
   DEST_DIR="$HOME/.local/bin"
 fi
 
-echo "==> Building PreBase CLI (Frontend + Release Binary)..."
+# Resolve Cargo target directory
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  if [[ "$CARGO_TARGET_DIR" = /* ]]; then
+    TARGET_ROOT="$CARGO_TARGET_DIR"
+  else
+    TARGET_ROOT="$ROOT_DIR/$CARGO_TARGET_DIR"
+  fi
+else
+  TARGET_ROOT="$ROOT_DIR/target"
+fi
 
-# 1. Build frontend distribution
+DIST_DIR="$ROOT_DIR/crates/prebase-server/dist"
+FRONTEND_DIR="$ROOT_DIR/frontend"
+DEPS_STAMP="$FRONTEND_DIR/node_modules/.prebase-deps-stamp"
+FRONTEND_STAMP="$TARGET_ROOT/.prebase-frontend-stamp"
+
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+compute_deps_hash() {
+  local node_ver
+  node_ver="$(node -v 2>/dev/null || echo 'unknown')"
+  {
+    printf 'node=%s\n' "$node_ver"
+    printf 'package.json=%s\n' "$(sha256_file "$FRONTEND_DIR/package.json")"
+    if [[ -f "$FRONTEND_DIR/package-lock.json" ]]; then
+      printf 'package-lock.json=%s\n' "$(sha256_file "$FRONTEND_DIR/package-lock.json")"
+    else
+      printf 'package-lock.json=missing\n'
+    fi
+  } | sha256_stdin
+}
+
+compute_frontend_hash() {
+  {
+    for cfg in index.html package.json package-lock.json tsconfig.json vite.config.ts; do
+      if [[ -f "$FRONTEND_DIR/$cfg" ]]; then
+        printf '%s:%s\n' "$cfg" "$(sha256_file "$FRONTEND_DIR/$cfg")"
+      fi
+    done
+    for sub in src public; do
+      if [[ -d "$FRONTEND_DIR/$sub" ]]; then
+        while IFS= read -r rel_file; do
+          printf '%s:%s\n' "$rel_file" "$(sha256_file "$FRONTEND_DIR/$rel_file")"
+        done < <(cd "$FRONTEND_DIR" && find "$sub" -type f ! -name '.DS_Store' | LC_ALL=C sort)
+      fi
+    done
+  } | sha256_stdin
+}
+
+validate_dist_dir() {
+  local dir="$1"
+  if [[ -L "$dir" || ! -d "$dir" ]]; then
+    return 1
+  fi
+  if [[ ! -s "$dir/index.html" ]]; then
+    return 1
+  fi
+  # Reject any symlinks inside dist/
+  if [[ -n "$(find "$dir" -type l -print -quit 2>/dev/null)" ]]; then
+    return 1
+  fi
+  # Verify every local asset referenced by index.html exists and is non-empty
+  local ref
+  while IFS= read -r ref; do
+    ref="${ref#/}"
+    [[ -z "$ref" ]] && continue
+    if [[ ! -s "$dir/$ref" ]]; then
+      return 1
+    fi
+  done < <(grep -oE '(src|href)="(/[^"]+)"' "$dir/index.html" | sed -E 's/^(src|href)="([^"]+)"$/\2/' || true)
+  return 0
+}
+
+STAGING_DIR=""
+OLD_DIST_DIR=""
+TMP_FILE=""
+TMP_LINK=""
+cleanup() {
+  if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
+    rm -rf "$STAGING_DIR" 2>/dev/null || true
+  fi
+  if [[ -n "$OLD_DIST_DIR" && -d "$OLD_DIST_DIR" ]]; then
+    rm -rf "$OLD_DIST_DIR" 2>/dev/null || true
+  fi
+  if [[ -n "$TMP_FILE" && -e "$TMP_FILE" ]]; then
+    rm -f "$TMP_FILE" 2>/dev/null || true
+  fi
+  if [[ -n "$TMP_LINK" && ( -e "$TMP_LINK" || -L "$TMP_LINK" ) ]]; then
+    rm -f "$TMP_LINK" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ "$PROFILE" == "dev" ]]; then
+  echo "==> PreBase development build (incremental dev profile)..."
+else
+  echo "==> Building PreBase CLI (Frontend + Release Binary)..."
+fi
+
+# 1. Frontend dependencies & asset build
 if [[ "$BUILD_FRONTEND" == "true" ]]; then
-  echo "--> Compiling React frontend with lockfile-driven reproducibility..."
-  cd "$ROOT_DIR/frontend"
-  if [[ ! -d "node_modules" ]]; then
-    echo "    Installing frontend dependencies..."
+  cd "$FRONTEND_DIR"
+  EXPECTED_DEPS_HASH="$(compute_deps_hash)"
+  CURRENT_DEPS_HASH=""
+  if [[ -f "$DEPS_STAMP" ]]; then
+    CURRENT_DEPS_HASH="$(cat "$DEPS_STAMP" 2>/dev/null || true)"
+  fi
+
+  if [[ ! -d "node_modules" || ! -x "node_modules/.bin/vite" || "$CURRENT_DEPS_HASH" != "$EXPECTED_DEPS_HASH" ]]; then
+    echo "--> Installing frontend dependencies..."
     if [[ -f "package-lock.json" ]]; then
       npm ci
     else
       npm install
     fi
+    printf '%s\n' "$EXPECTED_DEPS_HASH" > "$DEPS_STAMP"
   fi
-  npm run build
+
+  EXPECTED_FE_HASH="$(compute_frontend_hash)"
+  CURRENT_FE_HASH=""
+  if [[ -f "$FRONTEND_STAMP" ]]; then
+    CURRENT_FE_HASH="$(cat "$FRONTEND_STAMP" 2>/dev/null || true)"
+  fi
+
+  if [[ "$FORCE_FRONTEND" == "false" && "$CURRENT_FE_HASH" == "$EXPECTED_FE_HASH" ]] && validate_dist_dir "$DIST_DIR"; then
+    echo "--> Frontend assets: current (skipping rebuild)"
+  else
+    echo "--> Frontend assets: building..."
+    mkdir -p "$ROOT_DIR/crates/prebase-server" "$TARGET_ROOT"
+    STAGING_DIR="$(mktemp -d "$ROOT_DIR/crates/prebase-server/.dist.staging.XXXXXX")"
+
+    npm run typecheck
+    npx vite build --outDir "$STAGING_DIR" --emptyOutDir
+
+    if ! validate_dist_dir "$STAGING_DIR"; then
+      echo "Error: Built frontend distribution failed validation (missing assets or symlink detected)." >&2
+      exit 1
+    fi
+
+    if [[ -L "$DIST_DIR" ]]; then
+      rm -f "$DIST_DIR"
+    fi
+    if [[ -d "$DIST_DIR" ]]; then
+      OLD_DIST_DIR="$ROOT_DIR/crates/prebase-server/.dist.old.$$"
+      mv "$DIST_DIR" "$OLD_DIST_DIR"
+      mv "$STAGING_DIR" "$DIST_DIR"
+      rm -rf "$OLD_DIST_DIR"
+      OLD_DIST_DIR=""
+    else
+      mv "$STAGING_DIR" "$DIST_DIR"
+    fi
+    STAGING_DIR=""
+
+    printf '%s\n' "$EXPECTED_FE_HASH" > "$FRONTEND_STAMP"
+  fi
 else
-  echo "--> Skipping frontend compilation (--skip-frontend specified)..."
+  echo "--> Frontend assets: skipped (--skip-frontend)"
+  if ! validate_dist_dir "$DIST_DIR"; then
+    echo "Error: --skip-frontend specified, but valid frontend assets were not found at $DIST_DIR." >&2
+    echo "Run ./scripts/build.sh --dev (or ./scripts/build.sh) without --skip-frontend first." >&2
+    exit 1
+  fi
 fi
 
-# 2. Build Rust release binary
-echo "--> Compiling Rust workspace in release mode..."
+# 2. Build Rust binary
 cd "$ROOT_DIR"
-cargo build --release --locked --bin prebase
+if [[ "$PROFILE" == "dev" ]]; then
+  echo "--> Rust: incremental dev build..."
+  cargo build --locked --bin prebase
+  BIN_SRC="$TARGET_ROOT/debug/prebase"
+else
+  echo "--> Rust: release build..."
+  cargo build --release --locked --bin prebase
+  BIN_SRC="$TARGET_ROOT/release/prebase"
+fi
 
-BIN_SRC="$ROOT_DIR/target/release/prebase"
 if [[ ! -f "$BIN_SRC" ]]; then
-  echo "Error: Release binary not found at $BIN_SRC" >&2
+  echo "Error: Compiled binary not found at $BIN_SRC" >&2
   exit 1
 fi
 
-echo "==> Build successful! Executable is located at: $BIN_SRC"
+echo "==> Build successful: $BIN_SRC"
 
 # If build only, exit cleanly
 if [[ "$MODE" == "build" ]]; then
-  echo ""
-  echo "To install to your bin directory, run:  ./scripts/build.sh --install"
-  echo "To create a development symlink, run: ./scripts/build.sh --link"
+  if [[ "$PROFILE" == "dev" ]]; then
+    echo "To link for development, run: ./scripts/build.sh --dev --link"
+  else
+    echo "To install to your bin directory, run:  ./scripts/build.sh --install"
+    echo "To create a release symlink, run:      ./scripts/build.sh --link"
+  fi
   exit 0
 fi
 
@@ -216,33 +413,27 @@ fi
 if [[ "$MODE" == "install" ]]; then
   echo "==> Installing prebase executable to $DEST_DIR..."
   TMP_FILE="$DEST_DIR/.prebase.tmp.$$"
-  trap 'rm -f "$TMP_FILE" 2>/dev/null || true' EXIT INT TERM
-
   cp "$BIN_SRC" "$TMP_FILE"
   chmod 755 "$TMP_FILE"
 
-  # Remove existing symlink if present to prevent dereferencing
   if [[ -L "$TARGET_BIN" ]]; then
     rm -f "$TARGET_BIN"
   fi
 
   mv -f "$TMP_FILE" "$TARGET_BIN"
-  trap - EXIT INT TERM
+  TMP_FILE=""
 
 elif [[ "$MODE" == "link" ]]; then
-  echo "==> Creating development symlink in $DEST_DIR..."
+  echo "==> Creating symlink in $DEST_DIR..."
   TMP_LINK="$DEST_DIR/.prebase.link.tmp.$$"
-  trap 'rm -f "$TMP_LINK" 2>/dev/null || true' EXIT INT TERM
-
   ln -s "$BIN_SRC" "$TMP_LINK"
 
-  # Remove existing symlink if present to prevent dereferencing
   if [[ -L "$TARGET_BIN" ]]; then
     rm -f "$TARGET_BIN"
   fi
 
   mv -f "$TMP_LINK" "$TARGET_BIN"
-  trap - EXIT INT TERM
+  TMP_LINK=""
 fi
 
 # 4. Verification
@@ -256,7 +447,7 @@ fi
 
 echo ""
 if [[ "$MODE" == "link" ]]; then
-  echo "✔ PreBase development symlink successfully created:"
+  echo "✔ PreBase symlink successfully created:"
   echo "  $TARGET_BIN -> $BIN_SRC"
 else
   echo "✔ PreBase successfully installed to:"

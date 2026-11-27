@@ -128,6 +128,13 @@ pub async fn run_server(
     view: &str,
     focus: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !prebase_server::has_frontend_assets() {
+        return Err(
+            "PreBase frontend assets are missing (crates/prebase-server/dist/index.html not found). Run ./scripts/build.sh --dev from the PreBase checkout."
+                .into(),
+        );
+    }
+
     if detach {
         let lock_guard = acquire_startup_lock(&canonical_root)?;
         if let Some(session) = validate_live_session(&canonical_root, &repo_id).await {

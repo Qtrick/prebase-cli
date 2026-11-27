@@ -140,12 +140,35 @@ Installs the standalone executable into `$HOME/.local/bin` (or custom directory)
 >
 > If neither option is passed, installation defaults to `$HOME/.local/bin` (or `$PREBASE_BIN_DIR` / `$PREBASE_PREFIX/bin` if defined in your environment).
 
-#### 2. Development Symlink Installation
+#### 2. Fast Development Workflow & Symlink Installation
 
-For active local development, create a development symlink instead of copying the executable. Whenever you recompile the Rust binary (`cargo build --release` or `./scripts/build.sh`), your system command is immediately updated:
+For active local development, use the fast incremental dev workflow instead of rebuilding an optimized release binary on every edit:
 
 ```bash
-# Creates or updates ~/.local/bin/prebase -> <prebase_root>/target/release/prebase
+# One-time development setup: build dev binary and link ~/.local/bin/prebase -> target/debug/prebase
+./scripts/build.sh --dev --link
+
+# Build only changed components (skips unchanged frontend/deps, incremental Rust) and launch
+./scripts/dev.sh
+./scripts/dev.sh /path/to/repository
+./scripts/dev.sh history
+./scripts/dev.sh map -n
+
+# Rebuild dev artifacts without launching
+./scripts/build.sh --dev
+
+# Force a clean frontend rebuild (bypassing freshness cache)
+./scripts/build.sh --dev --force-frontend
+```
+
+How development builds work:
+- **Frontend/backend decoupling**: In `--dev` mode (`target/debug/prebase`), the Rust server reads frontend assets directly from `crates/prebase-server/dist/` in this checkout. Frontend-only edits rebuild `dist/` without recompiling or relinking Rust — just reload the browser tab.
+- **Automatic freshness**: `./scripts/build.sh` hashes `frontend/` sources and `package.json`/`package-lock.json` so unchanged frontend assets and `node_modules` are skipped automatically.
+- **Backend restarts**: If you edit Rust code while a background server is running, `./scripts/dev.sh` detects that `target/debug/prebase` is newer than the active server for that repository and cleanly stops it before launching the updated binary.
+- **Dev vs. release**: The `dev` binary prioritizes fast incremental compilation (`target/debug/prebase`) and reads `dist/` from the checkout; use `./scripts/build.sh` or `./scripts/build.sh --install` (or `./scripts/build.sh --link` for a release symlink to `target/release/prebase`) for standalone, fully optimized production binaries with embedded assets.
+
+```bash
+# Release symlink (points ~/.local/bin/prebase -> <prebase_root>/target/release/prebase)
 ./scripts/build.sh --link
 # Or via install.sh:
 ./scripts/install.sh --link

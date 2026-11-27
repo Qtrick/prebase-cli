@@ -77,6 +77,13 @@ pub async fn start_server(
     port: Option<u16>,
     watch_filesystem: bool,
 ) -> Result<RunningServer, Box<dyn std::error::Error + Send + Sync>> {
+    if !crate::static_assets::has_frontend_assets() {
+        return Err(
+            "PreBase frontend assets are missing (crates/prebase-server/dist/index.html not found). Run ./scripts/build.sh --dev from the PreBase checkout."
+                .into(),
+        );
+    }
+
     let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
     let listener = TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
