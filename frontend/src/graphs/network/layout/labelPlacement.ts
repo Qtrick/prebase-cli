@@ -57,3 +57,25 @@ export function isRectInsideViewport(
 
   return rect.x1 >= minX && rect.x2 <= maxX && rect.y1 >= minY && rect.y2 <= maxY;
 }
+
+/**
+ * Checks whether a rectangle intersects the usable viewport area (allowing natural
+ * Canvas clipping near edges rather than hiding foreground labels prematurely).
+ */
+export function doesRectIntersectViewport(
+  rect: ScreenRect,
+  viewportWidth: number,
+  viewportHeight: number,
+  insets?: ViewportInsets
+): boolean {
+  const minX = insets?.left ?? 0;
+  const maxX = viewportWidth - (insets?.right ?? 0);
+  const minY = insets?.top ?? 0;
+  const maxY = viewportHeight - (insets?.bottom ?? 0);
+
+  if (maxX <= minX || maxY <= minY) {
+    return false;
+  }
+
+  return rect.x2 > minX && rect.x1 < maxX && rect.y2 > minY && rect.y1 < maxY;
+}

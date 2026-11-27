@@ -706,12 +706,7 @@ pub async fn handle_workspace_navigate(
 
         match tokio::time::timeout(Duration::from_millis(wait_ms), rx).await {
             Ok(Ok(client_id)) => {
-                tracing::info!(
-                    "Workspace navigate ACKed: req={} client={} view={}",
-                    request_id,
-                    client_id,
-                    view
-                );
+                tracing::info!("Workspace navigate ACKed: req={} client={} view={}", request_id, client_id, view);
                 return Ok(Json(WorkspaceNavigateResponse {
                     delivered: true,
                     acknowledged: true,

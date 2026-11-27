@@ -1,42 +1,32 @@
 /**
  * PreBase — Smooth Depth-Aware Label Fade Transition Manager
  *
- * Implements smooth temporal opacity transitions (180-220ms), depth threshold hysteresis
- * to prevent boundary fluttering, demand-driven animation scheduling, and reduced-motion support.
+ * Implements smooth temporal opacity transitions (200ms), narrow camera-space Z
+ * hysteresis at the front/back boundary to prevent fluttering, demand-driven
+ * animation scheduling, and reduced-motion support.
  */
 
 export interface AreaFadeState {
   currentOpacity: number;
   targetOpacity: number;
   lastTimestamp: number;
-  candidateIndex?: number;
 }
 
-export const ENTER_PROMINENCE_THRESHOLD = 0.38;
-export const EXIT_PROMINENCE_THRESHOLD = 0.28;
+export const FRONT_ENTER_Z = 15;
+export const FRONT_EXIT_Z = 24;
 export const FADE_DURATION_MS = 200;
 
 /**
- * Calculates the target opacity for an area label based on front-facing state,
- * depth prominence, selection/hover states, and entry/exit hysteresis.
+ * Calculates the target opacity for an area label based on camera-relative Z
+ * and narrow boundary hysteresis. Rear-facing annotations fade out regardless
+ * of selection or hover state.
  */
 export function computeLabelTargetOpacity(
-  isFront: boolean,
-  prominence: number,
-  isPriority: boolean, // selected or hovered
-  currentOpacity: number
+  cameraSpaceZ: number,
+  wasEligible: boolean
 ): number {
-  if (isPriority) {
-    return 1.0;
-  }
-
-  // If currently hidden or fading out, require higher prominence threshold to become eligible
-  if (currentOpacity <= 0.05) {
-    return isFront && prominence >= ENTER_PROMINENCE_THRESHOLD ? 1.0 : 0.0;
-  }
-
-  // If currently visible or fading in, remain eligible until prominence drops below exit threshold
-  return isFront && prominence >= EXIT_PROMINENCE_THRESHOLD ? 1.0 : 0.0;
+  const threshold = wasEligible ? FRONT_EXIT_Z : FRONT_ENTER_Z;
+  return cameraSpaceZ <= threshold ? 1.0 : 0.0;
 }
 
 /**

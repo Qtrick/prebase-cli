@@ -3,35 +3,36 @@ import {
   computeLabelTargetOpacity,
   stepLabelFade,
   AreaFadeState,
-  ENTER_PROMINENCE_THRESHOLD,
-  EXIT_PROMINENCE_THRESHOLD,
+  FRONT_ENTER_Z,
+  FRONT_EXIT_Z,
 } from '../layout/labelFade';
 
 describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
   describe('computeLabelTargetOpacity', () => {
-    it('returns 1.0 immediately for priority (selected/hovered) areas regardless of depth', () => {
-      // Rear facing, zero prominence, but is priority
-      expect(computeLabelTargetOpacity(false, 0.1, true, 0.0)).toBe(1.0);
+    it('returns 1.0 in foreground (z <= FRONT_ENTER_Z) regardless of prior eligibility', () => {
+      expect(computeLabelTargetOpacity(-20, false)).toBe(1.0);
+      expect(computeLabelTargetOpacity(0, false)).toBe(1.0);
+      expect(computeLabelTargetOpacity(FRONT_ENTER_Z, false)).toBe(1.0);
+      expect(computeLabelTargetOpacity(FRONT_ENTER_Z, true)).toBe(1.0);
     });
 
-    it('requires prominence >= ENTER_THRESHOLD (0.38) when currently hidden (opacity <= 0.05)', () => {
-      // Just below enter threshold
-      expect(computeLabelTargetOpacity(true, ENTER_PROMINENCE_THRESHOLD - 0.03, false, 0.0)).toBe(0.0);
-      // At or above enter threshold
-      expect(computeLabelTargetOpacity(true, ENTER_PROMINENCE_THRESHOLD + 0.02, false, 0.0)).toBe(1.0);
+    it('returns 0.0 when rear-facing (z > FRONT_EXIT_Z), even if previously eligible', () => {
+      expect(computeLabelTargetOpacity(FRONT_EXIT_Z + 0.01, false)).toBe(0.0);
+      expect(computeLabelTargetOpacity(FRONT_EXIT_Z + 0.01, true)).toBe(0.0);
+      expect(computeLabelTargetOpacity(40, true)).toBe(0.0);
     });
 
-    it('implements depth hysteresis: stays visible until prominence drops below EXIT_THRESHOLD (0.28)', () => {
-      // Currently visible (opacity = 0.8)
-      // Prominence is between enter and exit thresholds
-      expect(computeLabelTargetOpacity(true, (ENTER_PROMINENCE_THRESHOLD + EXIT_PROMINENCE_THRESHOLD) / 2, false, 0.8)).toBe(1.0);
+    it('implements boundary hysteresis (FRONT_ENTER_Z < z <= FRONT_EXIT_Z) based on wasEligible', () => {
+      const midZ = (FRONT_ENTER_Z + FRONT_EXIT_Z) / 2;
+      // Hidden label stays hidden until z <= FRONT_ENTER_Z
+      expect(computeLabelTargetOpacity(FRONT_ENTER_Z + 0.01, false)).toBe(0.0);
+      expect(computeLabelTargetOpacity(midZ, false)).toBe(0.0);
+      expect(computeLabelTargetOpacity(FRONT_EXIT_Z, false)).toBe(0.0);
 
-      // Drops below exit threshold
-      expect(computeLabelTargetOpacity(true, EXIT_PROMINENCE_THRESHOLD - 0.03, false, 0.8)).toBe(0.0);
-    });
-
-    it('returns 0.0 when anchor is not front-facing', () => {
-      expect(computeLabelTargetOpacity(false, 0.5, false, 0.8)).toBe(0.0);
+      // Previously eligible label stays visible until z > FRONT_EXIT_Z
+      expect(computeLabelTargetOpacity(FRONT_ENTER_Z + 0.01, true)).toBe(1.0);
+      expect(computeLabelTargetOpacity(midZ, true)).toBe(1.0);
+      expect(computeLabelTargetOpacity(FRONT_EXIT_Z, true)).toBe(1.0);
     });
   });
 
@@ -81,15 +82,17 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
     });
 
     it('simulates full sequential multi-frame hysteresis rotation lifecycle', () => {
-      // Step 1: Label starts hidden at opacity 0.0
+      // Step 1: Label starts hidden (wasEligible = false) in the hysteresis band (z = 20)
       let opacity = 0.0;
-      let target = computeLabelTargetOpacity(true, 0.35, false, opacity);
-      // Prominence 0.35 < 0.38 (ENTER_THRESHOLD) -> stays hidden
+      let wasEligible = false;
+      let target = computeLabelTargetOpacity(20, wasEligible);
+      // z = 20 > FRONT_ENTER_Z (15) -> stays hidden
       expect(target).toBe(0.0);
 
-      // Step 2: Anchor rotates further forward to prominence 0.40 >= 0.38
-      target = computeLabelTargetOpacity(true, 0.40, false, opacity);
+      // Step 2: Anchor rotates further forward to z = 12 <= 15 (FRONT_ENTER_Z)
+      target = computeLabelTargetOpacity(12, wasEligible);
       expect(target).toBe(1.0);
+      wasEligible = true;
 
       // Step 3: Fades in partially over 50ms
       const state: AreaFadeState = { currentOpacity: opacity, targetOpacity: target, lastTimestamp: 1000 };
@@ -97,9 +100,9 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       opacity = state.currentOpacity;
       expect(opacity).toBeCloseTo(0.25, 2);
 
-      // Step 4: Subtle camera wobble causes prominence to dip to 0.32 (between EXIT 0.28 and ENTER 0.38)
-      // Because label is already visible (opacity = 0.25 > 0.05), target STAYS 1.0 (anti-flutter)
-      target = computeLabelTargetOpacity(true, 0.32, false, opacity);
+      // Step 4: Subtle camera wobble moves z to 20 (between FRONT_ENTER_Z 15 and FRONT_EXIT_Z 24)
+      // Because label was already eligible, target STAYS 1.0 (anti-flutter)
+      target = computeLabelTargetOpacity(20, wasEligible);
       expect(target).toBe(1.0);
 
       // Step 5: Advance remaining 150ms to reach full opacity 1.0
@@ -107,9 +110,10 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       opacity = state.currentOpacity;
       expect(opacity).toBe(1.0);
 
-      // Step 6: Rotates toward back: prominence drops to 0.24 < 0.28 (EXIT_THRESHOLD)
-      target = computeLabelTargetOpacity(true, 0.24, false, opacity);
+      // Step 6: Rotates toward back: z moves to 26 > 24 (FRONT_EXIT_Z)
+      target = computeLabelTargetOpacity(26, wasEligible);
       expect(target).toBe(0.0);
+      wasEligible = false;
 
       // Step 7: First frame after being idle at 1.0 clamps initial delta to 16ms (0.08 step -> 0.92)
       stepLabelFade(state, target, 1300, false, 200);
@@ -126,9 +130,9 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       opacity = state.currentOpacity;
       expect(opacity).toBe(0.0);
 
-      // Step 9: Re-entry gating: camera wobble moves prominence to 0.33
-      // Because opacity <= 0.05, prominence must cross ENTER_THRESHOLD (0.38) again; 0.33 remains 0.0
-      target = computeLabelTargetOpacity(true, 0.33, false, opacity);
+      // Step 9: Re-entry gating: camera wobble moves z back to 20
+      // Because wasEligible is false, z must cross FRONT_ENTER_Z (15) again; z = 20 remains 0.0
+      target = computeLabelTargetOpacity(20, wasEligible);
       expect(target).toBe(0.0);
     });
 
@@ -180,16 +184,15 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       expect(state.currentOpacity).toBeCloseTo(0.70, 2);
     });
 
-    it('reverses smoothly when priority is released on a rear-facing anchor', () => {
+    it('reverses smoothly when an anchor rotates rear-facing mid-fade', () => {
       const state: AreaFadeState = {
         currentOpacity: 0.0,
         targetOpacity: 0.0,
         lastTimestamp: 1000,
       };
 
-      // Rear-facing anchor (isFront = false, prominence = 0.1)
-      // 1. User hovers: isPriority = true -> target becomes 1.0
-      let target = computeLabelTargetOpacity(false, 0.1, true, state.currentOpacity);
+      // 1. Anchor enters foreground (z = 10 <= FRONT_ENTER_Z) -> target becomes 1.0
+      let target = computeLabelTargetOpacity(10, false);
       expect(target).toBe(1.0);
 
       // 2. First frame after idle at 0.0 clamps initial delta to 16ms (0.08), then 84ms reaches 0.50
@@ -198,8 +201,8 @@ describe('Smooth Area Label Fade Transitions (labelFade.ts)', () => {
       stepLabelFade(state, target, 1184, false, 200);
       expect(state.currentOpacity).toBeCloseTo(0.50, 2);
 
-      // 3. User unhovers: isPriority = false -> target becomes 0.0 immediately
-      target = computeLabelTargetOpacity(false, 0.1, false, state.currentOpacity);
+      // 3. Anchor rotates rear-facing (z = 26 > FRONT_EXIT_Z) -> target becomes 0.0 immediately
+      target = computeLabelTargetOpacity(26, true);
       expect(target).toBe(0.0);
 
       // 4. Smoothly fades back down to 0.0 over 100ms

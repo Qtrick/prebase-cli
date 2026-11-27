@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeAttachedLabelRect,
   isRectInsideViewport,
+  doesRectIntersectViewport,
   DEFAULT_LABEL_GAP,
   LabelPlacementAnchor,
 } from '../layout/labelPlacement';
@@ -168,6 +169,46 @@ describe('Stable Screen-Space Area Label Attachment & Viewport Helpers (labelPla
       const tinyViewport = { width: 300, height: 200 };
       const largeInsets = { left: 160, right: 160, top: 100, bottom: 100 };
       expect(isRectInsideViewport({ x1: 150, y1: 100, x2: 150, y2: 100 }, tinyViewport.width, tinyViewport.height, largeInsets)).toBe(false);
+    });
+  });
+
+  describe('doesRectIntersectViewport', () => {
+    const viewport = { width: 800, height: 600 };
+
+    it('returns true for partial edge overlaps on any of the four viewport edges', () => {
+      // Straddling left, right, top, and bottom edges
+      expect(doesRectIntersectViewport({ x1: -20, y1: 100, x2: 10, y2: 132 }, viewport.width, viewport.height)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 790, y1: 100, x2: 830, y2: 132 }, viewport.width, viewport.height)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 100, y1: -10, x2: 220, y2: 5 }, viewport.width, viewport.height)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 595, x2: 220, y2: 620 }, viewport.width, viewport.height)).toBe(true);
+    });
+
+    it('returns true for partial overlap with usable inset boundaries', () => {
+      const insets = { left: 40, right: 320, top: 64, bottom: 24 };
+      // Usable bounds: x in [40, 480], y in [64, 576]
+      expect(doesRectIntersectViewport({ x1: 10, y1: 100, x2: 45, y2: 130 }, viewport.width, viewport.height, insets)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 475, y1: 100, x2: 520, y2: 130 }, viewport.width, viewport.height, insets)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 40, x2: 200, y2: 70 }, viewport.width, viewport.height, insets)).toBe(true);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 570, x2: 200, y2: 600 }, viewport.width, viewport.height, insets)).toBe(true);
+    });
+
+    it('returns false when completely outside the viewport or usable inset area', () => {
+      // Outside raw viewport
+      expect(doesRectIntersectViewport({ x1: -120, y1: 100, x2: -1, y2: 132 }, viewport.width, viewport.height)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 801, y1: 100, x2: 920, y2: 132 }, viewport.width, viewport.height)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 100, y1: -40, x2: 220, y2: -1 }, viewport.width, viewport.height)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 601, x2: 220, y2: 640 }, viewport.width, viewport.height)).toBe(false);
+
+      // Inside raw viewport, but completely outside usable inset bounds (x in [40, 480], y in [64, 576])
+      const insets = { left: 40, right: 320, top: 64, bottom: 24 };
+      expect(doesRectIntersectViewport({ x1: 0, y1: 100, x2: 40, y2: 130 }, viewport.width, viewport.height, insets)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 480, y1: 100, x2: 600, y2: 130 }, viewport.width, viewport.height, insets)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 10, x2: 200, y2: 64 }, viewport.width, viewport.height, insets)).toBe(false);
+      expect(doesRectIntersectViewport({ x1: 100, y1: 576, x2: 200, y2: 599 }, viewport.width, viewport.height, insets)).toBe(false);
+
+      // Degenerate/inverted inset bounds (usable width or height <= 0)
+      const largeInsets = { left: 200, right: 200, top: 100, bottom: 100 };
+      expect(doesRectIntersectViewport({ x1: 0, y1: 0, x2: 400, y2: 300 }, 300, 250, largeInsets)).toBe(false);
     });
   });
 });

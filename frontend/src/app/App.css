@@ -649,7 +649,7 @@ body,
   text-align: left;
 }
 
-.menu-item > svg:last-child:not(:first-child) {
+.menu-item>svg:last-child:not(:first-child) {
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -1344,6 +1344,7 @@ body,
   .inspector-reopen-btn .btn-label {
     display: none;
   }
+
   .inspector-reopen-btn {
     padding: 5px;
   }
@@ -3471,9 +3472,11 @@ button:focus-visible,
   .mode-full-label {
     display: none;
   }
+
   .mode-short-label {
     display: inline;
   }
+
   .crumb-target.truncate,
   .crumb-text.truncate {
     max-width: 200px;
@@ -3484,16 +3487,20 @@ button:focus-visible,
   .toolbar-btn .btn-label {
     display: none;
   }
+
   .action-btn-group .btn-secondary {
     display: none;
   }
+
   .crumb-target.truncate,
   .crumb-text.truncate {
     max-width: 140px;
   }
+
   .primary-toolbar {
     padding: 6px 12px;
   }
+
   .toolbar-menu-anchor:not(:first-child) .toolbar-dropdown-menu {
     left: auto;
     right: 0;
@@ -3504,6 +3511,7 @@ button:focus-visible,
   .mode-short-label {
     display: none;
   }
+
   .primary-toolbar {
     padding: 6px 10px;
   }

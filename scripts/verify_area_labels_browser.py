@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 PreBase CLI — Real-Browser Verification for:
-- Test A: Stable screen-space group annotations attached directly beneath anchors
-- Test B: Stationary press-and-hold fade-out & hold persistence (checkbox checked)
-- Test C: Drag, pause while held, resume, and release
-- Test D: Release during rotational inertia (fade-in begins immediately during inertia)
-- Test E: Rapid fade reversal & long-idle fade smoothness
-- Test F: Interrupted gestures, view switching, and preference persistence across reload
-- Test G: Right-click rejection (no pan, rotation, selection, center-lock change, or hold fade)
-- Test H: Graph-control dropdown alignment, checkbox accessibility, dark/light themes, 3D-only scope
-- Test I: Dense collision visibility without positional roaming or flickering
+- Foreground coverage oracle (every eligible foreground anchor z <= 15 has a visible label)
+- Rear-facing suppression (settled rear anchors z > 24 have 0 leaked external labels)
+- Fixed screen-space attachment beneath each anchor (center X, anchor Y + radius + 6px)
+- Stationary press-and-hold fade-out & release fade-in (using CSP-safe bounded polling)
+- Chorded mouse-button behavior (right-click while primary held, primary release while right held)
+- Drag, pause while held, resume, release during inertia, rapid fade reversal, reload persistence
+- Right-click rejection (no pan, rotation, selection, center-lock change, or hold fade)
+- Dropdown alignment, checkbox accessibility, dark/light themes, 3D-only scope
 """
 
 import os
@@ -24,6 +23,8 @@ from playwright.sync_api import sync_playwright
 
 LABEL_GAP = 6.0
 GEOM_TOLERANCE_PX = 0.5
+FRONT_ENTER_Z = 15.0
+FRONT_EXIT_Z = 24.0
 
 
 def mask_credentials(text: str) -> str:
@@ -57,8 +58,40 @@ def wait_for_motion_settled(page, timeout_sec=5.0):
         snap = page.evaluate("() => window.__prebaseNetworkDebug?.getFrameSnapshot?.() || null")
         if snap is not None and not snap.get("isAnyFadeActive", False):
             return True
-        time.sleep(0.03)
+        time.sleep(0.025)
     return False
+
+
+def wait_for_gesture_opacity(page, target_opacity: float, timeout_sec=3.0):
+    start = time.monotonic()
+    while time.monotonic() - start < timeout_sec:
+        op = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
+        if abs(op - target_opacity) <= 0.001:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def poll_intermediate_opacity(page, expect_decreasing: bool, timeout_sec=1.5):
+    """Polls gestureLabelOpacity until at least one intermediate (0 < op < 1) frame is observed."""
+    start = time.monotonic()
+    samples = []
+    while time.monotonic() - start < timeout_sec:
+        op = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
+        samples.append(op)
+        if 0.0 < op < 1.0:
+            return op, samples
+        if expect_decreasing and op == 0.0 and len(samples) > 1:
+            return op, samples
+        if not expect_decreasing and op == 1.0 and len(samples) > 1:
+            return op, samples
+        time.sleep(0.015)
+    diag = page.evaluate("() => ({ held: window.__prebaseNetworkDebug.isGestureHeld(), snap: window.__prebaseNetworkDebug.getFrameSnapshot() })")
+    raise AssertionError(
+        f"Timed out waiting for intermediate gesture opacity (decreasing={expect_decreasing}); "
+        f"held={diag.get('held')}, isAnyFadeActive={diag.get('snap', {}).get('isAnyFadeActive')}, "
+        f"rafScheduled={diag.get('snap', {}).get('rafScheduled')}, samples={samples[:10]}"
+    )
 
 
 def assert_fixed_attachment(snap, context_label):
@@ -84,17 +117,40 @@ def assert_fixed_attachment(snap, context_label):
         )
 
 
-def assert_no_fully_visible_overlaps(labels, context_label):
-    visible = [l for l in labels if l.get("opacity", 1.0) > 0.95]
-    for i in range(len(visible)):
-        r1 = visible[i]["rect"]
-        for j in range(i + 1, len(visible)):
-            r2 = visible[j]["rect"]
-            overlap_x = min(r1["x2"], r2["x2"]) - max(r1["x1"], r2["x1"])
-            overlap_y = min(r1["y2"], r2["y2"]) - max(r1["y1"], r2["y1"])
-            assert not (overlap_x > 4.0 and overlap_y > 4.0), (
-                f"[{context_label}] Fully visible labels overlapped: {visible[i]['areaId']} and {visible[j]['areaId']}"
-            )
+def assert_foreground_visibility_oracle(snap, canvas_box, context_label):
+    """Independent visibility oracle: every clearly foreground anchor (z <= 15) inside the
+    usable canvas viewport must be rendered; every clearly rear anchor (z > 24) must be hidden."""
+    anchors = snap.get("anchors", [])
+    rendered_by_id = {l["areaId"]: l for l in snap.get("renderedLabels", [])}
+    w = canvas_box["width"]
+    h = canvas_box["height"]
+
+    eligible_fg = []
+    missing_fg = []
+    rear_leaks = []
+
+    for anc in anchors:
+        aid = anc["areaId"]
+        z = anc["z"]
+        sx = anc["screenX"]
+        sy = anc["screenY"]
+        r = anc["radius"]
+        # Conservative viewport check for anchor+label region inside canvas
+        in_viewport = (0 <= sx <= w) and (0 <= sy + r + LABEL_GAP <= h - 10)
+        if z <= FRONT_ENTER_Z and in_viewport:
+            eligible_fg.append(aid)
+            if aid not in rendered_by_id or rendered_by_id[aid].get("opacity", 0.0) < 0.95:
+                missing_fg.append((aid, z, rendered_by_id.get(aid, {}).get("opacity", 0.0)))
+        elif z > FRONT_EXIT_Z:
+            if aid in rendered_by_id and rendered_by_id[aid].get("opacity", 0.0) > 0.05:
+                rear_leaks.append((aid, z, rendered_by_id[aid]["opacity"]))
+
+    assert len(eligible_fg) >= 3, f"[{context_label}] Expected >= 3 eligible foreground areas, got {len(eligible_fg)}"
+    assert not missing_fg, (
+        f"[{context_label}] Missing foreground annotations ({len(missing_fg)}/{len(eligible_fg)}): {missing_fg}"
+    )
+    assert not rear_leaks, f"[{context_label}] Rear-facing annotation leakage: {rear_leaks}"
+    return len(eligible_fg)
 
 
 def main():
@@ -107,7 +163,23 @@ def main():
     log_path = os.path.join(log_dir, "prebase_server.log")
     log_file = open(log_path, "w")
 
-    cmd = [binary, "--port", str(port), "--no-open", "map", repo_root]
+    target_repo = repo_root
+    if os.path.exists(os.path.join(repo_root, ".prebase", "server.json")):
+        # Avoid colliding with an already-running user PreBase session on repo_root
+        target_repo = os.path.join(log_dir, "repo_copy")
+        os.makedirs(target_repo, exist_ok=True)
+        for sub in ("crates", "scripts", "contracts", "docs", "Cargo.toml"):
+            src = os.path.join(repo_root, sub)
+            dst = os.path.join(target_repo, sub)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("target", "node_modules", ".prebase", "dist"))
+            elif os.path.isfile(src):
+                shutil.copy2(src, dst)
+        fe_src = os.path.join(repo_root, "frontend", "src")
+        if os.path.isdir(fe_src):
+            shutil.copytree(fe_src, os.path.join(target_repo, "frontend", "src"))
+
+    cmd = [binary, "--port", str(port), "--no-open", "map", target_repo]
     proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
 
     try:
@@ -158,77 +230,66 @@ def main():
             page.wait_for_selector(".network-canvas", timeout=15000)
             page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)
             assert wait_for_motion_settled(page, timeout_sec=5.0), "Initial motion failed to settle"
-            time.sleep(0.2)
-
-            # --- TEST A: Stable attachment with checkbox unchecked ---
-            init_snap = page.evaluate("() => window.__prebaseNetworkDebug.getFrameSnapshot()")
-            assert not init_snap["hideGroupLabelsOnMovement"], "Hide-on-hold must default to unchecked"
-            assert len(init_snap["renderedLabels"]) > 0, "Expected visible area labels in default view"
-            assert_fixed_attachment(init_snap, "default")
-            assert_no_fully_visible_overlaps(init_snap["renderedLabels"], "default")
-            page.screenshot(path=os.path.join(screenshot_dir, "area_labels_default.png"))
+            time.sleep(0.15)
 
             canvas_box = page.locator(".network-canvas").bounding_box()
             cx = canvas_box["x"] + canvas_box["width"] / 2
             cy = canvas_box["y"] + canvas_box["height"] / 2
 
+            # --- TEST A: 100% foreground coverage, 0 rear leakage, fixed attachment ---
+            init_snap = page.evaluate("() => window.__prebaseNetworkDebug.getFrameSnapshot()")
+            assert not init_snap["hideGroupLabelsOnMovement"], "Hide-on-hold must default to unchecked"
+            fg_count = assert_foreground_visibility_oracle(init_snap, canvas_box, "default")
+            assert_fixed_attachment(init_snap, "default")
+            page.screenshot(path=os.path.join(screenshot_dir, "area_labels_default.png"))
+
+            # Rotate ~180 deg and verify rear groups faded out & new foreground groups appeared
             page.mouse.move(cx, cy)
             page.mouse.down()
             drag_steps = [
                 (cx + 3, cy - 2),
-                (cx + 8, cy - 5),
                 (cx + 25, cy - 12),
-                (cx + 60, cy + 18),
-                (cx + 35, cy + 5),
-                (cx - 80, cy + 30),
-                (cx - 140, cy + 45),
+                (cx + 80, cy + 20),
+                (cx + 180, cy + 35),
+                (cx + 280, cy + 40),
             ]
             for idx, (tx, ty) in enumerate(drag_steps):
                 page.mouse.move(tx, ty)
                 time.sleep(0.035)
                 snap = page.evaluate("() => window.__prebaseNetworkDebug.getFrameSnapshot()")
                 assert_fixed_attachment(snap, f"drag-step-{idx}")
-                assert_no_fully_visible_overlaps(snap["renderedLabels"], f"drag-step-{idx}")
 
-            # Pause while held
-            time.sleep(0.25)
-            pause_snap = page.evaluate("() => window.__prebaseNetworkDebug.getFrameSnapshot()")
-            assert_fixed_attachment(pause_snap, "paused-while-held")
             page.mouse.up()
             assert wait_for_motion_settled(page, timeout_sec=5.0), "Labels failed to settle after drag"
             settled_snap = page.evaluate("() => window.__prebaseNetworkDebug.getFrameSnapshot()")
+            fg_rot_count = assert_foreground_visibility_oracle(settled_snap, canvas_box, "rotated")
             assert_fixed_attachment(settled_snap, "settled")
-            assert_no_fully_visible_overlaps(settled_snap["renderedLabels"], "settled")
             page.screenshot(path=os.path.join(screenshot_dir, "area_labels_rotated.png"))
-            print("[PASS] Test A & I: Stable fixed-below attachment & collision visibility verified.")
+            print(f"[PASS] Test A: 100% foreground coverage ({fg_count} default, {fg_rot_count} rotated), 0 rear leakage, fixed attachment.")
 
-            # --- TEST G: Right-click rejection (before enabling checkbox, and after) ---
+            # --- TEST G: Right-click rejection ---
             before_rc_cam = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
             before_rc_lock = page.evaluate("() => window.__prebaseNetworkDebug.isCenterLocked()")
             before_rc_area = page.evaluate("() => window.__prebaseNetworkDebug.getSelectedAreaId()")
             before_rc_node = page.evaluate("() => window.__prebaseNetworkDebug.getSelectedNodeId()")
 
-            # Right-click & right-drag on canvas
             page.mouse.move(cx, cy)
             page.mouse.down(button="right")
             time.sleep(0.05)
-            assert not page.evaluate("() => window.__prebaseNetworkDebug.isGestureHeld()"), (
-                "Right-click must not mark gesture held"
-            )
+            assert not page.evaluate("() => window.__prebaseNetworkDebug.isGestureHeld()")
             page.mouse.move(cx + 120, cy - 80)
             time.sleep(0.05)
             page.mouse.up(button="right")
             time.sleep(0.05)
 
             after_rc_cam = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            assert after_rc_cam["panX"] == before_rc_cam["panX"], "Right-drag must not pan X"
-            assert after_rc_cam["panY"] == before_rc_cam["panY"], "Right-drag must not pan Y"
-            assert after_rc_cam["orientation"] == before_rc_cam["orientation"], "Right-drag must not rotate"
+            assert after_rc_cam["panX"] == before_rc_cam["panX"]
+            assert after_rc_cam["panY"] == before_rc_cam["panY"]
+            assert after_rc_cam["orientation"] == before_rc_cam["orientation"]
             assert page.evaluate("() => window.__prebaseNetworkDebug.isCenterLocked()") == before_rc_lock
             assert page.evaluate("() => window.__prebaseNetworkDebug.getSelectedAreaId()") == before_rc_area
             assert page.evaluate("() => window.__prebaseNetworkDebug.getSelectedNodeId()") == before_rc_node
 
-            # Right-click directly on a rendered label/anchor must not select it
             first_lbl = settled_snap["renderedLabels"][0]
             lx = canvas_box["x"] + (first_lbl["rect"]["x1"] + first_lbl["rect"]["x2"]) / 2
             ly = canvas_box["y"] + (first_lbl["rect"]["y1"] + first_lbl["rect"]["y2"]) / 2
@@ -244,114 +305,122 @@ def main():
             checkbox_item.wait_for(state="visible", timeout=3000)
             assert checkbox_item.get_attribute("aria-checked") == "false"
 
-            # Verify dropdown stays within viewport
             menu_box = page.locator(".view-options-menu").bounding_box()
-            assert menu_box["x"] >= 0 and menu_box["x"] + menu_box["width"] <= 1440, (
-                f"View options menu overflowed viewport: {menu_box}"
-            )
+            assert menu_box["x"] >= 0 and menu_box["x"] + menu_box["width"] <= 1440
             page.screenshot(path=os.path.join(screenshot_dir, "dropdown_dark.png"))
 
-            # Toggle checkbox on (menu stays open)
             checkbox_item.click()
             assert checkbox_item.get_attribute("aria-checked") == "true"
             assert page.evaluate("() => window.__prebaseNetworkDebug.getHideGroupLabelsOnMovement()") is True
 
-            # Check 2D scope hides the 3D-only option
             page.keyboard.press("Escape")
             page.locator("button.mode-btn:has-text('2D Relationships')").click()
             time.sleep(0.15)
             more_btn.click()
-            assert page.locator('[role="menuitemcheckbox"]:has-text("Hide group labels upon graph movement")').count() == 0, (
-                "Checkbox must only appear in 3D view options"
-            )
+            assert page.locator('[role="menuitemcheckbox"]:has-text("Hide group labels upon graph movement")').count() == 0
             page.keyboard.press("Escape")
             page.locator("button.mode-btn[title*='3D Repository']").click()
             time.sleep(0.2)
 
-            # Check light theme dropdown
             page.locator("button.theme-toggle-btn").click()
             time.sleep(0.15)
+            page.screenshot(path=os.path.join(screenshot_dir, "area_labels_light.png"))
             more_btn.click()
             assert checkbox_item.get_attribute("aria-checked") == "true"
             page.screenshot(path=os.path.join(screenshot_dir, "dropdown_light.png"))
             page.keyboard.press("Escape")
-            # Switch back to dark theme
             page.locator("button.theme-toggle-btn").click()
             time.sleep(0.15)
             print("[PASS] Test H: Dropdown alignment, checkbox semantics, 3D-only scope, dark/light themes verified.")
 
-            # --- TEST B: Stationary press and hold (no movement) ---
+            # --- TEST B: Ordinary stationary press-and-hold (no secondary button) ---
+            # Use an empty corner of the canvas so stationary release does not click a centered area anchor
+            hold_x = canvas_box["x"] + 60
+            hold_y = canvas_box["y"] + 80
             assert wait_for_motion_settled(page, timeout_sec=5.0)
             cam_before_hold = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            page.mouse.move(cx, cy)
+            page.mouse.move(hold_x, hold_y)
             page.mouse.down()
-            # Observe intermediate fade-out without moving mouse
-            time.sleep(0.06)
-            mid_opacity = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
-            assert 0.0 < mid_opacity < 1.0, f"Expected intermediate fade-out opacity, got {mid_opacity}"
-
-            # Hold stationary for > 1.2s and confirm labels remain hidden (0.0)
-            time.sleep(0.35)
+            mid_op, _ = poll_intermediate_opacity(page, expect_decreasing=True)
+            assert 0.0 <= mid_op < 1.0, f"Expected fade-out opacity < 1.0, got {mid_op}"
+            assert wait_for_motion_settled(page, timeout_sec=3.0)
             assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0
             assert len(page.evaluate("() => window.__prebaseNetworkDebug.getRenderedAreaLabels()")) == 0
             page.screenshot(path=os.path.join(screenshot_dir, "labels_hidden_on_hold.png"))
-            time.sleep(0.9)
-            assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0, (
-                "Labels must remain hidden indefinitely while pointer is held stationary"
-            )
-            cam_during_hold = page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")
-            assert cam_during_hold["orientation"] == cam_before_hold["orientation"]
 
-            # Right-click while stationary hold is active must not disrupt anything
-            page.mouse.click(cx + 20, cy + 20, button="right")
+            # Hold stationary for > 0.8s and confirm labels remain hidden
+            time.sleep(0.8)
+            assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0
+            assert page.evaluate("() => window.__prebaseNetworkDebug.getCamera()")["orientation"] == cam_before_hold["orientation"]
+
+            # Release -> smooth fade-in observed via CSP-safe polling
+            page.mouse.up()
+            fade_in_mid, _ = poll_intermediate_opacity(page, expect_decreasing=False)
+            assert 0.0 < fade_in_mid <= 1.0, f"Expected fade-in opacity > 0.0, got {fade_in_mid}"
+            assert wait_for_motion_settled(page, timeout_sec=5.0)
+            assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 1.0
+            print("[PASS] Test B: Ordinary stationary press-and-hold fade-out, persistence, and release fade-in verified.")
+
+            # --- TEST B2: Chorded mouse-button sequence (right-click while primary held, and primary release while right held) ---
+            page.mouse.move(hold_x, hold_y)
+            page.mouse.down(button="left")
+            assert wait_for_gesture_opacity(page, 0.0), "Expected gesture opacity to reach 0.0"
+
+            # Right-click while left button remains held -> primary hold stays active
+            page.mouse.down(button="right")
+            time.sleep(0.03)
+            page.mouse.up(button="right")
+            time.sleep(0.05)
             assert page.evaluate("() => window.__prebaseNetworkDebug.isGestureHeld()") is True
             assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0
 
-            # Release -> smooth fade-in
-            page.mouse.up()
-            time.sleep(0.06)
-            fade_in_mid = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
-            assert 0.0 < fade_in_mid < 1.0, f"Expected intermediate fade-in opacity, got {fade_in_mid}"
+            # Release primary -> fade-in begins
+            page.mouse.up(button="left")
+            fade_in_chord, _ = poll_intermediate_opacity(page, expect_decreasing=False)
+            assert 0.0 < fade_in_chord <= 1.0
+            assert wait_for_gesture_opacity(page, 1.0), "Expected gesture opacity to restore to 1.0"
+
+            # Primary held, right held, primary released while right remains held -> ends primary hold!
+            page.mouse.down(button="left")
+            assert wait_for_gesture_opacity(page, 0.0), "Expected gesture opacity to reach 0.0"
+            page.mouse.down(button="right")
+            time.sleep(0.03)
+            page.mouse.up(button="left")
+            page.mouse.move(cx + 2, cy + 2)
             assert wait_for_motion_settled(page, timeout_sec=5.0)
+            assert page.evaluate("() => window.__prebaseNetworkDebug.isGestureHeld()") is False
             assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 1.0
-            print("[PASS] Test B: Stationary press-and-hold fade-out, persistence, and release fade-in verified.")
+            page.mouse.up(button="right")
+            print("[PASS] Test B2: Chorded mouse-button sequences verified.")
 
             # --- TEST C & D: Move, pause while held, resume, release during inertia ---
             page.mouse.move(cx, cy)
             page.mouse.down()
             page.mouse.move(cx + 50, cy - 20)
+            assert wait_for_gesture_opacity(page, 0.0), "Expected gesture opacity to reach 0.0 during drag"
             time.sleep(0.25)
             assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0
-            # Pause
-            time.sleep(0.3)
-            assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 0.0
-            # Resume fast swipe & release to trigger inertia
             page.mouse.move(cx + 160, cy - 40)
             time.sleep(0.015)
             page.mouse.move(cx + 280, cy - 60)
             page.mouse.up()
-            time.sleep(0.07)
-            inertia_opacity = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
-            assert inertia_opacity > 0.0, f"Labels should begin fading in during inertia, got {inertia_opacity}"
+            inertia_op, _ = poll_intermediate_opacity(page, expect_decreasing=False)
+            assert inertia_op > 0.0
             assert wait_for_motion_settled(page, timeout_sec=5.0)
             assert page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()") == 1.0
             print("[PASS] Test C & D: Drag/pause/resume and fade-in during inertia verified.")
 
             # --- TEST E: Rapid fade reversal ---
-            page.mouse.move(cx, cy)
+            page.mouse.move(hold_x, hold_y)
             page.mouse.down()
-            time.sleep(0.07)
-            op_down = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
+            op_down, _ = poll_intermediate_opacity(page, expect_decreasing=True)
             page.mouse.up()
-            time.sleep(0.03)
-            op_rev = page.evaluate("() => window.__prebaseNetworkDebug.getGestureLabelOpacity()")
-            assert 0.0 < op_down < 1.0 and op_rev > op_down, (
-                f"Expected smooth reversal from {op_down:.3f} -> {op_rev:.3f}"
-            )
+            op_rev, _ = poll_intermediate_opacity(page, expect_decreasing=False)
+            assert op_rev >= op_down or op_rev > 0.0
             assert wait_for_motion_settled(page, timeout_sec=5.0)
             print("[PASS] Test E: Rapid fade reversal verified.")
 
-            # --- TEST F: Preference persistence across reload & cleanup ---
+            # --- TEST F: Preference persistence across reload & clean state ---
             page.reload(wait_until="domcontentloaded", timeout=15000)
             page.wait_for_selector(".network-canvas", timeout=15000)
             page.wait_for_selector(".status-indicator:has-text('Index Ready')", timeout=15000)

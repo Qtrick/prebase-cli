@@ -67,7 +67,7 @@ import { computeAreaMonograms } from '../../utils/monogramDisambiguation';
 import { fitTextEnd, fitTextMiddle } from '../../utils/textFitting';
 import {
   computeAttachedLabelRect,
-  isRectInsideViewport,
+  doesRectIntersectViewport,
   DEFAULT_LABEL_GAP,
 } from './layout/labelPlacement';
 import {
@@ -249,6 +249,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     startCamera: NetworkCamera;
     pointerId: number | null;
     pointerType: string;
+    button: number;
     exceededThreshold: boolean;
   }>({
     active: false,
@@ -258,6 +259,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     startCamera: { ...cameraRef.current },
     pointerId: null,
     pointerType: 'mouse',
+    button: 0,
     exceededThreshold: false,
   });
 
@@ -1398,7 +1400,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
         }
 
-        // 4.5 Draw Architectural Area Labels (Fixed Anchor Attachment + Collision Visibility + Hold Fade)
+        // 4.5 Draw Architectural Area Labels (Fixed Anchor Attachment + Foreground Depth Visibility + Hold Fade)
         isAnyLabelTransitionActive = false;
         renderedAreaLabelsRef.current.clear();
 
@@ -1406,7 +1408,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           const now = timestamp || performance.now();
           const fadeMap = labelFadeStatesRef.current;
           const metricsCache = areaLabelMetricsCacheRef.current;
-          const intendedLabelsGrid = new LabelCollisionGrid(90);
 
           const shouldHideOnHold =
             hideGroupLabelsOnMovementRef.current && isGraphGestureHeldRef.current;
@@ -1422,25 +1423,18 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
           }
           const gestureOpacity = gestureLabelFadeRef.current.currentOpacity;
 
-          // Populate intendedLabelsGrid with all area anchor badges so labels never cover anchor monograms
-          for (const a of areaAnchorsMap.values()) {
-            intendedLabelsGrid.insert({
-              x1: a.screenX - a.radius - 2,
-              y1: a.screenY - a.radius - 2,
-              x2: a.screenX + a.radius + 2,
-              y2: a.screenY + a.radius + 2,
-            });
-          }
-
-          // Deterministic priority order: selected > hovered > file count > area id
+          // Painter's order: draw farther anchors first, nearer anchors on top,
+          // and hovered/selected anchors last on top.
           const allAnchors = Array.from(areaAnchorsMap.values());
           allAnchors.sort((a, b) => {
-            if (a.area.id === selectedAreaId) return -1;
-            if (b.area.id === selectedAreaId) return 1;
-            if (a.area.id === hoveredAreaId) return -1;
-            if (b.area.id === hoveredAreaId) return 1;
-            if (b.area.fileCount !== a.area.fileCount) {
-              return b.area.fileCount - a.area.fileCount;
+            const aSel = a.area.id === selectedAreaId ? 1 : 0;
+            const bSel = b.area.id === selectedAreaId ? 1 : 0;
+            if (aSel !== bSel) return aSel - bSel;
+            const aHov = a.area.id === hoveredAreaId ? 1 : 0;
+            const bHov = b.area.id === hoveredAreaId ? 1 : 0;
+            if (aHov !== bHov) return aHov - bHov;
+            if (Math.abs(b.proj.z - a.proj.z) > 1e-4) {
+              return b.proj.z - a.proj.z;
             }
             return a.area.id.localeCompare(b.area.id);
           });
@@ -1452,7 +1446,6 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             const pAnchor = allAnchors[i];
             const isSelected = pAnchor.area.id === selectedAreaId;
             const isHovered = pAnchor.area.id === hoveredAreaId;
-            const isPriority = isSelected || isHovered;
 
             // Cached label text measurements (zero per-frame ctx.measureText on cache hit)
             const countText =
@@ -1482,35 +1475,12 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             const rect = computeAttachedLabelRect(pAnchor, boxWidth, boxHeight, DEFAULT_LABEL_GAP);
 
             const existingFadeState = fadeMap.get(pAnchor.area.id);
-            const currentIndividualOpacity = existingFadeState ? existingFadeState.currentOpacity : 0.0;
+            const wasEligible = existingFadeState ? existingFadeState.targetOpacity > 0.5 : pAnchor.isFront;
 
-            const depthTarget = computeLabelTargetOpacity(
-              pAnchor.isFront,
-              pAnchor.depthShading.prominence,
-              isPriority,
-              currentIndividualOpacity
-            );
+            const depthTarget = computeLabelTargetOpacity(pAnchor.proj.z, wasEligible);
+            const viewportEligible = doesRectIntersectViewport(rect, width, height, insets);
+            const targetOpacity = depthTarget > 0.5 && viewportEligible ? 1.0 : 0.0;
 
-            const viewportEligible = isPriority
-              ? rect.x2 > 0 && rect.x1 < width && rect.y2 > 0 && rect.y1 < height
-              : isRectInsideViewport(rect, width, height, insets, 2);
-
-            let collisionEligible = true;
-            if (!isPriority && depthTarget > 0.5 && viewportEligible) {
-              const wasVisible = currentIndividualOpacity > 0.05;
-              // Hysteresis: stricter margin to enter, small tolerance to stay visible
-              collisionEligible = wasVisible
-                ? intendedLabelsGrid.queryOverlapArea(rect, 0) <= 16
-                : intendedLabelsGrid.queryOverlapArea(rect, 3) <= 2;
-            }
-
-            const intendedVisible = depthTarget > 0.5 && viewportEligible && collisionEligible;
-            if (intendedVisible) {
-              intendedLabelsGrid.insert(rect);
-              obstacleGrid.insert(rect);
-            }
-
-            const targetOpacity = intendedVisible ? 1.0 : 0.0;
             let fadeState = existingFadeState;
             if (!fadeState) {
               fadeState = {
@@ -1536,6 +1506,11 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               continue;
             }
 
+            // Only visibly rendered group annotations reserve space against individual file labels
+            if (effectiveOpacity > 0.1) {
+              obstacleGrid.insert(rect);
+            }
+
             renderedAreaLabelsRef.current.set(pAnchor.area.id, {
               areaId: pAnchor.area.id,
               name: pAnchor.area.name,
@@ -1545,9 +1520,9 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             });
 
             ctx.save();
-            ctx.globalAlpha = (isLight ? 0.94 : 0.90) * effectiveOpacity;
+            ctx.globalAlpha = effectiveOpacity;
 
-            // Calm, minimal annotation backing
+            // Translucent annotation content block (separate from crisp text opacity)
             ctx.beginPath();
             if (ctx.roundRect) {
               ctx.roundRect(rect.x1, rect.y1, boxWidth, boxHeight, 5);
@@ -1555,10 +1530,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
               ctx.rect(rect.x1, rect.y1, boxWidth, boxHeight);
             }
             ctx.fillStyle = isSelected
-              ? (isLight ? 'rgba(238, 242, 255, 0.96)' : 'rgba(28, 33, 52, 0.92)')
+              ? (isLight ? 'rgba(238, 242, 255, 0.84)' : 'rgba(28, 33, 52, 0.76)')
               : isHovered
-                ? (isLight ? 'rgba(240, 249, 255, 0.96)' : 'rgba(20, 32, 46, 0.90)')
-                : (isLight ? 'rgba(248, 250, 252, 0.84)' : 'rgba(13, 16, 22, 0.76)');
+                ? (isLight ? 'rgba(240, 249, 255, 0.82)' : 'rgba(20, 32, 46, 0.72)')
+                : (isLight ? 'rgba(248, 250, 252, 0.58)' : 'rgba(13, 16, 22, 0.48)');
             ctx.fill();
 
             if (isSelected || isHovered) {
@@ -1572,18 +1547,22 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
             // Area name
             const textCenterX = (rect.x1 + rect.x2) / 2;
             ctx.font = areaFont;
-            ctx.fillStyle = isLight ? '#0f172a' : '#eef1f6';
+            ctx.fillStyle = isLight ? '#0f172a' : '#f1f5f9';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
             ctx.fillText(labelText, textCenterX, rect.y1 + 3);
 
             // File count
             ctx.font = countFont;
-            ctx.fillStyle = isLight ? '#64748b' : '#8b95a5';
+            ctx.fillStyle = isLight ? '#475569' : '#9ca6b6';
             ctx.fillText(countText, textCenterX, rect.y1 + 16);
 
             ctx.restore();
           }
+        } else if (!isGraphGestureHeldRef.current) {
+          // Ensure global gesture opacity does not remain stranded at 0 when outside overview scope
+          gestureLabelFadeRef.current.currentOpacity = 1.0;
+          gestureLabelFadeRef.current.targetOpacity = 1.0;
         }
 
         // 5. Draw Node Labels (Spatial Collision Grid)
@@ -1932,8 +1911,10 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       }
       if (bestArea) return bestArea;
 
-      // Exact rendered label pill hit-testing aligned with renderedAreaLabelsRef
-      for (const rendered of renderedAreaLabelsRef.current.values()) {
+      // Exact rendered label pill hit-testing in reverse draw order (topmost visible label first)
+      const renderedLabels = Array.from(renderedAreaLabelsRef.current.values());
+      for (let i = renderedLabels.length - 1; i >= 0; i--) {
+        const rendered = renderedLabels[i];
         if (rendered.opacity <= 0.1) continue;
         const { rect } = rendered;
         if (
@@ -2037,6 +2018,7 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
       startCamera: { ...cameraRef.current },
       pointerId: e.pointerId,
       pointerType: e.pointerType,
+      button: e.button,
       exceededThreshold: false,
     };
 
@@ -2057,6 +2039,15 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
   const handlePointerMove = (e: React.PointerEvent) => {
     const gesture = gestureRef.current;
     if (gesture.active && gesture.pointerId === e.pointerId) {
+      // Handle chorded-button release when another button (e.g., right-click) remains held
+      if (
+        e.pointerType === 'mouse' &&
+        ((gesture.button === 0 && (e.buttons & 1) === 0) ||
+          (gesture.button === 1 && (e.buttons & 4) === 0))
+      ) {
+        cleanUpPointerGesture(e);
+        return;
+      }
       const dx = e.clientX - gesture.startX;
       const dy = e.clientY - gesture.startY;
 
@@ -2217,6 +2208,14 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     if (!gesture.active || gesture.pointerId !== e.pointerId) {
       return;
     }
+    // If a secondary button is released while the initiating button remains held, keep the gesture active
+    if (
+      e.pointerType === 'mouse' &&
+      ((gesture.button === 0 && e.button !== 0 && (e.buttons & 1) !== 0) ||
+        (gesture.button === 1 && e.button !== 1 && (e.buttons & 4) !== 0))
+    ) {
+      return;
+    }
     const wasDragging = gesture.exceededThreshold;
     const previousMode = gesture.mode;
 
@@ -2334,8 +2333,8 @@ export const NetworkCanvas: React.FC<NetworkCanvasProps> = ({
     cleanUpPointerGesture(e);
   };
 
-  const handleLostPointerCapture = (e: React.PointerEvent) => {
-    cleanUpPointerGesture(e);
+  const handleLostPointerCapture = () => {
+    cleanUpPointerGesture();
   };
 
   // Window blur / visibility change / unmount cleanup
